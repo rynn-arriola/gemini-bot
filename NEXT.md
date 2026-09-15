@@ -1,6 +1,6 @@
 # Next work
 
-The bot is stopped pending the final launch step. The pre-send-intent, WebSocket and manual-close repairs are complete. Authenticated server history uniquely matched both earlier manual SELLs; conservative taker-fee upper bounds make the current six-hour risk replay complete without understating loss. The owner explicitly authorized restart after validation. Create a fresh policy/build/account-bound permit, run a final read-only preparation, then start exactly one native-Windows supervisor.
+The bot is live under one native-Windows supervisor from commit `8260f95`. The pre-send-intent, WebSocket and manual-close repairs are complete. Authenticated server history uniquely matched both earlier manual SELLs; conservative taker-fee upper bounds make the current six-hour risk replay complete without understating loss. Monitor the first fill under this release, its immediate sibling cancellation, exact five-minute exit and final realized-fee classification. Any ambiguity must still halt and reconcile.
 
 WebSocket follow-up is implemented: 100 ms differential depth, mandatory `conninfo` discovery on both sockets, shared conservative rate buckets and cancellation priority, plus terminal-event-first cancellation confirmation. Complete one-second account snapshots remain intentional. Monitor real-order latency and CPU in a separately approved live run; do not treat a short read-only transport check as execution verification. Per-method request weights are not fully published, so conservative local reservations remain necessary.
 

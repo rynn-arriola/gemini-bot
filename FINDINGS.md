@@ -6,6 +6,7 @@
 - The risk ledger imported the two server orders with the published standard taker-fee calculation rounded against the account. This is deliberately conservative, not a claim about the actual fee charged.
 - Full fill replay now reports conservative current-window realized P&L of +$0.21, complete classification, zero manual-close gaps, a 30-order cap and a clean SQLite integrity check. A fresh authenticated preparation remained flat/order-free and found 32 tracked, 29 ranked and five currently eligible markets.
 - The superseded supervisor was in `ATTENTION_REQUIRED` because its older recovery subprocess used global order-history pagination and hit the 1,000-order ceiling. It was dismissed cleanly; no runner or mutation owner remained.
+- After commit `8260f95` and a final flat/order-free preparation, the owner-authorized version-5 launch reached 30 resting entry orders, zero positions, 32 tracked symbols and 29 ranked pools. Supervisor and runner reported healthy active states with no dropped, error or critical log records at the verification point.
 
 ## September 15, 2026: second production fill/exit evidence
 
