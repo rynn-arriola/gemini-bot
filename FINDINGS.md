@@ -1,5 +1,12 @@
 # Gemini findings
 
+## September 15, 2026: manual-close reconciliation and restart readiness
+
+- Authenticated, symbol-bounded history uniquely matched the earlier manual closes: SELL NO 10 on each of the exact ETH and SOL contracts, both fully filled before the manual-flat audit. The server supplied exact average prices but no fee field.
+- The risk ledger imported the two server orders with the published standard taker-fee calculation rounded against the account. This is deliberately conservative, not a claim about the actual fee charged.
+- Full fill replay now reports conservative current-window realized P&L of +$0.21, complete classification, zero manual-close gaps, a 30-order cap and a clean SQLite integrity check. A fresh authenticated preparation remained flat/order-free and found 32 tracked, 29 ranked and five currently eligible markets.
+- The superseded supervisor was in `ATTENTION_REQUIRED` because its older recovery subprocess used global order-history pagination and hit the 1,000-order ceiling. It was dismissed cleanly; no runner or mutation owner remained.
+
 ## September 15, 2026: second production fill/exit evidence
 
 - The supervised run filled BUY YES 10 on one ETH and one SOL hourly interval. Their five-minute SELL YES exits both filled completely; the account snapshot ended flat/order-free. Recorded round-trip P&L was approximately -$2.42 including fees.

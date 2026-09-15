@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Callable
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
@@ -286,6 +287,49 @@ class GeminiReadRestClient:
             raise ApiError(200, "invalid_orders_shape")
         if any(not isinstance(value, dict) for value in values):
             raise ApiError(200, "invalid_orders_row")
+        return values
+
+    async def filled_order_history(
+        self,
+        *,
+        symbol: str,
+        closed_from: datetime,
+        closed_to: datetime,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read a bounded authenticated window of fully filled orders.
+
+        Gemini documents ``from`` as inclusive and ``to`` as exclusive.  A
+        full response is deliberately ambiguous because time-window requests
+        do not support offset pagination.
+        """
+        if not symbol or symbol != symbol.upper():
+            raise ValueError("filled order history requires an uppercase symbol")
+        if closed_from.tzinfo is None or closed_to.tzinfo is None:
+            raise ValueError("filled order-history bounds must be timezone-aware")
+        start = closed_from.astimezone(timezone.utc)
+        end = closed_to.astimezone(timezone.utc)
+        if start >= end:
+            raise ValueError("filled order-history bounds must increase")
+        if not 1 <= limit <= 1000:
+            raise ValueError("filled order-history limit must be between 1 and 1000")
+        page = await self.private_read(
+            "/v1/prediction-markets/orders/history",
+            {
+                "status": "filled",
+                "symbol": symbol,
+                "from": int(start.timestamp() * 1000),
+                "to": int(end.timestamp() * 1000),
+                "limit": limit,
+            },
+        )
+        values = page.get("orders")
+        if not isinstance(values, list):
+            raise ApiError(200, "invalid_orders_shape")
+        if any(not isinstance(value, dict) for value in values):
+            raise ApiError(200, "invalid_orders_row")
+        if len(values) >= limit:
+            raise ApiError(200, "filled_orders_window_ceiling_exceeded")
         return values
 
     async def _private_pages(self, path: str, key: str, ceiling: int) -> list[dict[str, Any]]:

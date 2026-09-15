@@ -211,6 +211,12 @@ Official section: [Order Management API](https://developer.gemini.com/rest-api/p
 | POST | `/v1/prediction-markets/positions` | Private | Current filled positions | Optional `eventTicker`, `limit`, `offset`, `sort` |
 | POST | `/v1/prediction-markets/positions/settled` | Private | Settled positions and payouts | Optional event, search/category, pagination and sort filters |
 
+Order-history recovery details verified September 15, 2026:
+
+- `from` is inclusive and `to` is exclusive, both Unix epoch milliseconds. With either time bound, Gemini ignores `offset`; a response at the requested limit must therefore be treated as potentially incomplete and split or rejected.
+- Filled history supplies `filledQuantity`, `remainingQuantity`, `avgExecutionPrice`, server order identity and close timestamps. It does not publish an execution-fee field.
+- `positions/settled` documents opt-in `withCashOuts=true` fields, but the live account response did not return that sibling array during this repair. The bot therefore does not rely on it for restart safety.
+
 Use REST snapshots at startup, after reconnects, after suspected message gaps, and around settlement. Do not infer positions solely from the order-status stream.
 
 Official section: [Positions API](https://developer.gemini.com/rest-api/prediction-markets/positions)

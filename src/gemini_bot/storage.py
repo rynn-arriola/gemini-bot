@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -11,6 +12,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .execution import OrderIntent
+
+
+@dataclass(frozen=True, slots=True)
+class ManualCloseGap:
+    audit_sequence: int
+    observed_at: datetime
+    opened_at: datetime
+    symbol: str
+    signed_quantity: Decimal
 
 
 SCHEMA = """
@@ -220,6 +230,12 @@ class SQLiteJournal:
             "SELECT 1 FROM order_intent WHERE client_order_id=?", (client_order_id,)
         ).fetchone() is not None
 
+    def intent_purpose(self, client_order_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT purpose FROM order_intent WHERE client_order_id=?", (client_order_id,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
     def resolve_intent_terminal(self, client_order_id: str, server_order_id: str | None) -> None:
         changed = self.connection.execute(
             """UPDATE order_intent SET state='terminal',server_order_id=COALESCE(?,server_order_id),
@@ -422,6 +438,118 @@ class SQLiteJournal:
             ),
         ).rowcount
         return changed == 1
+
+    def record_reconciled_manual_close(
+        self,
+        *,
+        order_id: str,
+        client_order_id: str,
+        symbol: str,
+        side: str,
+        outcome: str,
+        quantity: Decimal,
+        price: Decimal,
+        conservative_fee: Decimal,
+        event_at: datetime,
+        audit_sequence: int,
+    ) -> bool:
+        """Persist one authenticated history order as a conservative close.
+
+        The order ID is the durable venue identity.  The fee is explicitly an
+        upper bound because the history schema omits actual execution fees.
+        """
+        if not order_id or audit_sequence <= 0:
+            raise ValueError("manual-close reconciliation requires venue and audit identity")
+        if side.upper() != "SELL" or quantity <= 0 or conservative_fee < 0:
+            raise ValueError("manual-close reconciliation requires a positive SELL fill")
+        synthetic_trade_id = f"order-history:{order_id}"
+        with self.transaction():
+            inserted = self.record_fill(
+                trade_id=synthetic_trade_id,
+                order_id=order_id,
+                client_order_id=client_order_id,
+                symbol=symbol,
+                side=side,
+                outcome=outcome,
+                quantity=quantity,
+                price=price,
+                fee=conservative_fee,
+                event_at=event_at,
+            )
+            if inserted:
+                self.connection.execute(
+                    "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        "authenticated_manual_close_imported",
+                        json.dumps(
+                            {
+                                "audit_sequence": audit_sequence,
+                                "fee_basis": "published_standard_taker_upper_bound",
+                                "order_id": order_id,
+                                "symbol": symbol,
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+        return inserted
+
+    def manual_close_gaps(
+        self, window_start: datetime, window_end: datetime,
+    ) -> tuple[ManualCloseGap, ...]:
+        """Return unmatched inventory immediately preceding manual-flat audits."""
+        if window_start.tzinfo is None or window_end.tzinfo is None:
+            raise ValueError("manual-close window timestamps must be timezone-aware")
+
+        def parsed_utc(value: object) -> datetime:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        events: list[tuple[datetime, int, tuple[object, ...]]] = []
+        for row in self.connection.execute(
+            """SELECT trade_id,symbol,side,outcome,quantity,event_at
+               FROM execution_fill ORDER BY event_at,trade_id"""
+        ):
+            occurred = parsed_utc(row[5])
+            if occurred < window_end:
+                events.append((occurred, 1, tuple(row)))
+        for row in self.connection.execute(
+            """SELECT sequence,occurred_at FROM audit_event
+               WHERE kind='operator_manual_flat_reconciled' ORDER BY occurred_at,sequence"""
+        ):
+            occurred = parsed_utc(row[1])
+            if occurred < window_end:
+                events.append((occurred, 0, tuple(row)))
+        events.sort(key=lambda item: (item[0], item[1], str(item[2][0])))
+
+        positions: dict[str, tuple[Decimal, datetime]] = {}
+        gaps: list[ManualCloseGap] = []
+        for occurred, kind, row in events:
+            if kind == 0:
+                if window_start <= occurred < window_end:
+                    for symbol, (quantity, opened_at) in sorted(positions.items()):
+                        if quantity:
+                            gaps.append(ManualCloseGap(
+                                int(row[0]), occurred, opened_at, symbol, quantity,
+                            ))
+                positions.clear()
+                continue
+            _, symbol, side, outcome, quantity, _ = row
+            qty = Decimal(str(quantity))
+            outcome_sign = Decimal("1") if str(outcome).upper() == "YES" else Decimal("-1")
+            side_sign = Decimal("1") if str(side).upper() == "BUY" else Decimal("-1")
+            delta = qty * outcome_sign * side_sign
+            prior_qty, opened_at = positions.get(str(symbol), (Decimal("0"), occurred))
+            new_qty = prior_qty + delta
+            if new_qty == 0:
+                positions.pop(str(symbol), None)
+            else:
+                positions[str(symbol)] = (new_qty, opened_at if prior_qty else occurred)
+        return tuple(gaps)
 
     def realized_pnl_for_window(
         self, window_start: datetime, window_end: datetime

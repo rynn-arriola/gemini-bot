@@ -71,10 +71,11 @@ async def _reconcile_manual_flat(config_path: Path, directory: Path) -> None:
     runtime = ProductionOrchestrator(config, directory, read_only=True)
     try:
         await runtime.prepare()
-        runtime.reconcile_verified_manual_flat()
+        imported = await runtime.reconcile_verified_manual_flat()
         print(
             "Authenticated Gemini state is flat and order-free; the manual close was "
-            "adopted without resetting the six-hour risk window. No orders were submitted."
+            "adopted without resetting the six-hour risk window. "
+            f"Imported authenticated close orders={imported}. No orders were submitted."
         )
     finally:
         await runtime.close()

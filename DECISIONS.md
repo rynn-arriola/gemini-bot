@@ -36,6 +36,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## One-time commissioning authorization
 
+- September 15, 2026: after authenticated manual-close reconciliation and full validation, the owner explicitly directed the bot to restart. The restart retains the existing remainder-of-day reward-catalog scope and uptime-proxy override, 15-pool/30-order breadth, 10-contract legs, $300 gross/$90 market/$40 stressed-entry limits, five-minute inventory/pre-expiry exits, and the single $30 six-hour realized-loss stop. No limit is raised by this authorization.
+
 - September 15, 2026: owner authorized one five-minute read-only preflight. It may authenticate, observe streams, and perform paced account/market reconciliation. It may not place/cancel orders, consume an activation permit, change account settings, or start continuous trading. The diagnostic connection disables cancel-on-disconnect.
 
 - September 15, 2026: the owner authorized up to $10 for live entry/exit testing and then selected aggressive limit fills rather than a resting maker test. This authority covered only the bounded YES and NO round-trip canaries; it does not activate the continuous reward bot or raise any standing limit.

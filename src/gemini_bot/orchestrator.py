@@ -18,14 +18,18 @@ from .activation import (
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .discovery import RewardUniverseLoader
 from .catalog import join_reward_contracts
-from .domain import EngineState, Outcome
+from .domain import EngineState, Outcome, canonical_symbol
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .exit_pricing import exact_crossing_exit
 from .live_ws import LiveWebSocket, MutationNotSentError, QuoteChangedBeforeSend
 from .operational_logging import ErrorClass, OperationalLogger, configure_logging
 from .persistent_risk import PersistentRiskWindow
-from .profitability import ProfitabilityTracker, active_maker_rebate_fractions
+from .profitability import (
+    ProfitabilityTracker,
+    active_maker_rebate_fractions,
+    conservative_taker_fee,
+)
 from .public_ws import PublicMarketSocket
 from .rank_report import public_rank_rows, rank_live_universe
 from .rate_limits import AdmissionGovernor
@@ -1499,7 +1503,75 @@ class ProductionOrchestrator:
         self.gate.halt()
         self._write_status("stopped_flat", False, "drain completed and account is flat")
 
-    def reconcile_verified_manual_flat(self) -> None:
+    async def _import_authenticated_manual_closes(
+        self, *, window_start: datetime, window_end: datetime,
+    ) -> int:
+        """Resolve manual-flat gaps from exact, bounded Gemini order history."""
+        imported = 0
+        for gap in self.journal.manual_close_gaps(window_start, window_end):
+            expected_outcome = "YES" if gap.signed_quantity > 0 else "NO"
+            expected_quantity = abs(gap.signed_quantity)
+            rows = await self.rest.filled_order_history(
+                symbol=gap.symbol,
+                closed_from=gap.opened_at,
+                closed_to=gap.observed_at,
+            )
+            candidates: list[tuple[dict[str, Any], datetime, Decimal]] = []
+            for row in rows:
+                try:
+                    status = str(row["status"]).upper().replace("CANCELLED", "CANCELED")
+                    symbol = canonical_symbol(str(row["symbol"]))
+                    side = str(row["side"]).upper()
+                    outcome = str(row["outcome"]).upper()
+                    quantity = Decimal(str(row["filledQuantity"]))
+                    remaining = Decimal(str(row["remainingQuantity"]))
+                    price = Decimal(str(row["avgExecutionPrice"]))
+                    event_at = _parse_time(str(row["updatedAt"]))
+                    order_id = str(row["orderId"])
+                    client_order_id = str(row.get("clientOrderId", ""))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "authenticated manual-close history has an invalid filled order"
+                    ) from exc
+                purpose = self.journal.intent_purpose(client_order_id)
+                if purpose not in {None, "exit"}:
+                    continue
+                if (
+                    status == "FILLED"
+                    and symbol == gap.symbol
+                    and side == "SELL"
+                    and outcome == expected_outcome
+                    and quantity == expected_quantity
+                    and remaining == 0
+                    and Decimal("0") < price < Decimal("1")
+                    and gap.opened_at <= event_at < gap.observed_at
+                    and order_id
+                    and client_order_id
+                ):
+                    candidates.append((row, event_at, price))
+            if len(candidates) != 1:
+                raise RuntimeError(
+                    "manual close cannot be matched uniquely to authenticated filled history"
+                )
+            row, event_at, price = candidates[0]
+            if self.journal.record_reconciled_manual_close(
+                order_id=str(row["orderId"]),
+                client_order_id=str(row["clientOrderId"]),
+                symbol=gap.symbol,
+                side="SELL",
+                outcome=expected_outcome,
+                quantity=expected_quantity,
+                price=price,
+                conservative_fee=conservative_taker_fee(expected_quantity, price),
+                event_at=event_at,
+                audit_sequence=gap.audit_sequence,
+            ):
+                imported += 1
+        if self.journal.manual_close_gaps(window_start, window_end):
+            raise RuntimeError("manual-close history remains incomplete after reconciliation")
+        return imported
+
+    async def reconcile_verified_manual_flat(self) -> int:
         """Repair expected account state after a separately verified manual close."""
         if not self.read_only:
             raise RuntimeError("manual-flat reconciliation must use read-only venue access")
@@ -1507,18 +1579,35 @@ class ProductionOrchestrator:
             raise RuntimeError("manual-flat reconciliation requires completed startup reconciliation")
         if self._last_snapshot.positions or self._last_snapshot.active_orders:
             raise RuntimeError("manual-flat reconciliation requires a flat, order-free REST snapshot")
-        self.account.adopt_verified_manual_flat(observed_at=_utc_now())
+        now = _utc_now()
+        start, end = RiskWindowPolicy(self.config.risk.risk_window_loss_usd).bounds(now)
+        # A first reconciliation adopts the authenticated flat baseline and
+        # creates the audit boundary.  A repeated repair of an existing audit
+        # must not create another boundary before its historical close arrives.
+        if not self.account.equity_classification_complete:
+            self.account.adopt_verified_manual_flat(observed_at=now)
         if not self.account.equity_classification_complete:
             raise RuntimeError("manual-flat baseline did not reconcile account classification")
-        start, end = RiskWindowPolicy(self.config.risk.risk_window_loss_usd).bounds(_utc_now())
-        _, complete = self.journal.realized_pnl_for_window(start, end)
+        imported = await self._import_authenticated_manual_closes(
+            window_start=start, window_end=end,
+        )
+        realized_pnl, complete = self.journal.realized_pnl_for_window(start, end)
         if not complete:
             self._write_status("ready_paused", False, "flat reconciled; manual-close execution evidence missing; activation blocked")
             raise RuntimeError("manual close is flat but realized P&L requires authenticated closing fills")
+        PersistentRiskWindow(
+            RiskWindowPolicy(self.config.risk.risk_window_loss_usd), self.journal,
+        ).update(
+            now=now,
+            realized_pnl=realized_pnl,
+            classification_complete=True,
+            reconciled=True,
+        )
         self._write_status(
             "ready_paused", False,
             "verified manual flatten reconciled; fresh activation still required",
         )
+        return imported
 
     async def close(self) -> None:
         if self._closed:

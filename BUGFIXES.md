@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 15, 2026 — authenticated manual-close history repair
+
+- A prior manual-flat audit correctly blocked the current six-hour risk window because two closing fills and their fees were absent from the WebSocket journal. The authenticated Predictions order-history endpoint contains the exact server orders, quantities and average execution prices, but its documented response does not expose execution fees.
+- `reconcile-manual-flat` now locates only exact unmatched inventory at an existing manual-flat boundary, reads a symbol- and time-bounded `status=filled` history window, and accepts exactly one full SELL of the correct outcome and quantity. Missing, malformed, full-page or ambiguous results fail closed.
+- Imported closes retain the Gemini order ID as durable identity. The loss ledger charges the published standard taker fee rounded up to the next cent as a conservative upper bound; maker execution or a promotion can only make the actual fee smaller. The import is idempotent and audited, and a reached loss high-water/HARD remains irreversible.
+- The stale version-5 supervisor was cleanly dismissed. Its final recovery error came from the superseded global-history startup code; the current build already uses targeted unresolved-symbol history and a fresh preparation passed.
+- Snapshot impact: no quote rule changes. The repair only removes a false restart block after exact authenticated manual-close evidence is reconciled; incomplete or ambiguous evidence still blocks all quoting.
+
 ## September 15, 2026 — follow-up review corrections
 
 - Maker entries now recompute the current two-tick target immediately before socket send, after pacing. A moved quote is terminalized as definitely unsent; any sibling is canceled and the next rank cycle rebuilds it. A stale ranked candidate is skipped before preparing an intent.

@@ -62,6 +62,17 @@ def _fee(rate: Decimal, quantity: Decimal, price: Decimal) -> Decimal:
     )
 
 
+def conservative_taker_fee(quantity: Decimal, price: Decimal) -> Decimal:
+    """Return the published standard taker fee, rounded against the account.
+
+    Gemini's authenticated Predictions order-history response does not expose
+    fees.  Manual-close reconciliation therefore uses the standard taker fee
+    as a conservative upper bound; a maker execution or promotion can only
+    make the actual fee smaller.
+    """
+    return _fee(TAKER_FEE_RATE, quantity, price)
+
+
 def _maker_rebate(
     quantity: Decimal, price: Decimal, rebate_fraction: Decimal,
 ) -> Decimal:

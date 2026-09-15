@@ -17,6 +17,8 @@ from gemini_bot.domain import EngineState
 from gemini_bot.execution import IntentState
 from gemini_bot.live_ws import QuoteChangedBeforeSend
 from gemini_bot.persistent_risk import PersistentRiskWindow
+from gemini_bot.rate_limits import AdmissionGovernor
+from gemini_bot.rest_client import ApiError, GeminiReadRestClient
 from gemini_bot.risk_windows import RiskWindowPolicy
 from gemini_bot.storage import SQLiteJournal
 
@@ -200,3 +202,119 @@ class ManualCloseRiskFixTests(unittest.TestCase):
                 self.assertEqual(result.loss_high_water, D("30"))
             finally:
                 store.close()
+
+    def test_authenticated_manual_close_is_audited_and_closes_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "journal.sqlite")
+            try:
+                start, end = RiskWindowPolicy(D("30")).bounds(NOW)
+                store.record_fill(
+                    trade_id="entry", order_id="entry-order", client_order_id="entry-id",
+                    symbol="X", side="BUY", outcome="NO", quantity=D("10"),
+                    price=D(".77"), fee=D("0"), event_at=NOW,
+                )
+                store.adopt_verified_flat_baseline(
+                    confirmed_usd=D("100"), observed_at=NOW + timedelta(minutes=2),
+                )
+                gap = store.manual_close_gaps(start, end)
+                self.assertEqual(len(gap), 1)
+                self.assertEqual(gap[0].signed_quantity, D("-10"))
+                inserted = store.record_reconciled_manual_close(
+                    order_id="manual-order", client_order_id="external-id", symbol="X",
+                    side="SELL", outcome="NO", quantity=D("10"), price=D(".95"),
+                    conservative_fee=D(".04"), event_at=NOW + timedelta(minutes=1),
+                    audit_sequence=gap[0].audit_sequence,
+                )
+                self.assertTrue(inserted)
+                self.assertFalse(store.manual_close_gaps(start, end))
+                self.assertEqual(store.realized_pnl_for_window(start, end), (D("1.76"), True))
+                audit = store.connection.execute(
+                    "SELECT details_json FROM audit_event WHERE kind='authenticated_manual_close_imported'"
+                ).fetchone()
+                self.assertEqual(
+                    json.loads(audit[0])["fee_basis"],
+                    "published_standard_taker_upper_bound",
+                )
+            finally:
+                store.close()
+
+
+class ManualCloseHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.fixture = repair_fixtures.RuntimeRepairTests()
+        await self.fixture.asyncSetUp()
+        self.runtime = self.fixture.runtime
+
+    async def asyncTearDown(self):
+        await self.fixture.asyncTearDown()
+
+    @staticmethod
+    def filled_row(*, order_id: str = "manual-order") -> dict[str, object]:
+        return {
+            "orderId": order_id, "clientOrderId": "external-id", "status": "filled",
+            "symbol": "X", "side": "sell", "outcome": "no", "filledQuantity": "10",
+            "remainingQuantity": "0", "avgExecutionPrice": ".95",
+            "updatedAt": (NOW + timedelta(minutes=1)).isoformat(),
+        }
+
+    async def test_import_matches_one_exact_authenticated_close(self):
+        start, end = RiskWindowPolicy(D("30")).bounds(NOW)
+        self.runtime.journal.record_fill(
+            trade_id="entry", order_id="entry-order", client_order_id="entry-id",
+            symbol="X", side="BUY", outcome="NO", quantity=D("10"),
+            price=D(".77"), fee=D("0"), event_at=NOW,
+        )
+        self.runtime.journal.adopt_verified_flat_baseline(
+            confirmed_usd=D("100"), observed_at=NOW + timedelta(minutes=2),
+        )
+        self.runtime.rest.filled_order_history = AsyncMock(return_value=[self.filled_row()])
+        self.assertEqual(
+            await self.runtime._import_authenticated_manual_closes(
+                window_start=start, window_end=end,
+            ),
+            1,
+        )
+        self.assertEqual(
+            self.runtime.journal.realized_pnl_for_window(start, end),
+            (D("1.76"), True),
+        )
+
+    async def test_import_refuses_ambiguous_matching_orders(self):
+        start, end = RiskWindowPolicy(D("30")).bounds(NOW)
+        self.runtime.journal.record_fill(
+            trade_id="entry", order_id="entry-order", client_order_id="entry-id",
+            symbol="X", side="BUY", outcome="NO", quantity=D("10"),
+            price=D(".77"), fee=D("0"), event_at=NOW,
+        )
+        self.runtime.journal.adopt_verified_flat_baseline(
+            confirmed_usd=D("100"), observed_at=NOW + timedelta(minutes=2),
+        )
+        self.runtime.rest.filled_order_history = AsyncMock(return_value=[
+            self.filled_row(order_id="one"), self.filled_row(order_id="two"),
+        ])
+        with self.assertRaisesRegex(RuntimeError, "matched uniquely"):
+            await self.runtime._import_authenticated_manual_closes(
+                window_start=start, window_end=end,
+            )
+
+    async def test_filled_history_uses_bounded_status_filter(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client.private_read = AsyncMock(return_value={"orders": [self.filled_row()]})
+        rows = await client.filled_order_history(
+            symbol="X", closed_from=NOW, closed_to=NOW + timedelta(minutes=2),
+        )
+        self.assertEqual(len(rows), 1)
+        fields = client.private_read.await_args.args[1]
+        self.assertEqual(fields["status"], "filled")
+        self.assertEqual(fields["symbol"], "X")
+        self.assertEqual(fields["from"], int(NOW.timestamp() * 1000))
+        self.assertEqual(fields["to"], int((NOW + timedelta(minutes=2)).timestamp() * 1000))
+
+    async def test_full_filled_history_window_fails_closed(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client.private_read = AsyncMock(return_value={"orders": [self.filled_row()]})
+        with self.assertRaisesRegex(ApiError, "window_ceiling"):
+            await client.filled_order_history(
+                symbol="X", closed_from=NOW,
+                closed_to=NOW + timedelta(minutes=2), limit=1,
+            )
