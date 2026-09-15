@@ -34,6 +34,10 @@ class QuoteChangedBeforeSend(MutationNotSentError):
     """An unsent maker quote must be rebuilt from the current book."""
 
 
+class EntryStateChangedBeforeSend(MutationNotSentError):
+    """An ordinary live-state change removed permission for an unsent entry."""
+
+
 class LiveWebSocket:
     """Authenticated production transport; no simulation or automatic mutations."""
 

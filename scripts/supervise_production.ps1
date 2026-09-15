@@ -16,6 +16,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $SupervisorStatus = Join-Path $RuntimePath "supervisor-status.json"
 $SupervisorStop = Join-Path $RuntimePath "SUPERVISOR_STOP"
+$RunnerResult = Join-Path $RuntimePath "runner-result.json"
 
 function Write-SupervisorStatus([string]$State, [string]$Reason, [int]$RunnerExitCode) {
     $Payload = [ordered]@{
@@ -57,11 +58,12 @@ $FastCrashSeconds = 120
 Remove-Item -LiteralPath $SupervisorStop -Force -ErrorAction SilentlyContinue
 Write-SupervisorStatus "STARTING" "launching approved live runner" -1
 
-$ExitCode = -1
+$LastRunnerExitCode = -1
 while ($true) {
     $AttemptNumber = $RestartCount + 1
     $RunnerOut = Join-Path $RuntimePath ("runner-{0:D2}.stdout.log" -f $AttemptNumber)
     $RunnerErr = Join-Path $RuntimePath ("runner-{0:D2}.stderr.log" -f $AttemptNumber)
+    Remove-Item -LiteralPath $RunnerResult -Force -ErrorAction SilentlyContinue
     $Arguments = @(
         "-m", "gemini_bot", "run-live", "--env", $EnvironmentPath,
         "--directory", $RuntimePath, "--activation-permit", $PermitPath,
@@ -75,18 +77,45 @@ while ($true) {
     Set-Content -LiteralPath (Join-Path $RuntimePath "runner.id") -Value $Runner.Id -Encoding ascii
     Write-SupervisorStatus "RUNNING" "approved runner is active" -1
     $Runner.WaitForExit()
-    $ExitCode = $Runner.ExitCode
+    $Runner.Refresh()
+    # Copy immediately into a dedicated scalar. Do not reuse a generic
+    # ExitCode variable across the later recovery child process.
+    $LastRunnerExitCode = [int]$Runner.ExitCode
+    if (-not (Test-Path -LiteralPath $RunnerResult -PathType Leaf)) {
+        # A missing durable classification is an abnormal process boundary,
+        # never a clean or automatically recoverable exit.
+        $LastRunnerExitCode = 4
+    } else {
+        try {
+            $RunnerResultDocument = Get-Content -LiteralPath $RunnerResult -Raw | ConvertFrom-Json
+            $RecordedSession = [string]$RunnerResultDocument.session_id
+            $RecordedExitCode = [int]$RunnerResultDocument.exit_code
+            $RecordedOutcome = [string]$RunnerResultDocument.outcome
+            $ValidOutcome = (
+                ($RecordedExitCode -eq 0 -and $RecordedOutcome -eq "closed") -or
+                ($RecordedExitCode -eq 5 -and $RecordedOutcome -eq "recoverable_flat") -or
+                ($RecordedExitCode -in @(2, 3) -and $RecordedOutcome -in @("failed", "startup_or_unclassified_failure"))
+            )
+            if ($RecordedSession -ne $SessionId -or -not $ValidOutcome) {
+                $LastRunnerExitCode = 4
+            } else {
+                $LastRunnerExitCode = $RecordedExitCode
+            }
+        } catch {
+            $LastRunnerExitCode = 4
+        }
+    }
     $RanSeconds = ([DateTimeOffset]::UtcNow - $StartedAt).TotalSeconds
 
     if (Test-Path -LiteralPath $SupervisorStop) {
-        Write-SupervisorStatus "STOPPED" "operator stop completed" $ExitCode
+        Write-SupervisorStatus "STOPPED" "operator stop completed" $LastRunnerExitCode
         exit 0
     }
-    if ($ExitCode -eq 0) {
-        Write-SupervisorStatus "STOPPED" "runner exited clean and flat" $ExitCode
+    if ($LastRunnerExitCode -eq 0) {
+        Write-SupervisorStatus "STOPPED" "runner exited clean and flat" $LastRunnerExitCode
         exit 0
     }
-    if ($ExitCode -ne 5) { break }
+    if ($LastRunnerExitCode -ne 5) { break }
 
     if ($RanSeconds -lt $FastCrashSeconds) {
         $FastCrashCount += 1
@@ -97,10 +126,10 @@ while ($true) {
     if ($FastCrashCount -ge 3) { break }
     if ($RestartCount -ge $MaximumRestarts) { break }
     $RestartCount += 1
-    Write-SupervisorStatus "BACKOFF" "recoverable flat failure; bounded restart pending" $ExitCode
+    Write-SupervisorStatus "BACKOFF" "recoverable flat failure; bounded restart pending" $LastRunnerExitCode
     for ($Waited = 0; $Waited -lt $BackoffSeconds; $Waited += 1) {
         if (Test-Path -LiteralPath $SupervisorStop) {
-            Write-SupervisorStatus "STOPPED" "operator stop during recovery backoff" $ExitCode
+            Write-SupervisorStatus "STOPPED" "operator stop during recovery backoff" $LastRunnerExitCode
             exit 0
         }
         Start-Sleep -Seconds 1
@@ -125,6 +154,6 @@ $Reason = if ($Recovery.ExitCode -eq 0) {
 } else {
     "automatic restart blocked; read-only reconciliation failed; manual account review required"
 }
-Write-SupervisorStatus "ATTENTION_REQUIRED" $Reason $ExitCode
+Write-SupervisorStatus "ATTENTION_REQUIRED" $Reason $LastRunnerExitCode
 while (-not (Test-Path -LiteralPath $SupervisorStop)) { Start-Sleep -Seconds 10 }
-Write-SupervisorStatus "STOPPED" "operator dismissed supervisor attention" $ExitCode
+Write-SupervisorStatus "STOPPED" "operator dismissed supervisor attention" $LastRunnerExitCode

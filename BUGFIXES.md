@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 15, 2026 — maker fill race no longer drains every market
+
+- Symptom: an XRP first quote filled while its opposite leg waited for transport pacing. The last-moment guard correctly blocked the second entry, but the generic rejection stopped the runner, canceled all pending orders, and forced an immediate exact exit.
+- Correction: price/book races and ordinary entry-state races are explicit definitely-unsent outcomes. The bot cancels any remaining entry on that symbol and lets the existing fill-safety/deadline path own inventory. A first maker leg filled before its acknowledgement waiter is scheduled follows the same path. True global permission loss, stale account snapshots, scope/policy violations, and ambiguity remain fatal.
+- Supervision: the CLI writes an atomic result bound to the supervisor session. The Windows supervisor requires that result and uses its code for bounded recovery; missing, malformed, cross-session, or unknown results are non-recoverable.
+- Snapshot impact: the repair preserves other markets' resting time after a normal fill. The affected symbol loses uptime while its residual entry is canceled and inventory is managed. No reward, risk, price, size, breadth, or exit limit changed.
+
+
 ## September 15, 2026 — authenticated manual-close history repair
 
 - A prior manual-flat audit correctly blocked the current six-hour risk window because two closing fills and their fees were absent from the WebSocket journal. The authenticated Predictions order-history endpoint contains the exact server orders, quantities and average execution prices, but its documented response does not expose execution fees.

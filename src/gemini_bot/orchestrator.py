@@ -22,7 +22,12 @@ from .domain import EngineState, Outcome, canonical_symbol
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .exit_pricing import exact_crossing_exit
-from .live_ws import LiveWebSocket, MutationNotSentError, QuoteChangedBeforeSend
+from .live_ws import (
+    EntryStateChangedBeforeSend,
+    LiveWebSocket,
+    MutationNotSentError,
+    QuoteChangedBeforeSend,
+)
 from .operational_logging import ErrorClass, OperationalLogger, configure_logging
 from .persistent_risk import PersistentRiskWindow
 from .profitability import (
@@ -581,7 +586,7 @@ class ProductionOrchestrator:
         params = payload["params"]
         symbol = str(params["symbol"])
         if not self._book_fresh(symbol):
-            raise RuntimeError("market became stale while waiting to send")
+            raise QuoteChangedBeforeSend("market became stale while waiting to send")
         if params["side"] == "BUY":
             if params.get("timeInForce") == "MOC":
                 target = self._current_quote_target(symbol)
@@ -594,23 +599,34 @@ class ProductionOrchestrator:
                     raise QuoteChangedBeforeSend("maker quote changed before send")
             if self._permit_policy_digest is not None and policy_digest(DEFAULT_POLICY_PATH) != self._permit_policy_digest:
                 raise RuntimeError("policy changed after approval")
-            if (not self.gate.may_submit or not self._entry_time_valid(symbol)
-                    or symbol not in self._permitted_symbols
-                    or symbol in self.account.blocked_entries
-                    or not self.account.equity_classification_complete
-                    or not self.account.snapshots_fresh
-                    or (self._permit_expires_at is not None and _utc_now() >= self._permit_expires_at)):
-                raise RuntimeError("entry permission changed while waiting to send")
+            if symbol not in self._permitted_symbols:
+                raise RuntimeError("entry symbol is outside approved scope")
+            if not self.account.snapshots_fresh:
+                raise RuntimeError("account snapshots became stale while waiting to send")
+            if not self.gate.may_submit:
+                raise RuntimeError("global entry permission changed while waiting to send")
+            if not self._entry_time_valid(symbol):
+                raise EntryStateChangedBeforeSend("entry cutoff crossed while waiting to send")
+            if symbol in self.account.blocked_entries:
+                raise EntryStateChangedBeforeSend("symbol became entry-blocked while waiting to send")
+            if not self.account.equity_classification_complete:
+                raise EntryStateChangedBeforeSend("account transition is reconciling while waiting to send")
+            if self._permit_expires_at is not None and _utc_now() >= self._permit_expires_at:
+                raise EntryStateChangedBeforeSend("activation permit expired while waiting to send")
             for held_symbol, signed in self.account.reducer.positions.items():
                 deadline = self.journal.get_deadline(held_symbol, "YES" if signed > 0 else "NO")
                 if deadline is None or _utc_now() >= deadline:
-                    raise RuntimeError("inventory safety action must precede any new entry")
+                    raise EntryStateChangedBeforeSend(
+                        "inventory safety action must precede any new entry"
+                    )
             exposure = self._websocket_exposure()
             quantity = Decimal(str(params["quantity"]))
             if (exposure.pending_orders + 1 > self._dynamic_pending_cap
                     or exposure.gross_reservation_usd + quantity > self.config.risk.max_gross_reservation_usd
                     or exposure.market_exposure_usd.get(symbol, Decimal("0")) + quantity > self.config.risk.max_market_exposure_usd):
-                raise RuntimeError("entry exposure changed while waiting to send")
+                raise EntryStateChangedBeforeSend(
+                    "entry exposure changed while waiting to send"
+                )
         else:
             position = self.account.reducer.positions.get(symbol, Decimal("0"))
             if (abs(position) != Decimal(str(params["quantity"])) or position == 0
@@ -670,13 +686,25 @@ class ProductionOrchestrator:
     async def _quote_pair_locked(self, candidate: Any) -> None:
         try:
             await self._quote_pair_current(candidate)
-        except QuoteChangedBeforeSend:
-            # Definitely unsent; clear any sibling, then let the next rank cycle
-            # rebuild. Never mutate a persisted intent's price after preparation.
+        except (QuoteChangedBeforeSend, EntryStateChangedBeforeSend) as exc:
+            # Definitely unsent. A fill, cutoff, lifecycle block, transient
+            # accounting transition, exposure change, or fresh-book change can
+            # legitimately invalidate the second leg after the first was sent.
+            # Clear any still-working sibling and let the safety/rank workers
+            # handle the new state without escalating an expected race into an
+            # account-wide drain.
             await self._cancel_symbol_entries(candidate.symbol)
+            self.journal.audit("maker_pair_presend_state_change", {
+                "symbol": candidate.symbol,
+                "reason": str(exc),
+                "position": str(self.account.reducer.positions.get(candidate.symbol, Decimal("0"))),
+            })
 
     async def _quote_pair_current(self, candidate: Any) -> None:
-        if not self.gate.may_submit or not self._candidate_actionable(candidate) or candidate.quote is None:
+        if (not self.gate.may_submit or not self._candidate_actionable(candidate)
+                or candidate.quote is None
+                or not self.account.equity_classification_complete
+                or not self.account.snapshots_fresh):
             return
         clock = asyncio.get_running_loop().time()
         cooldown_until = self._quote_cooldown_until.get(candidate.symbol, 0.0)
@@ -716,13 +744,26 @@ class ProductionOrchestrator:
         await self.account.wait_for_order_event(first_id)
         first = self.ledger.get(first_id)
         if first is None or first.state is not IntentState.ACKNOWLEDGED:
+            first_order = (
+                None if first is None or first.server_order_id is None
+                else self.account.reducer.orders.get(first.server_order_id)
+            )
+            if first_order is not None and first_order.cumulative_filled > 0:
+                # A maker can fill between its NEW event and this waiter being
+                # scheduled. The durable fill and deadline already exist; remove
+                # any residual/sibling entry and let fill safety own the exit.
+                await self._cancel_symbol_entries(candidate.symbol)
+                return
             if first is not None and await self._clean_zero_fill_moc_terminal(first, candidate.symbol):
                 self._quote_cooldown_until[candidate.symbol] = asyncio.get_running_loop().time() + 5
                 return
             raise RuntimeError("first maker leg lacked positive working acknowledgment")
         first_order = self.account.reducer.orders.get(first.server_order_id or "")
+        if first_order is not None and first_order.cumulative_filled > 0:
+            await self._cancel_symbol_entries(candidate.symbol)
+            return
         if (not self.gate.may_submit or candidate.symbol in self.account.blocked_entries
-                or first_order is None or not first_order.working or first_order.cumulative_filled > 0
+                or first_order is None or not first_order.working
                 or self.account.reducer.positions.get(candidate.symbol, Decimal("0")) != 0
                 or not self._entry_time_valid(candidate.symbol) or not self._book_fresh(candidate.symbol)):
             return

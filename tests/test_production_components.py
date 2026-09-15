@@ -6,6 +6,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -783,6 +784,11 @@ class OrchestratorWiringTests(unittest.IsolatedAsyncioTestCase):
             private = Private()
             runtime.private = private
             runtime.account.available_usd = Decimal("100")
+            runtime.account.confirmed_usd = Decimal("100")
+            runtime.account.expected_confirmed_usd = Decimal("100")
+            runtime.account.expected_positions = {}
+            runtime.account.last_balance_at = time.monotonic()
+            runtime.account.last_position_at = time.monotonic()
             runtime._expiry["X"] = NOW + timedelta(hours=2)
             book = LocalBook("X")
             book.apply_snapshot([(Decimal(".48"), Decimal("100"))], [(Decimal(".52"), Decimal("100"))], 1, 1, NOW)

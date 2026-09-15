@@ -12,6 +12,7 @@ from decimal import Decimal as D
 import json
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -53,6 +54,11 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.control_directory = Path(self.temporary.name) / "isolated-control"
         self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")
         self.runtime.account.available_usd = D("100")
+        self.runtime.account.confirmed_usd = D("100")
+        self.runtime.account.expected_confirmed_usd = D("100")
+        self.runtime.account.expected_positions = {}
+        self.runtime.account.last_balance_at = time.monotonic()
+        self.runtime.account.last_position_at = time.monotonic()
         self.runtime.gate.state = EngineState.QUOTING
         for field in ("terms_accepted", "balances_known", "positions_known", "open_orders_known",
                       "account_stream_live", "public_stream_live"):
@@ -109,8 +115,10 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             })
             return intent.client_order_id
         self.runtime.private.place_maker = place
+        self.runtime._cancel_symbol_entries = AsyncMock()
         await self.runtime._quote_pair(candidate())
         self.assertEqual(sent, [Outcome.YES])
+        self.runtime._cancel_symbol_entries.assert_awaited_once_with("X")
 
     async def test_clean_zero_fill_second_leg_moc_cancel_cools_symbol_without_global_failure(self):
         sent = []

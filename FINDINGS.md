@@ -1,5 +1,14 @@
 # Gemini findings
 
+## September 15, 2026: 17:00 fill race and fail-safe drain
+
+- Gemini filled BUY YES 10 on the XRP 21:00 September 16 contract at $0.81 while the paired NO leg was waiting for its private-WebSocket send slot. The pre-send guard correctly did not transmit the stale second leg.
+- The guard's ordinary account-transition rejection was wrapped as a generic failure, so orchestration drained the whole account. It canceled every pending entry and sold XRP YES 10 at $0.77; final authenticated state was flat/order-free. The round trip was -$0.49 including the recorded $0.09 fee.
+- Current-window realized P&L is -$0.28 after all matched lifecycles, including the previously authenticated manual closes. Classification is complete and the 30-order cap remains available below the $30 HARD.
+- A dedicated regression reproduces the second-leg race and fails under the old handler. The repaired handler cancels affected-symbol entry remnants without halting unrelated markets; full offline verification passes 205 production and 28 script tests.
+- The runner durably recorded `recoverable_flat`, but the old supervisor surfaced exit code zero and did not use its bounded restart. A same-session atomic runner result now carries the classification; malformed or missing results fail closed.
+
+
 ## September 15, 2026: manual-close reconciliation and restart readiness
 
 - Authenticated, symbol-bounded history uniquely matched the earlier manual closes: SELL NO 10 on each of the exact ETH and SOL contracts, both fully filled before the manual-flat audit. The server supplied exact average prices but no fee field.

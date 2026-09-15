@@ -9,6 +9,7 @@ import sys
 
 from .config import ConfigurationError, load_live_config, load_policy, load_preflight_config
 from .orchestrator import ProductionOrchestrator
+from .runtime_files import atomic_write_json
 from .storage import SQLiteJournal
 
 
@@ -16,6 +17,17 @@ class LiveRunnerExit(RuntimeError):
     def __init__(self, code: int, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _write_live_runner_result(
+    directory: Path, *, session_id: str | None, exit_code: int, outcome: str,
+) -> None:
+    """Persist a same-session result for the native Windows supervisor."""
+    atomic_write_json(directory / "runner-result.json", {
+        "session_id": session_id or "",
+        "exit_code": exit_code,
+        "outcome": outcome,
+    })
 
 
 async def _prepare(config_path: Path, directory: Path) -> None:
@@ -157,10 +169,23 @@ def main() -> int:
                 supervisor_session_id=args.supervisor_session_id,
             ))
         except LiveRunnerExit as exc:
+            _write_live_runner_result(
+                args.directory, session_id=args.supervisor_session_id,
+                exit_code=exc.code,
+                outcome="recoverable_flat" if exc.code == 5 else "failed",
+            )
             print(f"live runner stopped: {exc}", file=sys.stderr)
             return exc.code
         except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
+            _write_live_runner_result(
+                args.directory, session_id=args.supervisor_session_id,
+                exit_code=2, outcome="startup_or_unclassified_failure",
+            )
             parser.error(str(exc))
+        _write_live_runner_result(
+            args.directory, session_id=args.supervisor_session_id,
+            exit_code=0, outcome="closed",
+        )
         return 0
     return 2
 

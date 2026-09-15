@@ -13,14 +13,31 @@ from unittest.mock import AsyncMock, patch
 import test_repair_integration as repair_fixtures
 from test_repair_integration import NOW
 from test_review_regressions import candidate
+from gemini_bot.cli import _write_live_runner_result
 from gemini_bot.domain import EngineState
-from gemini_bot.execution import IntentState
-from gemini_bot.live_ws import QuoteChangedBeforeSend
+from gemini_bot.execution import IntentState, OrderPurpose
+from gemini_bot.live_ws import EntryStateChangedBeforeSend, QuoteChangedBeforeSend
 from gemini_bot.persistent_risk import PersistentRiskWindow
 from gemini_bot.rate_limits import AdmissionGovernor
 from gemini_bot.rest_client import ApiError, GeminiReadRestClient
 from gemini_bot.risk_windows import RiskWindowPolicy
 from gemini_bot.storage import SQLiteJournal
+
+
+class SupervisorResultTests(unittest.TestCase):
+    def test_runner_result_is_atomic_and_session_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            _write_live_runner_result(
+                path, session_id="session-a", exit_code=5,
+                outcome="recoverable_flat",
+            )
+            result = json.loads((path / "runner-result.json").read_text())
+            self.assertEqual(result, {
+                "session_id": "session-a",
+                "exit_code": 5,
+                "outcome": "recoverable_flat",
+            })
 
 
 class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
@@ -74,6 +91,56 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
             "SELECT outcome,state FROM order_intent ORDER BY outcome"
         ).fetchall()
         self.assertIn(("NO", IntentState.TERMINAL.value), rows)
+
+    async def test_second_leg_account_transition_cancels_sibling_without_global_halt(self):
+        transport = self.runtime.private
+        transport._connection = AsyncMock()
+
+        async def send(raw):
+            params = json.loads(raw)["params"]
+            self.runtime.account.apply({
+                "e": "orderUpdate", "i": "yes-order", "c": params["clientOrderId"],
+                "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "10",
+                "p": params["price"], "X": "OPEN",
+            })
+            # Model the brief cash/position mismatch after a fill while the
+            # second leg is waiting for its private-WebSocket send slot.
+            self.runtime.account.expected_confirmed_usd = D("99")
+
+        transport._connection.send.side_effect = send
+        self.runtime._cancel_symbol_entries = AsyncMock()
+        await self.runtime._quote_pair(candidate())
+        self.assertEqual(transport._connection.send.await_count, 1)
+        self.runtime._cancel_symbol_entries.assert_awaited_once_with("X")
+        self.assertTrue(self.runtime.gate.may_submit)
+        rows = self.runtime.journal.connection.execute(
+            "SELECT outcome,state FROM order_intent ORDER BY outcome"
+        ).fetchall()
+        self.assertIn(("NO", IntentState.TERMINAL.value), rows)
+
+    async def test_entry_cutoff_change_is_typed_as_recoverable_unsent_state(self):
+        self.runtime._expiry["X"] = NOW + timedelta(minutes=5)
+        with self.assertRaises(EntryStateChangedBeforeSend):
+            self.runtime._validate_send(self.fixture.payload())
+
+    async def test_first_leg_fill_before_waiter_uses_fill_safety_not_global_halt(self):
+        intent = self.runtime.ledger.prepare(candidate().quote.yes, OrderPurpose.ENTRY)
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        self.runtime.private.place_maker = AsyncMock(return_value=intent.client_order_id)
+        async def fill_before_waiter_returns(_client_order_id):
+            self.runtime.account.apply({
+                "e": "orderUpdate", "i": "filled-order", "c": intent.client_order_id,
+                "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "0",
+                "p": ".46", "X": "FILLED", "Z": "10", "L": ".46",
+                "n": "0", "t": "fill-before-waiter", "T": int(NOW.timestamp() * 1000),
+            })
+        self.runtime.account.wait_for_order_event = AsyncMock(
+            side_effect=fill_before_waiter_returns,
+        )
+        self.runtime._cancel_symbol_entries = AsyncMock()
+        await self.runtime._quote_pair(candidate())
+        self.runtime._cancel_symbol_entries.assert_awaited_once_with("X")
+        self.assertTrue(self.runtime.gate.may_submit)
 
     async def test_stale_rank_candidate_is_skipped_until_reranked(self):
         self.runtime.private.place_maker = AsyncMock()
