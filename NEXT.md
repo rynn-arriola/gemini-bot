@@ -1,6 +1,6 @@
 # Next work
 
-The September 15 profitability-v2 process is stopped after exposing a terminal-unfilled IOC recovery defect. The account has since been authenticated flat/order-free and the operator-confirmed manual closes were reconciled without resetting the loss window. Complete release checks and push, then use a fresh build-bound version-5 bounded-session permit for the already authorized date-bounded policy; no prior permit may be reused. Restart through the Windows supervisor and verify the bounded exact-residual exit on the next fill.
+The repaired September 15 profitability-v2 process is live under the version-5 Windows supervisor from pushed commit `6f52ed2`. It started after fresh authenticated flat/order-free preflight and currently owns the only mutation session. Monitor the next fill and verify the bounded exact-residual exit; do not induce a crash or duplicate process merely to test supervision.
 
 After the Eastern reward day closes, compare authenticated liquidity reward, maker-rebate and fee records with v2's recorded reward/share/cost proxies. Calibrate projected fills and adverse-move cost only from reconciled evidence; public trade touches remain non-authoritative. Confirm the process drains at permit expiry.
 

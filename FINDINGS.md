@@ -6,6 +6,7 @@
 - The send was not ambiguous. Gemini documents that IOC orders finish with `CANCELED` and execution quantity determines whether they filled. The defect was local: terminal zero-fill was treated as failure-to-prove-flat, then the retained ambiguity latch prohibited emergency drain from retrying the known residual.
 - The owner manually closed both positions. Subsequent authenticated REST plus WebSocket preparation proved zero positions and zero active orders. The supported manual-flat command adopted that truth, cleared two stale deadlines, left all prior bot intents terminal, and preserved the existing risk window.
 - Gemini's `c` balance-stream field is documented as confirmed balance and `f` as available balance, confirming the runtime mapping used during reconciliation.
+- Post-repair activation from pushed commit `6f52ed2` passed a fresh authenticated preflight and entered supervised quoting. A bounded REST check found 20 active orders and all 20 prices exactly equal to the latest rank report's two-tick targets; the account remained position-free at that checkpoint.
 
 ## September 15, 2026: profitability ranking v2
 
