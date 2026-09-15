@@ -1,6 +1,8 @@
 # Next work
 
-The repaired owner-approved September 15 live observation is active under a fresh, one-use, midnight-Eastern permit. Do not start a second mutation process or reuse either consumed permit. Monitor the first real fill and verify immediate sibling cancellation, authenticated signed-position accounting, the exact same-outcome SELL exit, the five-minute or earlier deadline, fees and final flat reconciliation.
+The owner-approved September 15 profitability-v2 observation is active under a fresh, one-use, midnight-Eastern permit in `data/production-today-20260915-profitability-v2-current`. Do not start a second mutation process or reuse any prior permit. Monitor the first real fill and verify immediate sibling cancellation, authenticated signed-position accounting, the exact same-outcome SELL exit, the five-minute or earlier deadline, fees and final flat reconciliation.
+
+After the Eastern reward day closes, compare authenticated liquidity reward, maker-rebate and fee records with v2's recorded reward/share/cost proxies. Calibrate projected fills and adverse-move cost only from reconciled evidence; public trade touches remain non-authoritative. Confirm the process drains at permit expiry.
 
 For normal operation after today, omit the uptime override. Form a sticky top-ranked cohort for each scoring window, target 75% local qualifying snapshots against Gemini's 50% requirement, and rotate only when a pool ends, becomes unsafe/ineligible, cannot still qualify, or has completed its target. Do not scatter uptime across more pools than the 30-order/15-pool capacity can support.
 
@@ -28,7 +30,7 @@ Add a read-only Gemini Statuspage monitor in a later tested release. Record upco
 
 ## Commissioning record and remaining work
 
-1. Re-run offline release validation and review the 127 production plus 28 script/observer test results after any code change.
+1. Re-run offline release validation and review the 151 production plus 28 script/observer test results after any code change.
 2. The repeat one-leg live canary is complete: exactly one five-second MOC order rested for approximately 5.25 seconds and terminally canceled unfilled; final account reconciliation was flat with zero active orders.
 3. The two-sided canary and owner-approved date-bounded reward-catalog activation are complete/active; do not duplicate them.
 4. Observe the first real fill. Verify immediate sibling-order cancellation, exact position accounting, 300-second timed exit, fee classification, and final reconciliation. Any ambiguity must halt rather than be inferred.

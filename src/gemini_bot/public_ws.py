@@ -117,6 +117,14 @@ class PublicMarketSocket:
                 [f"{symbol}@depth" for symbol in batch],
                 Priority.MARKET_RESYNC,
             )
+            # Trade prints feed the profitability estimator.  Keep this as a
+            # separate bounded request so subscription message width remains
+            # at the already-tested 20-stream batch size.
+            await self._send(
+                "SUBSCRIBE",
+                [f"{symbol}@trade" for symbol in batch],
+                Priority.MARKET_RESYNC,
+            )
 
     async def resync(self, symbol: str) -> None:
         symbol = canonical_symbol(symbol)

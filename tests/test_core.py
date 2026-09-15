@@ -26,7 +26,12 @@ from gemini_bot.execution import (
 from gemini_bot.inventory import ExitAction, Position, TimedExitPolicy, pending_capacity, plan_timed_exit
 from gemini_bot.market_state import LocalBook, SequenceGap
 from gemini_bot.rate_limits import AdmissionGovernor, Priority
-from gemini_bot.reward_ranking import RankInput, rank_candidate, rank_unique_pools
+from gemini_bot.reward_ranking import (
+    RankInput,
+    rank_candidate,
+    rank_unique_pools,
+    select_sticky_candidates,
+)
 from gemini_bot.scheduler import DirtySymbolScheduler
 from gemini_bot.public_ws import PublicMarketSocket
 from gemini_bot.storage import SQLiteJournal, WindowsOwnerLock
@@ -38,6 +43,14 @@ from gemini_bot.error_policy import FailureContext, RecoveryAction, decide_recov
 from gemini_bot.risk_gate import ExposureState, admit_quote_pair
 from gemini_bot.rest_client import GeminiReadRestClient, private_headers
 from gemini_bot.catalog import join_reward_contracts
+from gemini_bot.profitability import (
+    ProfitabilityEvidence,
+    ProfitabilityTracker,
+    active_maker_rebate_fractions,
+    estimated_round_trip_fees,
+)
+
+D = Decimal
 
 
 NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
@@ -115,6 +128,25 @@ class RankingTests(unittest.TestCase):
         ]
         self.assertEqual(len(rank_unique_pools(items, now=NOW)), 1)
 
+    def test_shared_pool_uses_v2_potential_when_only_uptime_is_overridden(self) -> None:
+        progress = UptimeProgress(100, 0, 0)
+        items = [
+            RankInput(
+                RewardPool("shared:1", D("100")), rules("A"), book("A"), progress,
+                profitability=ProfitabilityEvidence(expected_execution_cost_usd=D("5")),
+            ),
+            RankInput(
+                RewardPool("shared:1", D("100")), rules("B"), book("B"), progress,
+                profitability=ProfitabilityEvidence(expected_execution_cost_usd=D("1")),
+            ),
+        ]
+        selected = rank_unique_pools(items, now=NOW)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].symbol, "B")
+        self.assertEqual(selected[0].reasons, (
+            "50% uptime is no longer reachable in the estimated window",
+        ))
+
     def test_impossible_uptime_is_ineligible(self) -> None:
         progress = UptimeProgress(80, 10, 20)
         result = rank_candidate(RankInput(RewardPool("p", Decimal("50")), rules(), book(), progress), now=NOW)
@@ -125,6 +157,129 @@ class RankingTests(unittest.TestCase):
         result = rank_candidate(RankInput(RewardPool("p", Decimal("50")), rules(), book()), now=NOW + timedelta(seconds=4))
         self.assertFalse(result.eligible_now)
         self.assertIn("stale market data", result.reasons)
+
+    def test_v2_prefers_better_midpoint_quality_with_same_pool_economics(self) -> None:
+        close = BookTop("A", D(".49"), D("100"), D(".51"), D("100"), 1, NOW)
+        wide = BookTop("B", D(".45"), D("100"), D(".55"), D("100"), 1, NOW)
+        ranked = rank_unique_pools([
+            RankInput(RewardPool("close", D("100"), qualifying_maker_count=5), rules("A"), close),
+            RankInput(RewardPool("wide", D("100"), qualifying_maker_count=5), rules("B"), wide),
+        ], now=NOW)
+        self.assertEqual(ranked[0].symbol, "A")
+        self.assertGreater(ranked[0].profitability_per_capital_hour, ranked[1].profitability_per_capital_hour)
+
+    def test_v2_subtracts_execution_cost_instead_of_only_ranking_rewards(self) -> None:
+        safe = RankInput(
+            RewardPool("safe", D("100"), qualifying_maker_count=5), rules("A"), book("A"),
+            profitability=ProfitabilityEvidence(expected_execution_cost_usd=D("1")),
+        )
+        costly = RankInput(
+            RewardPool("costly", D("100"), qualifying_maker_count=5), rules("B"), book("B"),
+            profitability=ProfitabilityEvidence(expected_execution_cost_usd=D("10")),
+        )
+        ranked = rank_unique_pools([costly, safe], now=NOW)
+        self.assertEqual(ranked[0].symbol, "A")
+        self.assertEqual(
+            ranked[0].expected_net_profit_usd,
+            ranked[0].expected_reward_usd - D("1"),
+        )
+
+    def test_v2_blocks_non_positive_conservative_net(self) -> None:
+        result = rank_candidate(RankInput(
+            RewardPool("loss", D("10"), qualifying_maker_count=100),
+            rules(), book(),
+            profitability=ProfitabilityEvidence(expected_execution_cost_usd=D("10")),
+        ), now=NOW)
+        self.assertFalse(result.eligible_now)
+        self.assertIn("non-positive conservative net-profit estimate", result.reasons)
+
+    def test_v2_sticky_cohort_resists_rank_churn_until_incumbent_is_unsafe(self) -> None:
+        challenger = rank_candidate(RankInput(
+            RewardPool("challenger", D("200")), rules("A"), book("A"),
+        ), now=NOW)
+        incumbent = rank_candidate(RankInput(
+            RewardPool("incumbent", D("100")), rules("B"), book("B"),
+        ), now=NOW)
+        selected, pool_ids = select_sticky_candidates(
+            [challenger, incumbent], sticky_pool_ids={"incumbent"},
+            locked_pool_ids=set(), permitted_symbols={"A", "B"},
+            maximum_active_pools=1, actionable=lambda _: True,
+            entry_time_valid=lambda _: True,
+        )
+        self.assertEqual([item.pool_id for item in selected], ["incumbent"])
+        self.assertEqual(pool_ids, {"incumbent"})
+        replaced, pool_ids = select_sticky_candidates(
+            [challenger, incumbent], sticky_pool_ids={"incumbent"},
+            locked_pool_ids=set(), permitted_symbols={"A", "B"},
+            maximum_active_pools=1,
+            actionable=lambda item: item.pool_id != "incumbent",
+            entry_time_valid=lambda _: True,
+        )
+        self.assertEqual([item.pool_id for item in replaced], ["challenger"])
+        self.assertEqual(pool_ids, {"challenger"})
+
+
+class ProfitabilityTests(unittest.TestCase):
+    def test_fee_estimate_includes_maker_rebate_and_taker_exit(self) -> None:
+        self.assertEqual(
+            estimated_round_trip_fees(
+                quantity=D("10"), entry_price=D(".50"), exit_price=D(".50"),
+                maker_rebate_fraction=D(".30"),
+            ),
+            D(".18"),
+        )
+
+    def test_current_rebate_rule_resolution_prefers_category_rule(self) -> None:
+        rows = [
+            {"effective_from": "2026-01-01T00:00:00Z", "rebate_multiplier_bps": 3000},
+            {"effective_from": "2026-02-01T00:00:00Z", "rebate_multiplier_bps": 5000,
+             "effective_to": "2026-03-01T00:00:00Z", "category": "Sports"},
+            {"effective_from": "2026-03-01T00:00:00Z", "rebate_multiplier_bps": 2500,
+             "category": "Sports"},
+        ]
+        active = active_maker_rebate_fractions(rows, now=NOW)
+        self.assertEqual(active["*"], D(".30"))
+        self.assertEqual(active["sports"], D(".25"))
+
+    def test_trade_telemetry_projects_touch_cost_and_survives_restart(self) -> None:
+        tracker = ProfitabilityTracker(window_minutes=30)
+        local = LocalBook("X")
+        local.apply_snapshot([(D(".49"), D("100"))], [(D(".51"), D("100"))], 1, 1, NOW)
+        for minute in range(30):
+            tracker.observe_book(local, observed_at=NOW - timedelta(minutes=29 - minute))
+        tracker.observe_trade(
+            {"s": "X", "t": 1, "p": ".47", "q": "10", "m": True},
+            observed_at=NOW,
+        )
+        quote = rank_candidate(
+            RankInput(RewardPool("p", D("100")), rules("X"), local.top()), now=NOW,
+        ).quote
+        evidence = tracker.estimate(
+            symbol="X", quote=quote, book=local, tick_size=D(".01"),
+            planned_minutes=D("1080"), now=NOW, maker_rebate_fraction=D(".30"),
+        )
+        self.assertEqual(evidence.data_confidence, D("1"))
+        self.assertGreater(evidence.estimated_daily_fills, D("0"))
+        self.assertGreater(evidence.expected_execution_cost_usd, D("0"))
+        restored = ProfitabilityTracker(window_minutes=30)
+        restored.loads(tracker.dumps(now=NOW), now=NOW)
+        again = restored.estimate(
+            symbol="X", quote=quote, book=local, tick_size=D(".01"),
+            planned_minutes=D("1080"), now=NOW, maker_rebate_fraction=D(".30"),
+        )
+        self.assertEqual(again, evidence)
+
+    def test_duplicate_trade_id_is_not_double_counted_across_restart(self) -> None:
+        tracker = ProfitabilityTracker()
+        frame = {"s": "X", "t": 7, "p": ".47", "q": "10", "m": True}
+        tracker.observe_trade(frame, observed_at=NOW)
+        tracker.observe_trade(frame, observed_at=NOW)
+        saved = tracker.dumps(now=NOW)
+        self.assertEqual(len(json.loads(saved)["trades"]["X"]), 1)
+        restored = ProfitabilityTracker()
+        restored.loads(saved, now=NOW)
+        restored.observe_trade(frame, observed_at=NOW + timedelta(seconds=1))
+        self.assertEqual(len(json.loads(restored.dumps(now=NOW))["trades"]["X"]), 1)
 
 
 class BookTests(unittest.TestCase):

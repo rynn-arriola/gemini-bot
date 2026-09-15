@@ -5,7 +5,7 @@ September 15 implementation update: [repair evidence](REPAIR_REPORT_2026-09-15.m
 ## Data and control flow
 
 ```text
-Gemini public WebSocket ----> sequence-aware local books ----> dirty-symbol queue
+Gemini public WebSocket ----> sequence-aware local books/trades -> bounded telemetry
                                                                |
 Gemini reward/event REST ---> pool-deduped catalog ------------+--> reward/risk ranker
                                                                |
@@ -34,11 +34,12 @@ Each candidate constructs two maker-only BUY legs: YES and NO, 10 contracts each
 
 1. rejects inactive pools/contracts, post-only-mode exclusions, stale books, off-increment quantities, invalid prices, quotes over 10 cents from midpoint, and impossible 50% uptime;
 2. caps counted size at 250 and applies the published 1.5 two-sided factor;
-3. applies a labeled quadratic distance proxy solely to order candidates;
-4. discounts by coarse qualifying-maker count, observed fill hazard, and exit risk;
-5. keeps only the highest-ranked contract for each unique pool in the first allocation pass.
+3. applies a labeled quadratic distance proxy and a conservative competitor prior from the coarse qualifying-maker count;
+4. estimates reward share, subtracts maker-entry/taker-exit fees, applicable maker rebate, adverse movement and haircut-adjusted exit-depth costs;
+5. normalizes conservative net by two-leg reservation-hours and keeps only the highest-ranked contract for each unique pool;
+6. retains a healthy selected cohort so noisy short-term telemetry does not destroy accumulated uptime.
 
-The priority score is unitless. Actual reward dollars require authenticated daily scores and the venue's total qualifying score, which is not public.
+The priority score is a net-profit-per-capital-hour proxy. Its reward, share, fill, cost and net components remain explicitly labeled proxies. Actual reward dollars require authenticated daily scores and the venue's total qualifying score, which is not public. Details and limitations are in [Profitability ranking v2](PROFITABILITY_RANKING_V2.md).
 
 Local one-minute uptime samples persist by event ticker plus shared pool ID. `pool_id` deduplicates the advertised budget; event identity prevents one recurring instance from inheriting another instance's timing. The usable window is the intersection of the Eastern payout day, contract `effectiveDate`, published reward end, and the five-minute pre-expiry safety boundary. When the reward feed omits its activation timestamp, the conservative bound begins at the later of Eastern midnight or contract effective time; first observation is reported separately and never weakens admission. Zone-aware boundaries preserve DST days. A sample is locally qualifying when authenticated account state shows at least one working qualifying BUY outcome order of 10 or more contracts; two sides receive the separate multiplier. This is operational evidence and a feasibility input, not venue-certified scoring. The following authenticated daily summary's `total_snapshots` is the venue-authoritative denominator used to calibrate the proxy.
 

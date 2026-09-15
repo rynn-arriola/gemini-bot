@@ -20,9 +20,11 @@ from .exit_pricing import exact_crossing_exit
 from .live_ws import LiveWebSocket
 from .operational_logging import ErrorClass, OperationalLogger, configure_logging
 from .persistent_risk import PersistentRiskWindow
+from .profitability import ProfitabilityTracker, active_maker_rebate_fractions
 from .public_ws import PublicMarketSocket
 from .rank_report import public_rank_rows, rank_live_universe
 from .rate_limits import AdmissionGovernor
+from .reward_ranking import select_sticky_candidates
 from .reconciliation import (
     AccountSnapshot,
     assert_position_consistency,
@@ -30,7 +32,7 @@ from .reconciliation import (
     build_account_snapshot,
     exposure_from_snapshot,
 )
-from .rest_client import GeminiReadRestClient
+from .rest_client import ApiError, GeminiReadRestClient
 from .risk_gate import admit_quote_pair
 from .risk_gate import ExposureState
 from .risk_windows import RiskWindowPolicy
@@ -95,9 +97,12 @@ class ProductionOrchestrator:
         self.private.mutation_guard = self._validate_send
         self.universe = []
         self.ranked = []
+        self.profitability = ProfitabilityTracker()
+        self._maker_rebate_fractions: dict[str, Decimal] = {}
         self._tasks: list[asyncio.Task[None]] = []
         self._closed = False
         self._activated_pool_ids: set[str] = set()
+        self._sticky_pool_ids: set[str] = set()
         self._expiry: dict[str, datetime] = {}
         self._trade_start: dict[str, datetime] = {}
         self._sports_start: dict[str, datetime] = {}
@@ -156,11 +161,23 @@ class ProductionOrchestrator:
     async def _public_pump(self) -> None:
         try:
             async for frame in self.public.frames():
+                observed_at = _utc_now()
                 if frame.get("e") == "contractStatus":
                     self._handle_contract_status(frame)
-                gap = self.public.apply_frame(frame)
+                if all(key in frame for key in ("s", "t", "p", "q", "m")):
+                    self.profitability.observe_trade(frame, observed_at=observed_at)
+                updated_symbol = self.public.apply_frame(frame)
+                if (
+                    frame.get("e") == "depthUpdate"
+                    and updated_symbol is not None
+                    and updated_symbol not in self.public.resync_required
+                ):
+                    symbol = str(frame.get("s", "")).upper()
+                    book = self.public.books.get(symbol)
+                    if book is not None:
+                        self.profitability.observe_book(book, observed_at=observed_at)
                 self._mark_live_risk()
-                if gap is not None and gap in self.public.resync_required:
+                if updated_symbol is not None and updated_symbol in self.public.resync_required:
                     # Do not accept buffered old deltas as a replacement snapshot.
                     # Reconnect/reconcile under fresh approval, never resume quoting.
                     raise RuntimeError("depth sequence gap requires fresh connection and reconciliation")
@@ -271,6 +288,9 @@ class ProductionOrchestrator:
         self.account.inventory_age_seconds = self.config.risk.max_inventory_age_seconds
         self.account.exit_before_expiry_seconds = self.config.risk.force_exit_before_expiry_seconds
         self.log = OperationalLogger(self._logging, canonical)
+        saved_profitability = canonical.get_runtime_state("profitability_telemetry_v1")
+        if saved_profitability is not None:
+            self.profitability.loads(saved_profitability, now=_utc_now())
         self.gate.begin_reconciliation()
         self._write_status("reconciling", False, "read-only startup")
         try:
@@ -283,6 +303,15 @@ class ProductionOrchestrator:
             reward_config = await self.rest.reward_config()
             if reward_config.get("enabled") is not True:
                 raise RuntimeError("Gemini liquidity rewards are not currently enabled")
+            if hasattr(self.rest, "maker_rebate_rates"):
+                try:
+                    rebate_rows = await self.rest.maker_rebate_rates()
+                except ApiError:
+                    self.journal.audit("maker_rebate_rates_unavailable", {})
+                else:
+                    self._maker_rebate_fractions = active_maker_rebate_fractions(
+                        rebate_rows, now=_utc_now(),
+                    )
             self._resolve_prior_intents(history, orders_before)
             before = build_account_snapshot(positions_before, orders_before)
             for order in before.active_orders:
@@ -360,6 +389,14 @@ class ProductionOrchestrator:
                 uptime=self._uptime,
                 account=self.account.reducer,
                 market_data_verified_at=self._market_data_verified_at(),
+                profitability=self.profitability,
+                target_uptime=self.config.strategy.target_uptime,
+                maker_rebate_fractions=self._maker_rebate_fractions,
+            )
+            self.journal.set_runtime_state(
+                "profitability_telemetry_v1",
+                self.profitability.dumps(now=now),
+                updated_at=now,
             )
             atomic_write_json(
                 self.directory / "rank-report.json",
@@ -385,13 +422,38 @@ class ProductionOrchestrator:
             self._write_status("halted", False, "read-only startup failed")
             raise
 
-    async def _cancel_order_and_confirm(self, order_id: str, *, timeout: float = 10) -> None:
+    async def _cancel_order_and_confirm(self, order_id: str, *, timeout: float = 45) -> None:
         await self.private.cancel(order_id)
         deadline = asyncio.get_running_loop().time() + timeout
+        last_transient: ApiError | None = None
         while asyncio.get_running_loop().time() < deadline:
-            rows = await self.rest.active_orders()
+            # The authenticated order stream is the lowest-latency terminal
+            # proof and avoids unnecessary REST reads in the normal path.
+            current = self.account.reducer.orders.get(order_id)
+            if current is not None and not current.working:
+                return
+            try:
+                rows = await self.rest.active_orders()
+            except ApiError as exc:
+                if exc.status is not None and exc.status not in {408, 418, 429} and not 500 <= exc.status < 600:
+                    raise
+                last_transient = exc
+                await asyncio.sleep(0.5)
+                continue
             if all(str(row.get("orderId")) != order_id for row in rows):
-                history = await self.rest.order_history()
+                try:
+                    # A just-cancelled order should be on the newest page. Use
+                    # the contract filter and maximum documented page size; a
+                    # full page is valid and must not be mistaken for overflow.
+                    history = await self.rest.recent_order_history(
+                        symbol=current.symbol if current is not None else None,
+                    )
+                except ApiError as exc:
+                    if exc.status is not None and exc.status not in {408, 418, 429} and not 500 <= exc.status < 600:
+                        raise
+                    last_transient = exc
+                    await asyncio.sleep(0.5)
+                    continue
                 terminal = next((row for row in history if str(row.get("orderId")) == order_id), None)
                 if terminal is not None and str(terminal.get("status", "")).upper() in {"CANCELLED", "CANCELED", "FILLED", "REJECTED"}:
                     order = self.account.reducer.orders.get(order_id)
@@ -404,7 +466,7 @@ class ProductionOrchestrator:
                             self.ledger.mark_terminal(order.client_order_id)
                     return
             await asyncio.sleep(0.25)
-        raise TimeoutError("order cancellation was not proven terminal")
+        raise TimeoutError("order cancellation was not proven terminal") from last_transient
 
     async def _cancel_symbol_entries(self, symbol: str) -> None:
         for order_id in self.account.reducer.risk_adding_order_ids(symbol):
@@ -993,6 +1055,11 @@ class ProductionOrchestrator:
                             books=self.public.books,
                             market_data_verified_at=self._market_data_verified_at(),
                         )
+                        self.journal.set_runtime_state(
+                            "profitability_telemetry_v1",
+                            self.profitability.dumps(now=now),
+                            updated_at=now,
+                        )
                         next_uptime_at = clock + 60
                     self.ranked = rank_live_universe(
                         self.universe, self.public.books, now=_utc_now(),
@@ -1001,6 +1068,9 @@ class ProductionOrchestrator:
                         uptime=self._uptime,
                         account=self.account.reducer,
                         market_data_verified_at=self._market_data_verified_at(),
+                        profitability=self.profitability,
+                        target_uptime=self.config.strategy.target_uptime,
+                        maker_rebate_fractions=self._maker_rebate_fractions,
                     )
                     if clock >= getattr(self, "_next_report_at", 0.0):
                         atomic_write_json(
@@ -1018,21 +1088,20 @@ class ProductionOrchestrator:
                         for symbol, quantity in self.account.reducer.positions.items()
                         if quantity != 0 and symbol in pool_by_symbol
                     }
-                    desired = []
-                    desired_pools = set(locked_pools)
-                    for candidate in self.ranked:
-                        if (
-                            candidate.symbol not in self._permitted_symbols
-                            or not self._candidate_actionable(candidate)
-                        ):
-                            continue
-                        if (
-                            candidate.pool_id not in desired_pools
-                            and len(desired_pools) >= permit.maximum_active_pools
-                        ):
-                            continue
-                        desired.append(candidate)
-                        desired_pools.add(candidate.pool_id)
+                    # Cohorts are sticky: live telemetry affects initial choice
+                    # and replacement of unsafe/ineligible pools, but one noisy
+                    # minute cannot churn otherwise healthy quotes and destroy
+                    # the daily uptime needed for any reward.
+                    desired, desired_pools = select_sticky_candidates(
+                        self.ranked,
+                        sticky_pool_ids=self._sticky_pool_ids,
+                        locked_pool_ids=locked_pools,
+                        permitted_symbols=self._permitted_symbols,
+                        maximum_active_pools=permit.maximum_active_pools,
+                        actionable=self._candidate_actionable,
+                        entry_time_valid=self._entry_time_valid,
+                    )
+                    self._sticky_pool_ids = set(desired_pools)
                     candidates_by_symbol = {item.symbol: item for item in desired}
                     await self._cancel_ineligible_working_entries(candidates_by_symbol)
                     self._activated_pool_ids = set(locked_pools)

@@ -1,6 +1,6 @@
 # Gemini Predictions liquidity-rewards bot
 
-**A date-bounded live reward-catalog observation is active.** The repaired Windows process is quoting up to 15 rewarded pools/30 pending orders under the owner-approved September 15 permit. It started flat, remains subject to the $300 gross, $90 per-market, $25/six-hour, five-minute inventory and pregame controls, and must drain when the permit expires at midnight Eastern. See [STATUS.md](STATUS.md) for the current operational truth and [NEXT.md](NEXT.md) for remaining verification.
+**A date-bounded profitability-v2 reward-catalog run is active.** The Windows process quotes up to 15 rewarded pools/30 pending orders under the owner-approved September 15 permit. It started from an authenticated flat account, remains subject to the $300 gross, $90 per-market, $25/six-hour, five-minute inventory and pregame controls, and must drain when the permit expires at midnight Eastern. See [STATUS.md](STATUS.md) for the current operational truth and [NEXT.md](NEXT.md) for remaining verification.
 
 This is a native-Windows live-trading build. The production runtime is implemented under `src/gemini_bot`. WebSocket is primary and REST is bounded discovery/reconciliation fallback. Reward timing is tracked per event inside Eastern payout days while shared pools remain one budget; the unpublished reward-start boundary remains explicitly non-certified. One- and two-leg maker canaries passed, and a clean zero-fill maker-or-cancel race is now handled locally only after authenticated flat reconciliation. The current permit is one-use and date-bounded, not reusable. The earlier public-data paper observer remains research evidence, not the execution engine.
 
@@ -23,12 +23,12 @@ This is a native-Windows live-trading build. The production runtime is implement
 - One shared priority rate governor; REST remains bounded metadata/reconciliation transport.
 - Ten contracts per outcome leg, maximum 30 pending orders, $300 gross exposure, $90 per-market exposure, and separate position controls.
 - Six-hour Eastern loss windows that progressively reduce the pending-order cap as the approved loss budget is consumed.
-- Pool-deduplicated reward ranking with event-specific timing, effective-time/pre-expiry gates, sports pregame-only filtering, and explicit uncertainty around Gemini's private scoring curve.
+- Pool-deduplicated profitability ranking v2: conservative reward share less fee/rebate, projected fill, adverse-move and exit-depth costs per capital-hour, with sticky cohorts and explicit uncertainty around Gemini's private scoring curve. See [the v2 model](docs/PROFITABILITY_RANKING_V2.md).
 - Durable SQLite order-intent and inventory-deadline journal plus a native Windows single-owner lock.
 - Durable account snapshots, fill IDs, local reward-uptime samples and six-hour loss high-water marks across restart.
 - A 300-second exact inventory exit, five-minute pre-expiry override, and exactly one monetary stop: $25 per six-hour Eastern window.
 - Pool-deduplicated `rank-report.json`, atomic `status.json`, redacted rotating JSONL logs, and graceful `STOP` drain.
-- Separate read-only preparation and live activation commands. Live activation requires the exact acknowledgement and a version-2 short-lived, one-use permit bound to account, Python build, policy and exact symbols, created only after owner approval.
+- Separate read-only preparation and live activation commands. Live activation requires the exact acknowledgement and a short-lived, one-use permit bound to account, Python build and policy; version 4 may authorize a capped dynamic reward-catalog scope only after owner approval.
 
 Install the package into the existing virtual environment:
 

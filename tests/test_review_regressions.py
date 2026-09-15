@@ -6,8 +6,10 @@ these assertions describe the required behavior before commissioning.
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -76,6 +78,8 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.public.resync = AsyncMock()
         await self.runtime._public_pump()
         self.runtime.public.resync.assert_not_awaited()
+        telemetry = json.loads(self.runtime.profitability.dumps(now=NOW))
+        self.assertEqual(len(telemetry["books"]["X"]), 1)
 
     async def test_clean_private_socket_close_removes_quoting_permission(self):
         async def messages():
@@ -230,6 +234,40 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertEqual(self.runtime.journal.unresolved_ids(), ())
 
+    async def test_cancel_confirmation_retries_transient_rest_without_resending_cancel(self):
+        intent = self.runtime.ledger.prepare(candidate().quote.yes, OrderPurpose.ENTRY)
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        self.runtime.account.apply({
+            "e": "orderUpdate", "i": "cancel-1", "c": intent.client_order_id,
+            "s": "X", "S": "BUY", "O": "YES", "q": "10", "p": ".46",
+            "z": "10", "Z": "0", "X": "OPEN",
+        })
+        self.runtime.private.cancel = AsyncMock()
+        self.runtime.rest = SimpleNamespace(
+            active_orders=AsyncMock(side_effect=[ApiError(None, "TimeoutError"), []]),
+            recent_order_history=AsyncMock(return_value=[{
+                "orderId": "cancel-1", "status": "cancelled",
+            }]),
+        )
+        await self.runtime._cancel_order_and_confirm("cancel-1", timeout=2)
+        self.runtime.private.cancel.assert_awaited_once_with("cancel-1")
+        self.assertEqual(self.runtime.rest.active_orders.await_count, 2)
+        self.runtime.rest.recent_order_history.assert_awaited_once_with(symbol="X")
+        self.assertFalse(self.runtime.account.reducer.orders["cancel-1"].working)
+
+    async def test_full_recent_history_page_is_valid_terminal_lookup_input(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        rows = [{"orderId": str(index)} for index in range(1000)]
+        client.private_read = AsyncMock(return_value={"orders": rows})
+        self.assertEqual(
+            len(await client.recent_order_history(symbol="X")),
+            1000,
+        )
+        client.private_read.assert_awaited_once_with(
+            "/v1/prediction-markets/orders/history",
+            {"limit": 1000, "offset": 0, "symbol": "X"},
+        )
+
     def test_same_account_cannot_acquire_two_directory_locks(self):
         with tempfile.TemporaryDirectory() as other:
             other_runtime = ProductionOrchestrator(self.runtime.config, Path(other))
@@ -246,6 +284,12 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StorageAndTransportReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_maker_rebate_rate_shape_is_validated(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client.public_get = AsyncMock(return_value={"rate_rules": "not-a-list"})
+        with self.assertRaisesRegex(ApiError, "invalid_maker_rebate_rates_shape"):
+            await client.maker_rebate_rates()
+
     async def test_reward_catalog_restarts_after_transient_page_duplicate(self):
         client = GeminiReadRestClient(AdmissionGovernor())
         responses = [
@@ -281,6 +325,38 @@ class StorageAndTransportReviewTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApiError):
             await client.reward_config()
         self.assertGreater(client.governor.lanes["public_rest"].delay(), 119)
+
+    async def test_idempotent_rest_read_retries_transient_failures_through_governor(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client._open_json = Mock(side_effect=[
+            ApiError(None, "TimeoutError"), ApiError(503, "Unavailable"),
+            {"enabled": True},
+        ])
+        with patch("gemini_bot.rest_client.asyncio.sleep", new=AsyncMock()):
+            self.assertEqual(await client.reward_config(), {"enabled": True})
+        self.assertEqual(client._open_json.call_count, 3)
+
+    async def test_private_read_retry_rebuilds_authentication_nonce(self):
+        client = GeminiReadRestClient(
+            AdmissionGovernor(), api_key="account-fake", api_secret="fake-secret",
+        )
+        requests = []
+        def read(request):
+            requests.append(request)
+            if len(requests) == 1:
+                raise ApiError(None, "TimeoutError")
+            return {"ok": True}
+        client._open_json = read
+        with (
+            patch("gemini_bot.rest_client.time.time", side_effect=[100, 101]),
+            patch("gemini_bot.rest_client.asyncio.sleep", new=AsyncMock()),
+        ):
+            self.assertEqual(await client.terms_status(), {"ok": True})
+        nonces = [
+            json.loads(base64.b64decode(request.get_header("X-gemini-payload")))["nonce"]
+            for request in requests
+        ]
+        self.assertEqual(nonces, [100, 101])
 
     async def test_count_is_page_length_not_total_result_count(self):
         client = GeminiReadRestClient(AdmissionGovernor())

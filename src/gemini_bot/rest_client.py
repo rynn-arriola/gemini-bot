@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Callable
 import hashlib
 import hmac
 import json
@@ -19,6 +20,7 @@ PUBLIC_EXACT = frozenset({
     "/v1/prediction-markets/events",
     "/v1/prediction-markets/liquidity-rewards/config",
     "/v1/prediction-markets/liquidity-rewards/events",
+    "/v1/prediction-markets/maker-rebate/rates",
 })
 PRIVATE_READS = frozenset({
     "/v1/prediction-markets/terms/status",
@@ -133,19 +135,39 @@ class GeminiReadRestClient:
         await self._pace("public_rest", Priority.REWARD_METADATA)
         query = urllib.parse.urlencode(params or {})
         url = self.base_url + path + (("?" + query) if query else "")
-        request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
-        return await self._read_with_cooldown(request, "public_rest")
+        request_factory = lambda: urllib.request.Request(
+            url, method="GET", headers={"Accept": "application/json"},
+        )
+        return await self._read_with_cooldown(request_factory, "public_rest")
 
-    async def _read_with_cooldown(self, request: urllib.request.Request, lane: str) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(self._open_json, request)
-        except ApiError as exc:
-            if exc.status in {418, 429} or exc.retry_after is not None:
-                delay = max(60.0, exc.retry_after or 0.0)
-                # An IP/account limit can span public and private endpoints.
-                for affected in ("public_rest", "private_rest"):
-                    self.governor.apply_server_cooldown(affected, delay)
-            raise
+    async def _read_with_cooldown(
+        self,
+        request_factory: Callable[[], urllib.request.Request],
+        lane: str,
+    ) -> dict[str, Any]:
+        priority = (
+            Priority.ACCOUNT_RECONCILIATION
+            if lane == "private_rest" else Priority.REWARD_METADATA
+        )
+        for attempt in range(3):
+            try:
+                return await asyncio.to_thread(self._open_json, request_factory())
+            except ApiError as exc:
+                if exc.status in {418, 429} or exc.retry_after is not None:
+                    delay = max(60.0, exc.retry_after or 0.0)
+                    # An IP/account limit can span public and private endpoints.
+                    for affected in ("public_rest", "private_rest"):
+                        self.governor.apply_server_cooldown(affected, delay)
+                retryable = exc.status is None or exc.status == 408 or (
+                    exc.status is not None and 500 <= exc.status < 600
+                )
+                if not retryable or attempt == 2:
+                    raise
+                # Reads are idempotent. Back off and admit every retry through
+                # the same shared lane so retry traffic remains quota-accounted.
+                await asyncio.sleep(2 ** attempt)
+                await self._pace(lane, priority)
+        raise AssertionError("unreachable REST retry state")
 
     async def private_read(
         self,
@@ -162,15 +184,30 @@ class GeminiReadRestClient:
             raise ValueError("private read requires credentials")
         async with self._private_lock:
             await self._pace("private_rest", Priority.ACCOUNT_RECONCILIATION)
-            headers = private_headers(path, fields or {}, self.api_key, self.api_secret, int(time.time()))
-            request = urllib.request.Request(self.base_url + path, method=method, headers=headers, data=None)
-            return await self._read_with_cooldown(request, "private_rest")
+            def request_factory() -> urllib.request.Request:
+                # Rebuild authentication for every idempotent read attempt so
+                # a timed-out request's nonce/signature is never replayed.
+                headers = private_headers(
+                    path, fields or {}, self.api_key or "", self.api_secret or "",
+                    int(time.time()),
+                )
+                return urllib.request.Request(
+                    self.base_url + path, method=method, headers=headers, data=None,
+                )
+            return await self._read_with_cooldown(request_factory, "private_rest")
 
     async def terms_status(self) -> dict[str, Any]:
         return await self.private_read("/v1/prediction-markets/terms/status", method="GET")
 
     async def reward_config(self) -> dict[str, Any]:
         return await self.public_get("/v1/prediction-markets/liquidity-rewards/config")
+
+    async def maker_rebate_rates(self) -> list[dict[str, Any]]:
+        response = await self.public_get("/v1/prediction-markets/maker-rebate/rates")
+        rows = response.get("rate_rules")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ApiError(200, "invalid_maker_rebate_rates_shape")
+        return rows
 
     async def reward_events(self, *, ceiling: int = 3000) -> list[dict[str, Any]]:
         # Offset pagination is not a snapshot. If Gemini inserts or reorders an
@@ -231,6 +268,25 @@ class GeminiReadRestClient:
 
     async def order_history(self, *, ceiling: int = 1000) -> list[dict[str, Any]]:
         return await self._private_pages("/v1/prediction-markets/orders/history", "orders", ceiling)
+
+    async def recent_order_history(
+        self, *, symbol: str | None = None, limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read one bounded, optionally symbol-filtered history page."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("recent order-history limit must be between 1 and 1000")
+        fields: dict[str, object] = {"limit": limit, "offset": 0}
+        if symbol:
+            fields["symbol"] = symbol
+        page = await self.private_read(
+            "/v1/prediction-markets/orders/history", fields,
+        )
+        values = page.get("orders")
+        if not isinstance(values, list):
+            raise ApiError(200, "invalid_orders_shape")
+        if any(not isinstance(value, dict) for value in values):
+            raise ApiError(200, "invalid_orders_row")
+        return values
 
     async def _private_pages(self, path: str, key: str, ceiling: int) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

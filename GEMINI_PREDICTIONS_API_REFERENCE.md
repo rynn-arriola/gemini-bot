@@ -237,6 +237,8 @@ Official section: [Combos API](https://developer.gemini.com/rest-api/prediction-
 
 Maker rebates are fill-based and independent of liquidity rewards. A qualifying resting order can potentially earn both.
 
+The production selector reads the public rates endpoint once during preparation, chooses the latest currently effective category rule with the active default as fallback, and assumes zero rebate when the read is unavailable. This is ranking input only; authenticated payout data remains authoritative.
+
 Official section: [Rewards API](https://developer.gemini.com/rest-api/prediction-markets/rewards)
 
 ### Liquidity rewards

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from gemini_bot.account_runtime import AccountRuntime
 from gemini_bot.activation import (
@@ -396,6 +396,20 @@ class PublicLivenessTests(unittest.IsolatedAsyncioTestCase):
         latency = await socket.prove_liveness(timeout=1)
         self.assertEqual(latency, .01)
         self.assertIsNotNone(socket.last_message_at)
+
+    async def test_market_subscriptions_batch_depth_and_trades_separately(self) -> None:
+        socket = PublicMarketSocket(AdmissionGovernor())
+        socket._send = AsyncMock()
+        await socket.subscribe(tuple(f"S{index}" for index in range(21)))
+        requests = [item.args[1] for item in socket._send.await_args_list]
+        self.assertEqual(len(requests), 5)
+        self.assertEqual(requests[0], ["contractStatus"])
+        self.assertEqual(len(requests[1]), 20)
+        self.assertTrue(all(value.endswith("@depth") for value in requests[1]))
+        self.assertEqual(len(requests[2]), 20)
+        self.assertTrue(all(value.endswith("@trade") for value in requests[2]))
+        self.assertEqual(requests[3], ["S20@depth"])
+        self.assertEqual(requests[4], ["S20@trade"])
 
 
 class UptimeTests(unittest.TestCase):

@@ -1,5 +1,21 @@
 # Bug fixes
 
+## September 15, 2026 — reward-only ranking replaced by profitability v2
+
+- Symptom: fixed two-tick candidates often had identical quote-quality and capital proxies, so pool dollars and coarse maker count dominated ranking while fill/exit inputs remained unpopulated placeholders.
+- Correction: subscribe to bounded public trade telemetry, resolve active maker-rebate rules once at startup, estimate conservative reward share and execution cost, then rank positive-net candidates per capital-hour. Duplicate trade IDs are ignored across restart and healthy cohorts are sticky.
+- Safety: quote distance, 10-contract legs, 15-pool/30-order breadth, exposure gates, one monetary stop, and exact five-minute exits are unchanged. Sub-$1 estimated payout and non-positive net remain ineligible even during the date-bounded uptime exception.
+- Post-activation audit found that normal depth frames updated the local book but were not copied into v2 telemetry because the updated-symbol return value was named and tested as a gap. Normal synchronized updates now populate bounded minute buckets; actual sequence-gap behavior is unchanged and still halts for reconciliation.
+
+## September 15, 2026 — transient cancellation-proof timeout
+
+- Symptom: the prior live process halted while canceling stale working entries; a private order-history read timed out, then the same immediate failure prevented emergency drain from completing its local proof.
+- Correction: accept authenticated WebSocket terminal order state first. After a cancel has been sent once, retry only bounded active/history reads for retryable transport/server failures; never resend the cancel mutation blindly. Limit the history fallback to the newest page and retain a hard confirmation deadline.
+- Live read-only reconciliation after the halt proved zero active orders and zero positions before restart work continued.
+- The next launch attempt then failed safely before activation on another order-history timeout. All idempotent REST reads now receive at most two backoff retries, and every retry is admitted through the shared rate governor. Rate-limit/ban responses still install their venue cooldown and are not immediately retried.
+- Private retry attempts rebuild their signed request with a current timestamp nonce; they never replay the authentication payload from a timed-out read.
+- The following activated attempt exposed a separate pagination bug: asking the complete-history helper for a 100-row ceiling correctly reported that the result might be truncated, but cancellation treated that as an error. Terminal lookup now uses Gemini's symbol filter and one newest page at the documented 1,000-row maximum; a full page is valid lookup input rather than an overflow failure.
+
 ## September 15, 2026 — event timing, quiet liveness and lifecycle isolation
 
 - Reward uptime is keyed by event ticker plus pool ID. Shared pools remain one budget, while recurring events cannot inherit one another's timing observations.

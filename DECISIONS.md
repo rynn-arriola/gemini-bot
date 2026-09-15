@@ -4,6 +4,7 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026: use profitability ranking v2 directly, without a shadow phase. Keep the approved two-tick/10-contract quote policy unchanged. Rank unique reward pools by conservative expected liquidity reward plus applicable maker rebate, less fee/adverse-selection/exit-depth costs, normalized by capital-hours. Keep healthy selected pools sticky so short-term telemetry cannot destroy reward uptime. The owner approved a graceful restart after validation.
 - Product is intended for live Gemini Predictions trading, not paper execution.
 - Native Windows is the only supported production platform.
 - WebSocket is primary for market data, order mutations, order events, balances, and positions.

@@ -78,6 +78,9 @@ def sample(runtime):
         offset_ticks=runtime.config.strategy.quote_offset_ticks,
         uptime=runtime._uptime, account=runtime.account.reducer,
         market_data_verified_at=runtime._market_data_verified_at(),
+        profitability=runtime.profitability,
+        target_uptime=runtime.config.strategy.target_uptime,
+        maker_rebate_fractions=runtime._maker_rebate_fractions,
     )
     reasons = Counter(reason for item in ranked for reason in item.reasons)
     return {

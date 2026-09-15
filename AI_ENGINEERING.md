@@ -22,9 +22,10 @@
 ## Evidence
 
 - “Eligible” means the locally known published requirements pass; it is not proof Gemini awarded a snapshot.
-- `priority_score` is a rank ordering, not expected reward dollars. Gemini does not publish the exact quadratic spread curve or final competitor scores.
+- Ranking v2's `priority_score` is a conservative net-profit-per-capital-hour proxy, not expected or guaranteed dollars. Its component reward/share/cost values must retain `_proxy` labels because Gemini does not publish the exact quadratic spread curve or final competitor scores.
 - Public qualifying-maker count is a coarse competition signal, not a pool-level unique-account denominator.
 - Paper trade touches are possible fills, not actual fills.
+- Missing profitability telemetry is never treated as zero risk: reserve one potential fill through the 30-minute cold start, assume zero maker rebate if the rate endpoint is unavailable, and ignore duplicate/non-monotonic public trade IDs.
 - Daily reward summaries, order/fill events, settlement, fees, and account equity are authoritative only when authenticated and reconciled.
 
 ## Testing and release
@@ -33,4 +34,3 @@
 - Network smoke tests are read-only until an owner-approved commissioning step explicitly authorizes a bounded mutation.
 - A passing test suite is necessary but not sufficient for activation.
 - Production launches hidden on Windows, has one owner lock, writes atomic status, and recovers without duplicating order intent.
-

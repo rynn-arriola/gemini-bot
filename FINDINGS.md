@@ -1,5 +1,13 @@
 # Gemini findings
 
+## September 15, 2026: profitability ranking v2
+
+- The prior live top-15 candidates all had the same 8.96 quote-quality proxy and $9.50 reservation proxy at the fixed two-tick placement. Selection therefore mostly reduced to pool budget divided by coarse maker count; it did not subtract execution costs.
+- The preserved observer had 450 uncensored intervals at each tested offset and no possible trade touches. That is insufficient to claim zero fill risk, so v2 reserves a cold-start fill and learns only from bounded public depth/trade telemetry.
+- V2 ranks conservative reward share less fee/rebate, adverse-move and exit-depth costs per capital-hour. Healthy incumbents remain sticky. Authenticated fills, rewards and fees—not the proxy—will determine whether it is profitable.
+- The current process reached 30 working maker orders across the 15-pool cap with zero positions, ranking version 2, advancing minute buckets, zero dropped/error logs and an empty launcher stderr. Each immediately preceding healthy process was deliberately drained to authenticated `stopped_flat` before replacement.
+- Live launch exposed and repaired two independent REST recovery defects: retryable read timeouts lacked bounded retries, and complete-history pagination treated a deliberately small ceiling as a fatal truncation during terminal lookup. Both failed closed; later authenticated preflights proved zero active orders and positions.
+
 ## September 15, 2026: reward-day proxy corrected to Eastern
 
 - The owner directed removal of the unsupported midnight-UTC assumption. Local reward feasibility now uses America/New_York calendar dates, consistent with Gemini's authenticated daily-summary API. Day boundaries are zone-aware and tests prove 23-hour spring, 24-hour normal and 25-hour fall days.

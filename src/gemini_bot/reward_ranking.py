@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_FLOOR
 
 from .domain import BookTop, ContractRules, Outcome, QuoteLeg, QuotePair, RewardPool, Side, UptimeProgress
+from .profitability import ProfitabilityEvidence
 
 
 MINIMUM_REWARD_SIZE = Decimal("10")
@@ -12,6 +14,9 @@ SIZE_CAP = Decimal("250")
 MAX_DISTANCE = Decimal("0.10")
 TWO_SIDED_MULTIPLIER = Decimal("1.5")
 UPTIME_THRESHOLD = Decimal("0.50")
+DEFAULT_TARGET_UPTIME = Decimal("0.75")
+MINIMUM_DAILY_PAYOUT = Decimal("1.00")
+RANKING_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +27,9 @@ class RankInput:
     uptime: UptimeProgress = UptimeProgress()
     fill_hazard: Decimal = Decimal("0")
     exit_risk: Decimal = Decimal("0")
+    profitability: ProfitabilityEvidence = ProfitabilityEvidence()
     event_ticker: str = ""
+    event_category: str = ""
     pool_source: str = "unspecified"
     pool_event_count: int | None = None
     recurring_duration_value: int | None = None
@@ -32,6 +39,8 @@ class RankInput:
 @dataclass(frozen=True, slots=True)
 class RankedCandidate:
     pool_id: str
+    daily_pool_usd: Decimal
+    qualifying_maker_count: int | None
     event_ticker: str
     symbol: str
     eligible_now: bool
@@ -41,6 +50,20 @@ class RankedCandidate:
     potential_priority_score: Decimal
     quality_proxy: Decimal
     capital_proxy_usd: Decimal
+    worst_midpoint_distance: Decimal
+    expected_reward_usd: Decimal
+    expected_execution_cost_usd: Decimal
+    expected_net_profit_usd: Decimal
+    profitability_per_capital_hour: Decimal
+    estimated_score_share: Decimal
+    planned_scoring_minutes: Decimal
+    telemetry_minutes: int
+    telemetry_confidence: Decimal
+    estimated_daily_fills: Decimal
+    five_minute_move: Decimal
+    fill_hazard: Decimal
+    exit_risk: Decimal
+    exit_depth_ratio: Decimal
     reasons: tuple[str, ...]
     observed_uptime: Decimal | None
     best_possible_uptime: Decimal | None
@@ -52,6 +75,18 @@ class RankedCandidate:
     pool_event_count: int | None
     recurring_duration_value: int | None
     recurring_duration_unit: str
+    event_category: str
+
+
+def planned_scoring_minutes(
+    uptime: UptimeProgress, target_uptime: Decimal = DEFAULT_TARGET_UPTIME,
+) -> Decimal:
+    if not Decimal("0") < target_uptime <= Decimal("1"):
+        raise ValueError("target uptime must be between zero and one")
+    if uptime.window_start is None or uptime.window_end is None:
+        return Decimal("1440") * target_uptime
+    seconds = Decimal(str((uptime.window_end - uptime.window_start).total_seconds()))
+    return max(Decimal("1"), seconds / Decimal("60") * target_uptime)
 
 
 def _floor_to_tick(value: Decimal, tick: Decimal) -> Decimal:
@@ -77,6 +112,7 @@ def rank_candidate(
     offset_ticks: int = 2,
     now: datetime | None = None,
     stale_after_seconds: Decimal = Decimal("3"),
+    target_uptime: Decimal = DEFAULT_TARGET_UPTIME,
 ) -> RankedCandidate:
     reasons: list[str] = []
     quote: QuotePair | None = None
@@ -101,6 +137,7 @@ def rank_candidate(
 
     quality = Decimal("0")
     capital = Decimal("0")
+    worst_distance = Decimal("0")
     if quote is not None:
         midpoint = item.book.midpoint
         yes_distance = midpoint - quote.yes.price
@@ -123,14 +160,35 @@ def rank_candidate(
     if not uptime_feasible:
         reasons.append("50% uptime is no longer reachable in the estimated window")
 
-    eligible = not reasons
     makers = Decimal(max(1, item.pool.qualifying_maker_count or 1))
-    hazard_factor = max(Decimal("0"), Decimal("1") - item.fill_hazard)
-    exit_factor = max(Decimal("0"), Decimal("1") - item.exit_risk)
-    potential_priority = item.pool.daily_budget_usd * quality * hazard_factor * exit_factor / makers
-    priority = potential_priority if eligible else Decimal("0")
+    planned_minutes = planned_scoring_minutes(item.uptime, target_uptime)
+    # Gemini does not publish competing scores.  Use a conservative cold-start
+    # prior that every reported maker earns the maximum score available to our
+    # approved 10-contract size for a full scoring window.  This bounds the
+    # reward estimate by the pool instead of presenting an unbounded score as USD.
+    maximum_same_size_quality = min(quantity, SIZE_CAP) * TWO_SIDED_MULTIPLIER
+    own_daily_score = quality * target_uptime
+    competing_daily_score = makers * maximum_same_size_quality
+    denominator = own_daily_score + competing_daily_score
+    estimated_share = Decimal("0") if denominator <= 0 else own_daily_score / denominator
+    expected_reward = item.pool.daily_budget_usd * estimated_share
+    expected_cost = max(Decimal("0"), item.profitability.expected_execution_cost_usd)
+    expected_net = expected_reward - expected_cost
+    capital_hours = max(
+        Decimal("0.01"), capital * planned_minutes / Decimal("60"),
+    )
+    potential_profitability = expected_net / capital_hours
+    if expected_reward < MINIMUM_DAILY_PAYOUT:
+        reasons.append("estimated daily reward is below Gemini's payout minimum")
+    if expected_net <= 0:
+        reasons.append("non-positive conservative net-profit estimate")
+    eligible = not reasons
+    potential_priority = potential_profitability
+    priority = potential_profitability if eligible else Decimal("0")
     return RankedCandidate(
         pool_id=item.pool.pool_id,
+        daily_pool_usd=item.pool.daily_budget_usd,
+        qualifying_maker_count=item.pool.qualifying_maker_count,
         event_ticker=item.event_ticker,
         symbol=item.rules.symbol,
         eligible_now=eligible,
@@ -140,6 +198,20 @@ def rank_candidate(
         potential_priority_score=potential_priority,
         quality_proxy=quality,
         capital_proxy_usd=capital,
+        worst_midpoint_distance=worst_distance,
+        expected_reward_usd=expected_reward,
+        expected_execution_cost_usd=expected_cost,
+        expected_net_profit_usd=expected_net,
+        profitability_per_capital_hour=potential_profitability,
+        estimated_score_share=estimated_share,
+        planned_scoring_minutes=planned_minutes,
+        telemetry_minutes=item.profitability.observed_minutes,
+        telemetry_confidence=item.profitability.data_confidence,
+        estimated_daily_fills=item.profitability.estimated_daily_fills,
+        five_minute_move=item.profitability.five_minute_move,
+        fill_hazard=max(item.fill_hazard, item.profitability.fill_hazard),
+        exit_risk=max(item.exit_risk, item.profitability.exit_risk),
+        exit_depth_ratio=item.profitability.exit_depth_ratio,
         reasons=tuple(reasons),
         observed_uptime=item.uptime.observed_ratio,
         best_possible_uptime=item.uptime.best_possible_ratio,
@@ -151,6 +223,7 @@ def rank_candidate(
         pool_event_count=item.pool_event_count,
         recurring_duration_value=item.recurring_duration_value,
         recurring_duration_unit=item.recurring_duration_unit,
+        event_category=item.event_category,
     )
 
 
@@ -160,16 +233,71 @@ def rank_unique_pools(items: list[RankInput], **kwargs: object) -> list[RankedCa
     for item in items:
         ranked = rank_candidate(item, **kwargs)
         current = best.get(ranked.pool_id)
-        if current is None or (ranked.priority_score, ranked.quality_proxy, ranked.symbol) > (
+        candidate_key = (
+            ranked.eligible_now,
+            ranked.priority_score,
+            ranked.potential_priority_score,
+            ranked.expected_net_profit_usd,
+            ranked.quality_proxy,
+            ranked.symbol,
+        )
+        current_key = None if current is None else (
+            current.eligible_now,
             current.priority_score,
+            current.potential_priority_score,
+            current.expected_net_profit_usd,
             current.quality_proxy,
             current.symbol,
-        ):
+        )
+        if current_key is None or candidate_key > current_key:
             best[ranked.pool_id] = ranked
     return sorted(
         best.values(),
         key=lambda value: (
             -value.priority_score, -value.potential_priority_score,
+            -value.expected_net_profit_usd, -value.quality_proxy,
             value.pool_id, value.symbol,
         ),
     )
+
+
+def select_sticky_candidates(
+    candidates: list[RankedCandidate],
+    *,
+    sticky_pool_ids: set[str],
+    locked_pool_ids: set[str],
+    permitted_symbols: set[str],
+    maximum_active_pools: int,
+    actionable: Callable[[RankedCandidate], bool],
+    entry_time_valid: Callable[[str], bool],
+) -> tuple[list[RankedCandidate], set[str]]:
+    """Keep healthy incumbents, then fill open pool slots in v2 rank order."""
+    if not 1 <= maximum_active_pools <= 15:
+        raise ValueError("active pool breadth must be between 1 and 15")
+    retained = {
+        candidate.pool_id
+        for candidate in candidates
+        if (
+            candidate.pool_id in sticky_pool_ids
+            and candidate.symbol in permitted_symbols
+            and actionable(candidate)
+            and entry_time_valid(candidate.symbol)
+        )
+    }
+    desired: list[RankedCandidate] = []
+    desired_pool_ids = set(locked_pool_ids) | retained
+    for candidate in candidates:
+        if (
+            candidate.symbol not in permitted_symbols
+            or not actionable(candidate)
+            or not entry_time_valid(candidate.symbol)
+        ):
+            continue
+        if (
+            candidate.pool_id not in desired_pool_ids
+            and len(desired_pool_ids) >= maximum_active_pools
+        ):
+            continue
+        desired.append(candidate)
+        desired_pool_ids.add(candidate.pool_id)
+    return desired, desired_pool_ids
