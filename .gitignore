@@ -1,0 +1,11 @@
+# Local credentials and runtime secrets
+.env
+.env.*
+!.env.example
+
+# Local research runtime and account diagnostics
+.venv/
+__pycache__/
+data/
+*.log
+*.egg-info/

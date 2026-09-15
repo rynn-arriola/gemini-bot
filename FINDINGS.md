@@ -1,0 +1,71 @@
+# Gemini findings
+
+## September 15, 2026: review repairs verified offline
+
+- 106 production tests plus 25 observer tests pass; this includes all 15 previously failing review regressions and realistic late-fill, exact-exit, transient-loss, cash-ordering, approval, storage, and fake-canary integration cases.
+- Native Windows offline release, Python compilation and launcher syntax checks pass. No Gemini process was found at the final process check. No authenticated account call, live mutation, or activation occurred in this repair turn.
+- [Repair evidence](docs/REPAIR_REPORT_2026-09-15.md) supersedes the pre-repair implementation conclusions below. Unknown cash/settlement/collateral flows halt; this is not proof of complete cash-flow automation or live readiness across all Gemini account programs.
+
+## September 15, 2026: overall code review — launch blocked
+
+- Reproduced 15 defects offline (14 assertion failures and one runtime error) in `tests/test_review_regressions.py`; existing 68 production plus 25 observer tests still pass. The previous readiness statement missed integration defects.
+- Confirmed failures include normal-depth resubscription loops, partial-fill second-leg submission, stale/wrong-quantity and repeated ambiguous exits, missing deadlines, clean socket closure, directory-scoped rather than account-scoped locking, timing-only cash classification, missing throttle cooldowns, expired-contract entry, non-atomic snapshots, truncated REST history, cancelled-status mismatch, and optimistic uptime denominators.
+- Full evidence, severity, source locations, additional gaps, and repair order: [code review](docs/CODE_REVIEW_2026-09-15.md). This review added tests and documentation only; runtime behavior was not modified and the bot remains stopped.
+
+## September 15, 2026: Windows live architecture foundation
+
+- Owner-authorized aggressive LIMIT+IOC round trips validated both directions on current reward contracts. YES used BUY 10 at $0.03 then SELL 10 at $0.02. NO used BUY 10 at $0.06 then SELL 10 at a $0.05 average. All four orders filled completely; final authenticated REST reconciliation showed zero positions and zero active orders, and the journal had no unknown intents. Total gross spread cost was $0.20 before any fees. The fully filled NO IOC was reported historically as `cancelled` with filled quantity 10, confirming that executed quantity—not terminal status—must determine fills. These tests validate Gemini's same-outcome SELL reduction paths, not reward eligibility, maker uptime, or profitability.
+- Live commissioning established an empirically enforced 36-character maximum for `clientOrderId`: a longer ID received status 400 / code -1013 and created no order or position. The generator and regression test now enforce the observed limit.
+- The user chose a native-Windows live product, 10-contract base per reward leg, and a 30-pending-order ceiling separate from positions. Continuous live activation has not occurred; only the separately authorized bounded entry/exit canary was performed.
+- The useful Polymarket lessons are ownership, restart durability, cancel-confirm-exact-exit ordering, time-aware inventory reduction, fail-closed state, and disciplined documentation. Gemini-specific scoring, two-outcome order representation, 50% daily uptime, shared pools, WebSocket protocol, limits, and settlement remain independent designs.
+- Production core now passes 49 deterministic tests. The preserved observer suite still passes 25 tests. Coverage includes shared-pool deduplication, eligibility, stale books, impossible uptime, sequence gaps, MOC and IOC envelopes, entry/exit purpose separation, all four side/outcome deltas, ambiguous-send retry refusal, partial/duplicate/terminal fill semantics, signed-position exact YES/NO exits, complete-position snapshots, haircut-adjusted depth refusal, activation reconciliation, 30-order capacity, six-hour Eastern risk windows, timed/expiry exits, server cooldowns, coalescing, durable intents/deadlines, and native Windows process ownership.
+- Ranking uses Gemini's known rules but intentionally calls its local curve a `quality_proxy`. The exact quadratic spread function and final competing daily scores are not public, so priority cannot honestly be labeled expected dollars.
+- The overnight observer was stopped at 08:02:29 Eastern after 24,599 successful snapshots from the hardened run. It averaged 0.503% of one logical CPU core; five connection errors recovered; 51 samples were missed; no throttles or orders occurred. The final report and SQLite database are preserved.
+- A production read-only differential-depth smoke exposed that live Gemini depth frames lowercase `s` even when discovery/subscription symbols are uppercase. Without canonicalization, this creates two market states and leaves the subscribed book unusable. Symbols are now canonicalized at every domain/transport boundary and the live smoke reaches a synchronized book.
+- Entry/exit reduction follows Gemini's asymmetric `Z` semantics: last-execution quantity on fill events, cumulative executed quantity on terminal events. It deduplicates fill trade IDs, keeps canceled orders separate from filled positions, and derives closes from the authenticated signed position rather than the intended entry quantity.
+- A September 15 authenticated read-only handshake returned HTTP 401 with a millisecond nonce and succeeded immediately with a Unix-seconds nonce, despite the public authentication page saying either is accepted. Production now uses monotonic seconds and must pace reconnects to avoid moving its nonce too far ahead of server time.
+
+## September 14, 2026: recovery hardening approved and tested
+
+- User requested edge-case auditing, explicitly excluded laptop concerns, then authorized the recommended protections and a restart. No power-plan or laptop configuration was changed.
+- Twenty-five offline tests passed, including simulated throttling, longer server cooldowns, explicit bans, storage lock recovery without duplicate rows, atomic status-write retries, bounded sampling with fair rotation, bounded buffering, metadata retries and supervisor preservation of cooldowns/pending rows.
+- The new run preserves the existing fifty-contract cohort using its recent discovery file, and refreshes metadata shortly after startup. The earlier run was gracefully stopped before launching the new process. All earlier files are preserved.
+- Recovery does not manufacture missing observations, bypass rate limits, enable trading, protect against OS process termination, or guarantee lossless storage during a sustained outage. Pending and dropped record counts remain explicit.
+- Current run directory, verification and process are recorded in [STATUS](STATUS.md). Morning review now covers all three observation stages and their real windows.
+
+## September 14, 2026: authorized 50-market paper expansion
+
+- Expanded observer verified live at 23:40:39 Eastern: 50 contracts across 25 distinct reward pools, 100/100 successful observations over two cycles, no recorded errors or throttling, one WebSocket connection. Two primary quote geometries were ineligible across those observations; they are not silently replaced.
+- Average observer CPU measured 0.429% of one logical core (excluding startup discovery); working set approximately 41.5 MiB at the check. These are early measurements, not an overnight performance guarantee.
+- Preserved original ten-market data and requested its graceful stop after verifying the expanded process. New primary directory is `data/overnight-expanded-20260914`; morning review is updated to inspect both runs and exclude overlapping duplicate evidence.
+- REST retains 1.1-second spacing. Expanded steady-state WebSocket depth traffic is 50 requests/minute, paced at 0.55 seconds minimum, plus bounded connection setup requests. Seventeen tests passed including throttle handling. Read-only/no-order restrictions are unchanged.
+- Pool-first diversity is selection for research, not a verified reward-yield ranking; multiple contracts in one pool do not multiply its advertised budget.
+
+## September 14, 2026: terms accepted and observer verification
+
+- Superseding the earlier prerequisite status below: at approximately 23:17 ET the read-only account probe verified latest Predictions terms accepted. Authenticated streaming delivered balance, position and order updates. The probe did not place an order.
+- Twelve observer tests passed. The bounded smoke test ended on its deadline at 23:27:46 ET with 40/40 successful snapshots, no recorded errors, one connection and 0.233% average CPU usage measured against one logical core (excluding discovery).
+- Public REST limits and live public WebSocket `conninfo` buckets are recorded in [API limits](docs/API_LIMITS.md). Request-weight capacity is not raw request capacity or proof of account trading entitlement.
+- The observer is public-data-only and contains no trading routes. Two ticks behind both best prices is the primary research candidate, not a guarantee of safety or maximum reward score.
+- See [current status](STATUS.md) for the actual overnight run and morning review. Earlier entries below describe their historical checkpoint, not current readiness.
+
+## September 14, 2026: replacement key verified
+
+- User supplied replacement named `new primary`, saved as active local credentials; previous account key preserved in an ignored backup.
+- At approximately 23:14 ET, authenticated REST terms status returned HTTP 200 with `hasAcceptedLatest=false`.
+- Authenticated WebSocket connected and acknowledged the read-only subscriptions. During the bounded 15-second observation it delivered 15 `positionReport` and 15 `balanceUpdate` frames. No order-event delivery was observed in that interval; no trading permission or order-execution test was performed.
+- Public WebSocket depth also returned status 200 with a valid order book.
+- Key authentication and balance/position streaming now work. Latest Predictions terms remain unaccepted. No account terms were accepted and no trades were placed by the test.
+- Overnight collector remains pending implementation/start. User requires WebSocket priority, REST only for unavailable information/fallback, and low CPU use. This successful key check does not mean the overnight test is running.
+
+## September 14, 2026: rewards review
+
+- **Previous budget claim corrected:** $196,150/day double-counted shared category pools. A later public capture at 22:51 ET contains 568 events but only 43 distinct pools totaling $8,250/day. Official website code corroborates shared-pool grouping. This is advertised venue budget, not bot income.
+- **Program coverage:** liquidity rewards, maker rebates, temporary maker-fee waiver, taker rewards, contracted market making and collateral return. The preferred research direction is small maker quoting; realized superiority over Polymarket US is unproven.
+- **Strategy mismatch:** a six-hour pregame window may fail Gemini's 50% eligible-snapshot uptime requirement. Exact denominator and shared-pool scoring need clarification.
+- **Public config is partial:** only enablement, maximum spread and minimum payout were returned; do not assume minimum size/cap/multiplier/uptime arrive through that endpoint.
+- **Account credential follow-up:** the user supplied a replacement account-scoped key, now saved as the active local credential. The previous master key is retained in a separate ignored backup. Time-based nonce settings, roles, creation completion and authentication remain unverified; no authenticated request or connection test was performed. No credential values belong in Markdown.
+- **23:10 ET connection retry:** the saved account-scoped key returned HTTP 400 / `InvalidApiKey` on the read-only terms-status endpoint and HTTP 401 on authenticated WebSocket connection. Public WebSocket depth returned HTTP-style status 200 with a valid book. The settings screenshot shows Trading and time-based nonce selected; key activation and actual permissions remain unproven. The connection-check script and isolated Python environment are prepared; the overnight collector has not yet been implemented or started. No order/account mutation was made.
+- **Next work:** read-only pool/book scorer with explicit estimation uncertainty, then an independently authorized bounded trading evaluation. No Gemini live strategy or allocation selected; Polymarket runtime was not touched.
+
+Evidence and full proposal: [Rewards strategy review](docs/REWARDS_STRATEGY_REVIEW_2026-09-14.md). Public data: [snapshot](docs/history/REWARDS_PUBLIC_SNAPSHOT_2026-09-14.json). Stable API surface: [API reference](GEMINI_PREDICTIONS_API_REFERENCE.md).
