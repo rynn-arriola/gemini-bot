@@ -215,6 +215,10 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.control_directory = Path(self.tmp.name) / "isolated-control"
         self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")
         self.runtime.public.books["X"] = book()
+        self.runtime.universe = [RewardedContract(
+            "E", candidate_pool(), candidate_rules(),
+            (NOW + timedelta(hours=2)).isoformat(),
+        )]
         self.runtime._expiry["X"] = NOW + timedelta(hours=2)
         self.runtime._permitted_symbols = {"X"}
         self.runtime.gate.state = EngineState.QUOTING

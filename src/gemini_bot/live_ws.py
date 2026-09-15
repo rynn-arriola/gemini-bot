@@ -20,6 +20,7 @@ from .execution import (
 )
 from .domain import QuoteLeg
 from .rate_limits import AdmissionGovernor, Priority
+from .ws_limits import observe_response, receive_connection_limits, pace_connection
 
 
 PRODUCTION_WS = "wss://ws.gemini.com"
@@ -27,6 +28,10 @@ PRODUCTION_WS = "wss://ws.gemini.com"
 
 class MutationNotSentError(RuntimeError):
     """A local last-moment guard rejected a mutation before socket send."""
+
+
+class QuoteChangedBeforeSend(MutationNotSentError):
+    """An unsent maker quote must be rebuilt from the current book."""
 
 
 class LiveWebSocket:
@@ -54,9 +59,13 @@ class LiveWebSocket:
         self._connection: ClientConnection | None = None
         self._request_id = 0
         self._send_lock = asyncio.Lock()
+        self._send_waiters: dict[object, Priority] = {}
+        self._send_changed = asyncio.Event()
+        self._initial_frames: list[dict[str, Any]] = []
         self.mutation_guard = None
 
     async def connect(self) -> None:
+        await pace_connection(self._governor)
         headers = websocket_auth_headers(self._api_key, self._api_secret, self._nonce.next())
         self._connection = await websockets.connect(
             self._uri,
@@ -69,6 +78,15 @@ class LiveWebSocket:
             compression=None,
             proxy=None,
         )
+        try:
+            request_id = self._next_id()
+            await self._send({"id": request_id, "method": "conninfo", "params": {}}, Priority.ACCOUNT_RECONCILIATION)
+            self._initial_frames = await receive_connection_limits(
+                self._connection, self._governor, "private_ws", request_id,
+            )
+        except BaseException:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -84,17 +102,36 @@ class LiveWebSocket:
             raise ConnectionError("authenticated WebSocket is not connected")
         if self._read_only and str(payload.get("method", "")).startswith("order."):
             raise RuntimeError("read-only WebSocket prohibits order mutation")
-        async with self._send_lock:
-            delay = self._governor.admit("private_ws", priority)
-            while delay:
-                await asyncio.sleep(delay)
-                delay = self._governor.admit("private_ws", priority)
-            if payload.get("method") == "order.place" and self.mutation_guard is not None:
+        waiter = object()
+        self._send_waiters[waiter] = priority
+        self._send_changed.set()
+        try:
+            while True:
+                async with self._send_lock:
+                    self._send_changed.clear()
+                    if priority > min(self._send_waiters.values()):
+                        delay = 1.0
+                    else:
+                        delay = self._governor.admit_websocket("private_ws", priority, str(payload.get("method", "")))
+                        if not delay:
+                            if payload.get("method") == "order.place" and self.mutation_guard is not None:
+                                try:
+                                    self.mutation_guard(payload)
+                                except MutationNotSentError:
+                                    raise
+                                except Exception as exc:
+                                    raise MutationNotSentError(str(exc)) from exc
+                            await self._connection.send(json.dumps(payload, separators=(",", ":")))
+                            return
+                # Never hold the socket lock through pacing/cooldown. An urgent
+                # cancel may join and take the next admitted slot before entries.
                 try:
-                    self.mutation_guard(payload)
-                except Exception as exc:
-                    raise MutationNotSentError(str(exc)) from exc
-            await self._connection.send(json.dumps(payload, separators=(",", ":")))
+                    await asyncio.wait_for(self._send_changed.wait(), timeout=delay)
+                except TimeoutError:
+                    pass
+        finally:
+            self._send_waiters.pop(waiter, None)
+            self._send_changed.set()
 
     async def subscribe_account(self) -> None:
         await self._send(
@@ -183,11 +220,13 @@ class LiveWebSocket:
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         if self._connection is None:
             raise ConnectionError("authenticated WebSocket is not connected")
+        for frame in self._initial_frames:
+            yield frame
+        self._initial_frames.clear()
         async for raw in self._connection:
             if not isinstance(raw, str):
                 continue
             value = json.loads(raw)
             if isinstance(value, dict):
-                if value.get("status") in {418, 429}:
-                    self._governor.apply_server_cooldown("private_ws", 60)
+                observe_response(self._governor, "private_ws", value)
                 yield value

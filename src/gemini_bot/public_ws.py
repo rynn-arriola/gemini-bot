@@ -14,6 +14,7 @@ from .market_state import LocalBook, SequenceGap
 from .domain import canonical_symbol
 from .rate_limits import AdmissionGovernor, Priority
 from .scheduler import DirtySymbolScheduler
+from .ws_limits import observe_response, receive_connection_limits, pace_connection
 
 
 PRODUCTION_WS = "wss://ws.gemini.com?snapshot=-1"
@@ -39,6 +40,7 @@ class PublicMarketSocket:
         self._send_lock = asyncio.Lock()
         self._ping_lock = asyncio.Lock()
         self._request_id = 0
+        self._initial_frames: list[dict[str, Any]] = []
         self.books: dict[str, LocalBook] = {}
         self.dirty = DirtySymbolScheduler(queue_capacity)
         self.adverse_dirty = DirtySymbolScheduler(queue_capacity)
@@ -64,6 +66,7 @@ class PublicMarketSocket:
         return Decimal("0") <= age <= stale_after_seconds
 
     async def connect(self) -> None:
+        await pace_connection(self._governor)
         self._connection = await websockets.connect(
             PRODUCTION_WS,
             ping_interval=20,
@@ -74,6 +77,14 @@ class PublicMarketSocket:
             compression=None,
             proxy=None,
         )
+        try:
+            await self._send("conninfo", {}, Priority.MARKET_RESYNC)
+            self._initial_frames = await receive_connection_limits(
+                self._connection, self._governor, "public_ws", self._request_id,
+            )
+        except BaseException:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -97,10 +108,10 @@ class PublicMarketSocket:
         if self._connection is None:
             raise ConnectionError("public WebSocket is not connected")
         async with self._send_lock:
-            delay = self._governor.admit("public_ws", priority)
+            delay = self._governor.admit_websocket("public_ws", priority, method)
             while delay:
                 await asyncio.sleep(delay)
-                delay = self._governor.admit("public_ws", priority)
+                delay = self._governor.admit_websocket("public_ws", priority, method)
             self._request_id += 1
             await self._connection.send(json.dumps(
                 {"id": self._request_id, "method": method, "params": params},
@@ -116,7 +127,7 @@ class PublicMarketSocket:
                 self.books.setdefault(symbol, LocalBook(symbol))
             await self._send(
                 "SUBSCRIBE",
-                [f"{symbol}@depth" for symbol in batch],
+                [f"{symbol}@depth@100ms" for symbol in batch],
                 Priority.MARKET_RESYNC,
             )
             # Trade prints feed the profitability estimator.  Keep this as a
@@ -132,8 +143,8 @@ class PublicMarketSocket:
         symbol = canonical_symbol(symbol)
         book = self.books.setdefault(symbol, LocalBook(symbol))
         book.synchronized = False
-        await self._send("UNSUBSCRIBE", [f"{symbol}@depth"], Priority.MARKET_RESYNC)
-        await self._send("SUBSCRIBE", [f"{symbol}@depth"], Priority.MARKET_RESYNC)
+        await self._send("UNSUBSCRIBE", [f"{symbol}@depth@100ms"], Priority.MARKET_RESYNC)
+        await self._send("SUBSCRIBE", [f"{symbol}@depth@100ms"], Priority.MARKET_RESYNC)
 
     def apply_frame(self, frame: dict[str, Any], observed_at: datetime | None = None) -> str | None:
         timestamp = self.note_message(observed_at)
@@ -167,9 +178,13 @@ class PublicMarketSocket:
     async def frames(self) -> AsyncIterator[dict[str, Any]]:
         if self._connection is None:
             raise ConnectionError("public WebSocket is not connected")
+        for frame in self._initial_frames:
+            yield frame
+        self._initial_frames.clear()
         async for raw in self._connection:
             if isinstance(raw, str):
                 value = json.loads(raw)
                 if isinstance(value, dict):
+                    observe_response(self._governor, "public_ws", value)
                     self.note_message()
                     yield value

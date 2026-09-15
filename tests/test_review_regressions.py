@@ -65,6 +65,11 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         book = LocalBook("X")
         book.apply_snapshot([(D(".48"), D("100"))], [(D(".52"), D("100"))], 1, 1, NOW)
         self.runtime.public.books["X"] = book
+        self.runtime.universe = [RewardedContract(
+            "E", RewardPool("pool", D("100")),
+            ContractRules("X", D(".01"), D("1"), D("1")),
+            (NOW + timedelta(hours=2)).isoformat(),
+        )]
 
     async def asyncTearDown(self):
         await self.runtime.close()

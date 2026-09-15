@@ -46,6 +46,7 @@ class AccountRuntime:
         self.available_usd: Decimal | None = None
         self.confirmed_usd: Decimal | None = None
         self.events: dict[str, asyncio.Event] = {}
+        self.terminal_events: dict[str, asyncio.Event] = {}
         self.safety_symbols: asyncio.Queue[str] = asyncio.Queue(maxsize=64)
         self.unowned_order_seen = False
         self._known_account_activity_at = 0.0
@@ -135,6 +136,7 @@ class AccountRuntime:
         for key in terminal[:-keep]:
             order = self.reducer.orders.pop(key)
             self.events.pop(order.client_order_id, None)
+            self.terminal_events.pop(order.order_id, None)
         self.ledger.prune_terminal(keep)
 
     async def wait_for_order_event(self, client_order_id: str, timeout: float = 10) -> None:
@@ -247,6 +249,7 @@ class AccountRuntime:
                     raise RuntimeError("safety-action queue overflow") from exc
 
         if transition.became_terminal:
+            self.terminal_events.setdefault(order.order_id, asyncio.Event()).set()
             if intent is None:
                 self.journal.resolve_intent_terminal(order.client_order_id, order.order_id)
             else:

@@ -2,6 +2,16 @@
 
 Checked September 14, 2026 (America/New_York).
 
+Rechecked official documentation September 15, 2026: the REST recommendations above remain published. The [stream reference](https://developer.gemini.com/trading/websocket/streams) documents plain differential `@depth` at one second and `@depth@100ms` at 100 ms; the [WebSocket playground](https://developer.gemini.com/trading/websocket/playground) exposes `conninfo` for connection rate limits. [Message format](https://developer.gemini.com/websocket/message-format) maps code `-1003` to status `429`. These are supported interfaces, not evidence that production already consumes connection limits.
+
+Current production subscribes to `@depth@100ms`, keeps public/private REST at 1/5 requests per second, and reads `conninfo` before subscriptions on both sockets. Missing or unrecognized limit metadata blocks connection preparation. Rate metadata on subsequent responses updates the same governor. Incoming depth frames do not imply one outbound request per update.
+
+The governor tracks every reported request-weight/order interval and connection-attempt interval. It shares conservative usage across both sockets and adopts the lower reported limit when scope is uncertain. Normal application traffic uses up to 70% of each bucket; emergency cancellations may use up to 90%, always subject to server cooldowns. Local usage reservations cannot be reduced by a lower response count, and rolling expiration waits a full interval from local observation to avoid assuming a server reset boundary. Connection attempts are paced separately.
+
+The published [AsyncAPI source](https://developer.gemini.com/specs/asyncapi/websocket.yaml) does not enumerate conninfo results or all per-method weights. Production therefore reserves 100 request-weight units per application request, one order unit per order method (30 for cancel-all/session), and retains a 50 ms minimum local spacing. This is a conservative implementation estimate, not a Gemini-published weight table or proof throttling is impossible. Reported quotas can tighten pacing; high quotas never remove the local ceiling. Malformed limits or an unknown bucket require review. Reconnects never bypass observed cooldowns.
+
+September 15 verification: a 60-second authenticated read-only check established both connection limits, subscribed 32 books at 100 ms, observed no gaps or throttles, and disconnected flat/order-free with zero order/cancel mutations. CPU averaged 1.032% of one logical core including startup; only about 12 seconds followed discovery/startup, so this is not a sustained trading performance benchmark.
+
 ## Published REST limits
 
 Official source: https://developer.gemini.com/rate-limit

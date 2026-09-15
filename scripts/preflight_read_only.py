@@ -40,8 +40,10 @@ class ReadOnlyAccountSocket(LiveWebSocket):
 
     async def _send(self, payload, priority):
         allowed = {"orders@account", "balances@account@1s", "positions@account@1s"}
-        if (payload.get("method") != "SUBSCRIBE" or not isinstance(payload.get("params"), list)
-                or not set(payload["params"]) <= allowed):
+        is_conninfo = payload.get("method") == "conninfo" and payload.get("params") == {}
+        is_subscription = (payload.get("method") == "SUBSCRIBE" and isinstance(payload.get("params"), list)
+                           and set(payload["params"]) <= allowed)
+        if not (is_conninfo or is_subscription):
             await self._deny()
         self.requests += 1
         await super()._send(payload, priority)
@@ -59,7 +61,7 @@ class ObservedPublicSocket(PublicMarketSocket):
         self.requests = 0
 
     async def _send(self, method, params, priority):
-        if method != "SUBSCRIBE":
+        if method not in {"SUBSCRIBE", "conninfo"}:
             raise RuntimeError("preflight allows only initial public subscriptions")
         self.requests += 1
         await super()._send(method, params, priority)
@@ -97,6 +99,8 @@ def sample(runtime):
         "public_frames": dict(runtime.public.received),
         "private_frames": dict(runtime.private.received),
         "public_requests": runtime.public.requests, "private_requests": runtime.private.requests,
+        "websocket_limits_verified": sorted(runtime.governor.ws_verified),
+        "websocket_limit_buckets": len(runtime.governor.ws_buckets),
         "depth_gaps": len(runtime.public.resync_required),
         "dropped_dirty_work": runtime.public.dirty.dropped,
         "dropped_log_records": runtime._logging.dropped_records,

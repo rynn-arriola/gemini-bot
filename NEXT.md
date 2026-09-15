@@ -1,6 +1,8 @@
 # Next work
 
-The September 15 profitability-v2 process is halted after two successful five-minute exits exposed a definitely-unsent retry-intent bookkeeping race. Finish the fixed-30/$30-realized-HARD and WebSocket adverse-move release, authenticate flat/order-free state plus absence of the two rejected client IDs from Gemini history, reconcile those local rows, and run a fresh preflight. Do not restart on the old policy/build-bound permit.
+The bot is stopped. The pre-send-intent repair and read-only preflight are complete. The follow-up review fixes fresh-price validation, urgent-cancel scheduling, drain history lookup, and missing manual-close accounting. Reconcile authentic closing-fill/fee evidence for the earlier manual exits before claiming today's full realized loss or reactivating in the affected six-hour window. Missing evidence now blocks activation before consuming a permit. Any restart still requires the owner's explicit instruction and a fresh policy/build-bound permit.
+
+WebSocket follow-up is implemented: 100 ms differential depth, mandatory `conninfo` discovery on both sockets, shared conservative rate buckets and cancellation priority, plus terminal-event-first cancellation confirmation. Complete one-second account snapshots remain intentional. Monitor real-order latency and CPU in a separately approved live run; do not treat a short read-only transport check as execution verification. Per-method request weights are not fully published, so conservative local reservations remain necessary.
 
 After the Eastern reward day closes, compare authenticated liquidity reward, maker-rebate and fee records with v2's recorded reward/share/cost proxies. Calibrate projected fills and adverse-move cost only from reconciled evidence; public trade touches remain non-authoritative. Confirm the process drains at permit expiry.
 

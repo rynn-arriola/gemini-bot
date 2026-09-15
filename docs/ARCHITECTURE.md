@@ -51,6 +51,12 @@ Pending orders have a hard cap of 30. Positions do not falsely increment the exc
 
 Each order has a durable client ID and intent state. A send timeout is ambiguous; no blind retry is allowed. Startup/reconnect reconstructs open orders, positions, balances, and unresolved intents before activation.
 
+Maker sends recheck current quote geometry after transport pacing. The placement/exit owner remains serialized, while urgent depth-driven cancels use bounded per-symbol workers and deduplicated per-order cancellation tasks. A slow acknowledgement or confirmation in one market cannot prevent dispatching a cancellation for another. The private send queue gives cancels the next admitted slot; venue cooldowns still apply. Replacement remains contingent on terminal proof and a fresh target; end-to-end latency is not guaranteed.
+
+Public books subscribe at `@depth@100ms`. Both WebSocket connections must establish `conninfo` limits before subscriptions. One shared governor accounts conservatively for reported weight/order windows and connection attempts; actual response counts can tighten it. Cancellation waits up to 350 ms for a dedicated terminal event before reading REST. This event is separate from placement acknowledgement waiters. Coalesced per-symbol work, bounded workers and sleeping quota waits keep the faster feed from adding busy polling. See `API_LIMITS.md` for weight uncertainty and headroom.
+
+Startup and drain look up only unresolved intents missing from active orders, using symbol-filtered history. Manual-flat audits with unmatched entry basis leave the affected six-hour realized-P&L window incomplete until authentic closing evidence is reconciled; flat inventory alone cannot prove profit or loss.
+
 ### Verified entry-to-close lifecycle
 
 1. Create and durably record two 10-contract BUY intents only after risk, reward, market, book, and capacity gates pass.

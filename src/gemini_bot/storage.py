@@ -461,6 +461,10 @@ class SQLiteJournal:
         complete = True
         for occurred, kind, row in events:
             if kind == 0:
+                # Flat account proof does not establish execution proceeds/fees.
+                # Missing closes must never be silently counted as zero loss.
+                if positions and window_start <= occurred < window_end:
+                    complete = False
                 positions.clear()
                 continue
             _, symbol, side, outcome, quantity, price, fee, _ = row

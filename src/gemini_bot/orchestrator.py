@@ -22,7 +22,7 @@ from .domain import EngineState, Outcome
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .exit_pricing import exact_crossing_exit
-from .live_ws import LiveWebSocket, MutationNotSentError
+from .live_ws import LiveWebSocket, MutationNotSentError, QuoteChangedBeforeSend
 from .operational_logging import ErrorClass, OperationalLogger, configure_logging
 from .persistent_risk import PersistentRiskWindow
 from .profitability import ProfitabilityTracker, active_maker_rebate_fractions
@@ -125,6 +125,9 @@ class ProductionOrchestrator:
         self._commissioning_expected_yes_price: Decimal | None = None
         self._commissioning_expected_no_price: Decimal | None = None
         self._quote_cooldown_until: dict[str, float] = {}
+        self._cancel_tasks: dict[str, asyncio.Task[None]] = {}
+        self._adverse_tasks: dict[str, asyncio.Task[bool]] = {}
+        self._entry_cancel_symbols: dict[str, int] = {}
         self._logging = configure_logging(
             self.directory / "logs", secrets=(config.api_key, config.api_secret)
         )
@@ -453,8 +456,39 @@ class ProductionOrchestrator:
             raise
 
     async def _cancel_order_and_confirm(self, order_id: str, *, timeout: float = 45) -> None:
+        # A fast public-book guard and the inventory/quote owner can request the
+        # same cancellation. Share one mutation and its terminal proof.
+        task = self._cancel_tasks.get(order_id)
+        if task is None:
+            current = self.account.reducer.orders.get(order_id)
+            if current is not None and not current.working:
+                return
+            task = asyncio.create_task(
+                self._cancel_order_and_confirm_once(order_id, timeout=timeout),
+                name="gemini-cancel-confirm",
+            )
+            self._cancel_tasks[order_id] = task
+        try:
+            await asyncio.shield(task)
+        finally:
+            # Keep failures latched: an unknown cancel cannot be blindly resent.
+            if task.done() and not task.cancelled() and task.exception() is None:
+                if self._cancel_tasks.get(order_id) is task:
+                    self._cancel_tasks.pop(order_id, None)
+
+    async def _cancel_order_and_confirm_once(self, order_id: str, *, timeout: float = 45) -> None:
+        terminal_event = self.account.terminal_events.setdefault(order_id, asyncio.Event())
         await self.private.cancel(order_id)
         deadline = asyncio.get_running_loop().time() + timeout
+        current = self.account.reducer.orders.get(order_id)
+        if current is not None and not current.working:
+            return
+        # Give the authenticated order stream a short head start. A terminal
+        # event wakes this immediately; only a missing event falls back to REST.
+        try:
+            await asyncio.wait_for(terminal_event.wait(), timeout=min(.35, timeout))
+        except TimeoutError:
+            pass
         last_transient: ApiError | None = None
         while asyncio.get_running_loop().time() < deadline:
             # The authenticated order stream is the lowest-latency terminal
@@ -499,8 +533,22 @@ class ProductionOrchestrator:
         raise TimeoutError("order cancellation was not proven terminal") from last_transient
 
     async def _cancel_symbol_entries(self, symbol: str) -> None:
-        for order_id in self.account.reducer.risk_adding_order_ids(symbol):
-            await self._cancel_order_and_confirm(order_id)
+        self._entry_cancel_symbols[symbol] = self._entry_cancel_symbols.get(symbol, 0) + 1
+        try:
+            order_ids = self.account.reducer.risk_adding_order_ids(symbol)
+            # Issue both cancels promptly; one slow confirmation must not leave
+            # its sibling resting. The transport still paces every mutation.
+            results = await asyncio.gather(
+                *(self._cancel_order_and_confirm(order_id) for order_id in order_ids),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+        finally:
+            self._entry_cancel_symbols[symbol] -= 1
+            if self._entry_cancel_symbols[symbol] == 0:
+                self._entry_cancel_symbols.pop(symbol)
 
     async def _quote_pair(self, candidate: Any) -> None:
         async with self._lifecycle_lock:
@@ -531,6 +579,15 @@ class ProductionOrchestrator:
         if not self._book_fresh(symbol):
             raise RuntimeError("market became stale while waiting to send")
         if params["side"] == "BUY":
+            if params.get("timeInForce") == "MOC":
+                target = self._current_quote_target(symbol)
+                leg = None if target is None else (
+                    target.yes if params["eventOutcome"] == "YES" else target.no
+                )
+                if (leg is None or Decimal(str(params["price"])) != leg.price
+                        or Decimal(str(params["quantity"])) != leg.quantity
+                        or symbol in self._entry_cancel_symbols):
+                    raise QuoteChangedBeforeSend("maker quote changed before send")
             if self._permit_policy_digest is not None and policy_digest(DEFAULT_POLICY_PATH) != self._permit_policy_digest:
                 raise RuntimeError("policy changed after approval")
             if (not self.gate.may_submit or not self._entry_time_valid(symbol)
@@ -607,6 +664,14 @@ class ProductionOrchestrator:
         )
 
     async def _quote_pair_locked(self, candidate: Any) -> None:
+        try:
+            await self._quote_pair_current(candidate)
+        except QuoteChangedBeforeSend:
+            # Definitely unsent; clear any sibling, then let the next rank cycle
+            # rebuild. Never mutate a persisted intent's price after preparation.
+            await self._cancel_symbol_entries(candidate.symbol)
+
+    async def _quote_pair_current(self, candidate: Any) -> None:
         if not self.gate.may_submit or not self._candidate_actionable(candidate) or candidate.quote is None:
             return
         clock = asyncio.get_running_loop().time()
@@ -621,6 +686,13 @@ class ProductionOrchestrator:
         if self.account.reducer.positions.get(candidate.symbol, Decimal("0")) != 0:
             return
         if self.account.reducer.risk_adding_order_ids(candidate.symbol):
+            return
+        target = self._current_quote_target(candidate.symbol)
+        if target is None:
+            return
+        if target != candidate.quote:
+            # The rank cycle may have waited on earlier markets. Re-rank on the
+            # next cycle rather than using stale profitability/admission inputs.
             return
         state = self._websocket_exposure()
         if state.pending_orders + 2 > self._dynamic_pending_cap:
@@ -758,13 +830,35 @@ class ProductionOrchestrator:
         return False
 
     async def _adverse_quote_guard(self) -> None:
-        """Event-driven fast cancellation; replacement stays in one owner loop."""
-        while self.gate.state is EngineState.QUOTING:
-            await self.public.depth_changed.wait()
-            self.public.depth_changed.clear()
-            while (symbol := self.public.adverse_dirty.pop()) is not None:
-                async with self._lifecycle_lock:
-                    await self._cancel_too_aggressive_quote(symbol)
+        """Cancel independently of placement/exit waits; one worker per symbol."""
+        try:
+            while self.gate.state is EngineState.QUOTING:
+                await self.public.depth_changed.wait()
+                self.public.depth_changed.clear()
+                for symbol, task in tuple(self._adverse_tasks.items()):
+                    if task.done():
+                        task.result()
+                        self._adverse_tasks.pop(symbol)
+                while (symbol := self.public.adverse_dirty.pop()) is not None:
+                    if symbol not in self._adverse_tasks:
+                        task = asyncio.create_task(
+                            self._run_adverse_cancel(symbol),
+                            name="gemini-adverse-cancel",
+                        )
+                        self._adverse_tasks[symbol] = task
+                        task.add_done_callback(lambda _: self.public.depth_changed.set())
+        finally:
+            for task in self._adverse_tasks.values():
+                task.cancel()
+            await asyncio.gather(*self._adverse_tasks.values(), return_exceptions=True)
+            self._adverse_tasks.clear()
+
+    async def _run_adverse_cancel(self, symbol: str) -> bool:
+        try:
+            return await self._cancel_too_aggressive_quote(symbol)
+        except Exception:
+            self.gate.halt()
+            raise
 
     async def _maintain_candidate_locked(self, candidate: Any) -> None:
         working = [
@@ -1018,6 +1112,7 @@ class ProductionOrchestrator:
             policy, self.journal
         ).update(
             now=now, realized_pnl=realized_pnl,
+            reconciled=True,
             classification_complete=(
                 self.account.equity_classification_complete and history_complete
             ),
@@ -1080,6 +1175,10 @@ class ProductionOrchestrator:
             realized_pnl=realized_pnl,
             classification_complete=history_complete,
         )
+        if not mark.classification_complete:
+            self._dynamic_pending_cap = 0
+            self.gate.halt()
+            raise RuntimeError("closed-fill realized P&L cannot be classified safely")
         self._last_live_mark = key
         self._dynamic_pending_cap = mark.pending_order_cap
 
@@ -1203,6 +1302,10 @@ class ProductionOrchestrator:
         self._uptime_override_until = permit.uptime_override_until if ignore_uptime_proxy else None
         self._commissioning_expected_yes_price = expected_yes_price
         self._commissioning_expected_no_price = expected_no_price
+        start, end = RiskWindowPolicy(self.config.risk.risk_window_loss_usd).bounds(_utc_now())
+        _, complete = self.journal.realized_pnl_for_window(start, end)
+        if not complete:
+            raise RuntimeError("activation blocked: authenticated closing-fill evidence is incomplete")
         # Authority is persisted before the first possible mutation. Versions
         # 2-4 cannot replay; version 5 can resume only through the same bounded
         # supervisor session after this runner later records proven-flat exit.
@@ -1389,7 +1492,7 @@ class ProductionOrchestrator:
         final = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
         if final.positions or final.active_orders or self.account.reducer.positions:
             raise RuntimeError("drain did not prove globally flat with zero active orders")
-        self._resolve_prior_intents(await self.rest.order_history())
+        self._resolve_prior_intents(await self._targeted_prior_intent_history([]))
         if not self.account.equity_classification_complete:
             raise RuntimeError("flat position snapshot obtained but cash reconciliation is incomplete")
         self._exit_uncertain.clear()
@@ -1407,6 +1510,11 @@ class ProductionOrchestrator:
         self.account.adopt_verified_manual_flat(observed_at=_utc_now())
         if not self.account.equity_classification_complete:
             raise RuntimeError("manual-flat baseline did not reconcile account classification")
+        start, end = RiskWindowPolicy(self.config.risk.risk_window_loss_usd).bounds(_utc_now())
+        _, complete = self.journal.realized_pnl_for_window(start, end)
+        if not complete:
+            self._write_status("ready_paused", False, "flat reconciled; manual-close execution evidence missing; activation blocked")
+            raise RuntimeError("manual close is flat but realized P&L requires authenticated closing fills")
         self._write_status(
             "ready_paused", False,
             "verified manual flatten reconciled; fresh activation still required",
@@ -1419,6 +1527,10 @@ class ProductionOrchestrator:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        for task in self._cancel_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self._cancel_tasks.values(), return_exceptions=True)
+        self._cancel_tasks.clear()
         try:
             await asyncio.gather(self.private.close(), self.public.close(), return_exceptions=True)
         finally:

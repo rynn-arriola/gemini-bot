@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026: owner approved the follow-up review fixes and WebSocket improvements: 100 ms differential depth, connection-reported `conninfo` rate control, and authenticated order-stream cancellation confirmation before bounded REST fallback. Trading remains stopped until the owner explicitly requests restart. Rate and price corrections do not change the 30-slot/$30 six-hour/10-contract business policy.
+
 - September 15, 2026: every code or policy change must include an explicit impact check against Gemini's 50% qualifying-snapshot requirement. Preserve sticky pool uptime when safe; safety, exact exits, exposure controls, venue validity and reconciled ownership always override reward uptime.
 - September 15, 2026: keep a fixed ceiling of 30 pending entry orders until the single hard stop. Open positions remain excluded from the order count and unrealized marks do not reduce quoting breadth. Replace the tiered $25 marked-equity control with one $30 per-six-hour Eastern hard stop calculated only from completed, matched bot fill lifecycles including their recorded fees. At HARD, cancel entries and flatten; no separate money-loss stop is added. This $30 decision supersedes the briefly proposed $90 value before restart.
 - September 15, 2026: add an event-driven adverse-move guard. A depth update cancels an owned entry pair when either resting leg has become closer than the approved two-tick distance; normal sticky maintenance may replace it only after terminal cancellation. A quote that merely moved farther from touch is not churned by this fast guard.

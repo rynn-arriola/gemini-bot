@@ -1,5 +1,14 @@
 # Bug fixes
 
+## September 15, 2026 — follow-up review corrections
+
+- Maker entries now recompute the current two-tick target immediately before socket send, after pacing. A moved quote is terminalized as definitely unsent; any sibling is canceled and the next rank cycle rebuilds it. A stale ranked candidate is skipped before preparing an intent.
+- Urgent public-depth cancellation no longer waits on the placement/exit lifecycle lock or another market's cancellation confirmation. One worker per symbol and one shared cancellation task per order prevent duplicate mutation. Both sibling cancels are issued promptly through the paced transport. The private send queue prioritizes cancels without holding its lock through cooldown sleeps.
+- Shutdown uses the same targeted unresolved-intent lookup as startup. A flat account with no unresolved intents never scans complete order history, so the 1,000-row history ceiling no longer breaks a clean drain.
+- A manual-flat audit with unmatched fill basis now makes the affected risk window incomplete. Activation blocks before permit consumption; live detection stops entries immediately. Reconciled closing evidence may restore completeness while preserving all reached loss high-water/HARD values. No missing execution or fee is invented.
+- Snapshot impact: fresh-price rejection and genuine safety cancellation can create short unquoted intervals; replacement waits for terminal proof. Faster independent cancellation reduces exposure but provides no guaranteed latency or reward eligibility. Missing manual-close evidence intentionally blocks quoting in the affected window until reconciled.
+- Owner-approved WebSocket follow-up: switch public subscriptions/resync to `@depth@100ms`, discover actual buckets via `conninfo` before subscriptions on each socket, update from live response counters, reserve cancel headroom, and pace connection attempts. Missing/unknown limits fail closed. A 350 ms terminal-event wait avoids immediate REST cancellation polling; timeout still uses the bounded REST proof path. Conservative method-weight reservations and a local maximum rate remain because complete method costs are not published.
+
 ## September 15, 2026 — realized HARD, fixed breadth and pre-send exit race
 
 - The six-hour meter incorrectly let open executable marks ratchet pending orders from 30 down to 20. Owner policy now keeps 30 pending entry slots below one $30 HARD and counts only completed matched bot fill lifecycles plus recorded fees. The legacy marked-equity table is retained as history; a separate realized-risk table prevents silent reinterpretation.

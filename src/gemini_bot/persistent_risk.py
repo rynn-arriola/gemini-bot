@@ -51,7 +51,10 @@ class PersistentRiskWindow:
         now: datetime,
         realized_pnl: Decimal,
         classification_complete: bool,
+        reconciled: bool = False,
     ) -> PersistentRiskMark:
+        # Only a caller that has reconciled account state and replayed closing
+        # evidence may clear an incomplete classification. HARD stays latched.
         start, end = self.policy.bounds(now)
         stored = self.store.load_realized_risk_window(start)
         if stored is None:
@@ -65,7 +68,7 @@ class PersistentRiskWindow:
         observed_loss = max(Decimal("0"), -realized_pnl)
         high_water = max(prior_loss, observed_loss)
         cap = min(prior_cap, self.policy.pending_order_cap(high_water))
-        complete = prior_classification and classification_complete
+        complete = (prior_classification or reconciled) and classification_complete
         self.store.upsert_realized_risk_window(
             window_start=start,
             window_end=end,

@@ -337,7 +337,7 @@ Responses return the request `id` with either `result` or `error`. Streaming fra
 
 | Method | Auth | Purpose |
 | --- | --- | --- |
-| `conninfo` | Public | Connection information |
+| `conninfo` | Public | Connection rate-limit buckets; production queries each socket at connection startup |
 | `ping` | Public | Liveness check |
 | `time` | Public | Server time |
 | `SUBSCRIBE` | Depends on stream | Add subscriptions |

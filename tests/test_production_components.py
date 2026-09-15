@@ -129,7 +129,7 @@ class PersistentRiskTests(unittest.TestCase):
             )
             store.close()
 
-    def test_manual_flat_resets_unmatched_basis_without_fabricating_pnl(self) -> None:
+    def test_manual_flat_marks_missing_closing_pnl_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteJournal(Path(directory) / "risk.sqlite")
             start, end = RiskWindowPolicy(Decimal("30")).bounds(NOW)
@@ -157,7 +157,7 @@ class PersistentRiskTests(unittest.TestCase):
             )
             pnl, complete = store.realized_pnl_for_window(start, end)
             self.assertEqual(pnl, Decimal("-.50"))
-            self.assertTrue(complete)
+            self.assertFalse(complete)
             store.close()
 
     def test_realized_loss_keeps_fixed_cap_until_hard_and_tightens_across_restart(self) -> None:
@@ -553,10 +553,10 @@ class PublicLivenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(requests), 5)
         self.assertEqual(requests[0], ["contractStatus"])
         self.assertEqual(len(requests[1]), 20)
-        self.assertTrue(all(value.endswith("@depth") for value in requests[1]))
+        self.assertTrue(all(value.endswith("@depth@100ms") for value in requests[1]))
         self.assertEqual(len(requests[2]), 20)
         self.assertTrue(all(value.endswith("@trade") for value in requests[2]))
-        self.assertEqual(requests[3], ["S20@depth"])
+        self.assertEqual(requests[3], ["S20@depth@100ms"])
         self.assertEqual(requests[4], ["S20@trade"])
 
 
@@ -787,6 +787,11 @@ class OrchestratorWiringTests(unittest.IsolatedAsyncioTestCase):
             book = LocalBook("X")
             book.apply_snapshot([(Decimal(".48"), Decimal("100"))], [(Decimal(".52"), Decimal("100"))], 1, 1, NOW)
             runtime.public.books["X"] = book
+            runtime.universe = [RewardedContract(
+                "E", RewardPool("pool", Decimal("100")),
+                ContractRules("X", Decimal(".01"), Decimal("1"), Decimal("1")),
+                (NOW + timedelta(hours=2)).isoformat(),
+            )]
             runtime.gate.state = EngineState.QUOTING
             for name in (
                 "terms_accepted", "balances_known", "positions_known", "open_orders_known",
