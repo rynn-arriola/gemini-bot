@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 15, 2026 — non-trading cash no longer trips realized-loss accounting
+
+- Symptom: Gemini paid an $0.08 maker rebate after the SOL maker fills. Confirmed cash correctly rose, but the durable expected-cash ledger knew only fills, so the next launch stopped before quoting.
+- Correction: authenticated maker-rebate payouts, liquidity-reward payouts, and bounded USD deposit/withdrawal history reconcile exact non-trading cash separately. Only completed matched execution fills and their fees feed six-hour realized P&L. Unknown or non-exact cash still fails closed.
+- Rate/snapshot impact: transfer history uses Gemini's separate five-second REST lane; payout/transfer reads occur only during startup mismatch or a live unmatched-cash state. No quote, size, ranking, stop, or 50%-snapshot rule changed. Avoiding false payout halts can preserve uptime, but safety still wins.
+
 ## September 15, 2026 — maker fill race no longer drains every market
 
 - Symptom: an XRP first quote filled while its opposite leg waited for transport pacing. The last-moment guard correctly blocked the second entry, but the generic rejection stopped the runner, canceled all pending orders, and forced an immediate exact exit.

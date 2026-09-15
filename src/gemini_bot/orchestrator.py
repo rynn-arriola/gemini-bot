@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .account_runtime import AccountRuntime
 from .activation import (
@@ -51,7 +52,12 @@ from .risk_gate import admit_quote_pair
 from .risk_gate import ExposureState
 from .risk_windows import RiskWindowPolicy
 from .runtime_files import atomic_write_json, runtime_status
-from .storage import SQLiteJournal, WindowsOwnerLock, shared_control_directory
+from .storage import (
+    AuthenticatedCashAdjustment,
+    SQLiteJournal,
+    WindowsOwnerLock,
+    shared_control_directory,
+)
 from .uptime import sample_and_load_progress
 
 
@@ -137,6 +143,7 @@ class ProductionOrchestrator:
         self._cancel_tasks: dict[str, asyncio.Task[None]] = {}
         self._adverse_tasks: dict[str, asyncio.Task[bool]] = {}
         self._entry_cancel_symbols: dict[str, int] = {}
+        self._cash_reconciliation_task: asyncio.Task[int] | None = None
         self._logging = configure_logging(
             self.directory / "logs", secrets=(config.api_key, config.api_secret)
         )
@@ -264,6 +271,121 @@ class ProductionOrchestrator:
                 return
             await asyncio.sleep(0.05)
         raise TimeoutError("account/depth startup snapshots did not become ready")
+
+    async def _authenticated_nontrading_cash(
+        self, *, observed_at: datetime,
+    ) -> tuple[AuthenticatedCashAdjustment, ...]:
+        """Read authenticated account activity that can explain a cash delta."""
+        eastern_day = observed_at.astimezone(ZoneInfo("America/New_York")).date()
+        watermark = self.journal.get_runtime_state_record("cash_reconciliation_watermark")
+        if watermark is None:
+            watermark = self.journal.get_runtime_state_record("expected_confirmed_usd")
+        if watermark is None:
+            raise RuntimeError("non-trading cash has no durable reconciliation boundary")
+        maker_rows, liquidity_rows, transfer_rows = await asyncio.gather(
+            self.rest.maker_rebate_payouts(limit=100, offset=0),
+            self.rest.liquidity_reward_daily(
+                date_from=(eastern_day - timedelta(days=7)).isoformat(),
+                date_to=eastern_day.isoformat(),
+            ),
+            self.rest.past_transfers(since=watermark[1]),
+        )
+        credits: list[AuthenticatedCashAdjustment] = []
+        for row in maker_rows:
+            if str(row.get("status", "")).upper() != "PAID":
+                continue
+            try:
+                if row.get("id") in {None, ""}:
+                    raise ValueError("missing payout id")
+                amount = Decimal(str(row["total_rebate_usd"]))
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError("invalid maker-rebate amount")
+                if amount == 0:
+                    continue
+                credit = AuthenticatedCashAdjustment(
+                    source="maker_rebate",
+                    adjustment_id=str(row["id"]),
+                    amount=amount,
+                    occurred_at=_parse_time(str(row["paid_at"])),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("authenticated maker-rebate payout is invalid") from exc
+            credits.append(credit)
+        for row in liquidity_rows:
+            if str(row.get("payout_status", "")).upper() != "PAID":
+                continue
+            try:
+                if row.get("payout_date") in {None, ""}:
+                    raise ValueError("missing payout date")
+                amount = Decimal(str(row["total_reward_usd"]))
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError("invalid liquidity-reward amount")
+                if amount == 0:
+                    continue
+                credit = AuthenticatedCashAdjustment(
+                    source="liquidity_reward",
+                    adjustment_id=str(row["payout_date"]),
+                    amount=amount,
+                    occurred_at=_parse_time(str(row["paid_at"])),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("authenticated liquidity-reward payout is invalid") from exc
+            credits.append(credit)
+        for row in transfer_rows:
+            transfer_type = str(row.get("type", "")).upper()
+            if transfer_type in {"REWARD", "ADMINDEBIT", "ADMINCREDIT"}:
+                # Prediction reward/rebate endpoints provide the authoritative
+                # detail. Do not double-count their aggregate transfer row.
+                continue
+            if transfer_type not in {"DEPOSIT", "WITHDRAWAL"}:
+                raise RuntimeError("authenticated transfer has an unknown type")
+            status = str(row.get("status", "")).upper()
+            if status == "PENDING":
+                continue
+            valid_statuses = (
+                {"COMPLETE", "ADVANCED"}
+                if transfer_type == "DEPOSIT" else {"COMPLETE"}
+            )
+            if status not in valid_statuses:
+                raise RuntimeError("authenticated transfer has an unknown status")
+            if str(row.get("currency", "")).upper() != "USD":
+                continue
+            try:
+                if row.get("eid") in {None, ""}:
+                    raise ValueError("missing transfer id")
+                amount = Decimal(str(row["amount"]))
+                fee = Decimal(str(row.get("feeAmount", "0")))
+                timestamp_ms = int(row["timestampms"])
+                if (
+                    not amount.is_finite() or amount <= 0
+                    or not fee.is_finite() or fee < 0 or timestamp_ms <= 0
+                ):
+                    raise ValueError("invalid transfer economics")
+                if fee and str(row.get("feeCurrency", "")).upper() != "USD":
+                    raise ValueError("non-USD transfer fee cannot explain USD cash")
+                signed = amount if transfer_type == "DEPOSIT" else -(amount + fee)
+                credit = AuthenticatedCashAdjustment(
+                    source=transfer_type.lower(),
+                    adjustment_id=str(row["eid"]),
+                    amount=signed,
+                    occurred_at=datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("authenticated transfer is invalid") from exc
+            credits.append(credit)
+        return tuple(credits)
+
+    async def _reconcile_authenticated_nontrading_cash(self) -> int:
+        if self.account.equity_classification_complete:
+            return 0
+        observed_at = _utc_now()
+        credits = await self._authenticated_nontrading_cash(observed_at=observed_at)
+        count = self.account.reconcile_authenticated_cash_adjustments(
+            credits, observed_at=observed_at,
+        )
+        if not self.account.equity_classification_complete:
+            raise RuntimeError("authenticated non-trading cash did not complete classification")
+        return count
 
     def _resolve_prior_intents(self, history: list[dict[str, Any]], active: list[dict[str, Any]] | None = None) -> None:
         by_client = {str(row.get("clientOrderId", "")): row for row in history}
@@ -412,6 +534,10 @@ class ProductionOrchestrator:
             after = build_account_snapshot(positions_after, orders_after)
             assert_stable_account_bracket(before, after)
             assert_position_consistency(after, self.account.reducer.positions)
+            if not self.account.equity_classification_complete:
+                await self._reconcile_authenticated_nontrading_cash()
+            if not self.account.equity_classification_complete:
+                raise RuntimeError("startup cash/position classification is incomplete")
             self.journal.replace_account_snapshot(
                 [row.as_storage() for row in after.positions],
                 [row.as_storage() for row in after.active_orders],
@@ -1172,6 +1298,8 @@ class ProductionOrchestrator:
     async def _live_safety_clock(self) -> None:
         """Independent of ranking/REST waits: observe risk, expiry and exit timers."""
         unmatched_since: float | None = None
+        last_cash_reconcile_at = 0.0
+        last_cash_reconcile_error: BaseException | None = None
         while self.gate.state is EngineState.QUOTING:
             now = _utc_now()
             clock = asyncio.get_running_loop().time()
@@ -1191,10 +1319,34 @@ class ProductionOrchestrator:
                     raise RuntimeError("required stream worker ended")
             if not self.account.equity_classification_complete:
                 unmatched_since = clock if unmatched_since is None else unmatched_since
-                if clock - unmatched_since > 10:
+                positions_match = (
+                    self.account.expected_positions == self.account.reducer.positions
+                    and not self.account.unowned_order_seen
+                )
+                if (
+                    positions_match
+                    and clock - unmatched_since >= 1
+                    and clock - last_cash_reconcile_at >= 2
+                    and self._cash_reconciliation_task is None
+                ):
+                    self._cash_reconciliation_task = asyncio.create_task(
+                        self._reconcile_authenticated_nontrading_cash(),
+                        name="gemini-nontrading-cash-reconciliation",
+                    )
+                    last_cash_reconcile_at = clock
+                if self._cash_reconciliation_task is not None and self._cash_reconciliation_task.done():
+                    try:
+                        self._cash_reconciliation_task.result()
+                    except BaseException as exc:
+                        last_cash_reconcile_error = exc
+                    finally:
+                        self._cash_reconciliation_task = None
+                if not self.account.equity_classification_complete and clock - unmatched_since > 10:
                     self.gate.halt()
-                    raise RuntimeError("cash/position changes remain unmatched; reconciliation required")
-            else:
+                    raise RuntimeError(
+                        "cash/position changes remain unmatched; reconciliation required"
+                    ) from last_cash_reconcile_error
+            if self.account.equity_classification_complete:
                 unmatched_since = None
                 self._mark_live_risk()
                 if self.account.reducer.pending_order_count() > self._dynamic_pending_cap:
@@ -1661,6 +1813,10 @@ class ProductionOrchestrator:
             task.cancel()
         await asyncio.gather(*self._cancel_tasks.values(), return_exceptions=True)
         self._cancel_tasks.clear()
+        if self._cash_reconciliation_task is not None:
+            self._cash_reconciliation_task.cancel()
+            await asyncio.gather(self._cash_reconciliation_task, return_exceptions=True)
+            self._cash_reconciliation_task = None
         try:
             await asyncio.gather(self.private.close(), self.public.close(), return_exceptions=True)
         finally:

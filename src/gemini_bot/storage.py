@@ -23,6 +23,14 @@ class ManualCloseGap:
     signed_quantity: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class AuthenticatedCashAdjustment:
+    source: str
+    adjustment_id: str
+    amount: Decimal
+    occurred_at: datetime
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS order_intent (
     client_order_id TEXT PRIMARY KEY,
@@ -82,6 +90,14 @@ CREATE TABLE IF NOT EXISTS execution_fill (
     price TEXT NOT NULL,
     fee TEXT NOT NULL,
     event_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS authenticated_cash_adjustment (
+    source TEXT NOT NULL,
+    adjustment_id TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    reconciled_at TEXT NOT NULL,
+    PRIMARY KEY (source, adjustment_id)
 );
 CREATE TABLE IF NOT EXISTS risk_window_state (
     window_start TEXT PRIMARY KEY,
@@ -348,6 +364,13 @@ class SQLiteJournal:
                 """INSERT INTO runtime_state(key,value,updated_at) VALUES('expected_confirmed_usd',?,?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
                 (str(confirmed_usd), observed_at.isoformat()),
+            )
+            self.connection.execute(
+                """INSERT INTO runtime_state(key,value,updated_at)
+                   VALUES('cash_reconciliation_watermark','manual_flat_baseline',?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value,updated_at=excluded.updated_at""",
+                (observed_at.isoformat(),),
             )
             self.connection.execute(
                 "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
@@ -734,6 +757,121 @@ class SQLiteJournal:
             "SELECT value FROM runtime_state WHERE key=?", (key,)
         ).fetchone()
         return None if row is None else str(row[0])
+
+    def get_runtime_state_record(self, key: str) -> tuple[str, datetime] | None:
+        row = self.connection.execute(
+            "SELECT value,updated_at FROM runtime_state WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        updated_at = datetime.fromisoformat(str(row[1]))
+        if updated_at.tzinfo is None:
+            raise RuntimeError("runtime-state timestamp is not timezone-aware")
+        return str(row[0]), updated_at
+
+    def reconcile_authenticated_cash_adjustments(
+        self,
+        *,
+        expected_cash: Decimal,
+        confirmed_cash: Decimal,
+        adjustments: tuple[AuthenticatedCashAdjustment, ...],
+        observed_at: datetime,
+    ) -> int:
+        """Adopt exact authenticated non-trading cash without changing trade P&L."""
+        if observed_at.tzinfo is None:
+            raise ValueError("cash reconciliation requires an aware timestamp")
+        if not adjustments:
+            raise RuntimeError("cash change has no authenticated non-trading adjustment")
+        delta = confirmed_cash - expected_cash
+        if delta == 0:
+            raise RuntimeError("cash adjustment is unnecessary")
+        state = self.get_runtime_state_record("expected_confirmed_usd")
+        if state is None or Decimal(state[0]) != expected_cash:
+            raise RuntimeError("durable expected cash changed during reconciliation")
+        watermark_state = self.get_runtime_state_record("cash_reconciliation_watermark")
+        watermark = watermark_state[1] if watermark_state is not None else state[1]
+        eligible: list[AuthenticatedCashAdjustment] = []
+        identities: set[tuple[str, str]] = set()
+        for adjustment in adjustments:
+            identity = (adjustment.source, adjustment.adjustment_id)
+            if adjustment.source not in {
+                "deposit", "withdrawal", "maker_rebate", "liquidity_reward",
+            }:
+                raise RuntimeError("cash adjustment has an unapproved source")
+            if (
+                not adjustment.adjustment_id
+                or adjustment.amount == 0
+                or not adjustment.amount.is_finite()
+            ):
+                raise RuntimeError("cash adjustment has an invalid identity or amount")
+            if (
+                adjustment.source in {"deposit", "maker_rebate", "liquidity_reward"}
+                and adjustment.amount < 0
+            ):
+                raise RuntimeError("cash adjustment has the wrong sign")
+            if adjustment.source == "withdrawal" and adjustment.amount > 0:
+                raise RuntimeError("cash adjustment has the wrong sign")
+            if adjustment.occurred_at.tzinfo is None:
+                raise RuntimeError("cash adjustment has a timezone-naive event time")
+            if adjustment.occurred_at > observed_at:
+                raise RuntimeError("cash adjustment is after the observed balance")
+            if identity in identities:
+                raise RuntimeError("cash adjustment response contains a duplicate identity")
+            identities.add(identity)
+            if adjustment.occurred_at <= watermark:
+                continue
+            if self.connection.execute(
+                """SELECT 1 FROM authenticated_cash_adjustment
+                   WHERE source=? AND adjustment_id=?""",
+                identity,
+            ).fetchone() is None:
+                eligible.append(adjustment)
+        if sum((row.amount for row in eligible), Decimal("0")) != delta:
+            raise RuntimeError(
+                "cash change does not exactly match authenticated non-trading activity"
+            )
+        with self.transaction():
+            current = self.connection.execute(
+                "SELECT value FROM runtime_state WHERE key='expected_confirmed_usd'"
+            ).fetchone()
+            if current is None or Decimal(str(current[0])) != expected_cash:
+                raise RuntimeError("durable expected cash changed during reconciliation")
+            self.connection.executemany(
+                """INSERT INTO authenticated_cash_adjustment
+                   (source,adjustment_id,amount,occurred_at,reconciled_at)
+                   VALUES(?,?,?,?,?)""",
+                [
+                    (
+                        row.source, row.adjustment_id, str(row.amount),
+                        row.occurred_at.isoformat(), observed_at.isoformat(),
+                    )
+                    for row in eligible
+                ],
+            )
+            self.connection.execute(
+                """UPDATE runtime_state SET value=?,updated_at=?
+                   WHERE key='expected_confirmed_usd'""",
+                (str(confirmed_cash), observed_at.isoformat()),
+            )
+            self.connection.execute(
+                """INSERT INTO runtime_state(key,value,updated_at)
+                   VALUES('cash_reconciliation_watermark','verified',?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value,updated_at=excluded.updated_at""",
+                (observed_at.isoformat(),),
+            )
+            counts: dict[str, int] = {}
+            for row in eligible:
+                counts[row.source] = counts.get(row.source, 0) + 1
+            self.connection.execute(
+                "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
+                (
+                    observed_at.isoformat(),
+                    "authenticated_nontrading_cash_reconciled",
+                    json.dumps({"counts": counts}, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+        return len(eligible)
 
     def sample_reward_uptime(
         self,

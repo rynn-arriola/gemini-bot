@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import timedelta
 from decimal import Decimal as D
 import json
@@ -21,7 +22,7 @@ from gemini_bot.persistent_risk import PersistentRiskWindow
 from gemini_bot.rate_limits import AdmissionGovernor
 from gemini_bot.rest_client import ApiError, GeminiReadRestClient
 from gemini_bot.risk_windows import RiskWindowPolicy
-from gemini_bot.storage import SQLiteJournal
+from gemini_bot.storage import AuthenticatedCashAdjustment, SQLiteJournal
 
 
 class SupervisorResultTests(unittest.TestCase):
@@ -40,6 +41,189 @@ class SupervisorResultTests(unittest.TestCase):
             })
 
 
+class NonTradingCashTests(unittest.TestCase):
+    def test_authenticated_rebate_reconciles_cash_without_changing_realized_pnl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "journal.sqlite")
+            try:
+                store.set_runtime_state(
+                    "expected_confirmed_usd", "100", updated_at=NOW,
+                )
+                store.record_fill(
+                    trade_id="buy", order_id="buy-order", client_order_id="buy-client",
+                    symbol="X", side="BUY", outcome="YES", quantity=D("10"),
+                    price=D(".40"), fee=D(".01"), event_at=NOW,
+                )
+                store.record_fill(
+                    trade_id="sell", order_id="sell-order", client_order_id="sell-client",
+                    symbol="X", side="SELL", outcome="YES", quantity=D("10"),
+                    price=D(".45"), fee=D(".01"), event_at=NOW + timedelta(seconds=1),
+                )
+                window = RiskWindowPolicy(D("30")).bounds(NOW)
+                pnl_before = store.realized_pnl_for_window(*window)
+                count = store.reconcile_authenticated_cash_adjustments(
+                    expected_cash=D("100"), confirmed_cash=D("100.08"),
+                    adjustments=(AuthenticatedCashAdjustment(
+                        "maker_rebate", "19922", D(".08"),
+                        NOW + timedelta(minutes=1),
+                    ),),
+                    observed_at=NOW + timedelta(minutes=2),
+                )
+                self.assertEqual(count, 1)
+                self.assertEqual(store.get_runtime_state("expected_confirmed_usd"), "100.08")
+                self.assertEqual(store.realized_pnl_for_window(*window), pnl_before)
+            finally:
+                store.close()
+
+    def test_authenticated_deposit_and_withdrawal_are_nontrading_cash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "journal.sqlite")
+            try:
+                store.set_runtime_state(
+                    "expected_confirmed_usd", "100", updated_at=NOW,
+                )
+                self.assertEqual(store.reconcile_authenticated_cash_adjustments(
+                    expected_cash=D("100"), confirmed_cash=D("110"),
+                    adjustments=(AuthenticatedCashAdjustment(
+                        "deposit", "deposit-1", D("10"),
+                        NOW + timedelta(minutes=1),
+                    ),),
+                    observed_at=NOW + timedelta(minutes=2),
+                ), 1)
+                self.assertEqual(store.reconcile_authenticated_cash_adjustments(
+                    expected_cash=D("110"), confirmed_cash=D("104.50"),
+                    adjustments=(AuthenticatedCashAdjustment(
+                        "withdrawal", "withdrawal-1", D("-5.50"),
+                        NOW + timedelta(minutes=3),
+                    ),),
+                    observed_at=NOW + timedelta(minutes=4),
+                ), 1)
+                self.assertEqual(store.get_runtime_state("expected_confirmed_usd"), "104.50")
+                self.assertEqual(
+                    store.realized_pnl_for_window(*RiskWindowPolicy(D("30")).bounds(NOW)),
+                    (D("0"), True),
+                )
+            finally:
+                store.close()
+
+    def test_unmatched_external_cash_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "journal.sqlite")
+            try:
+                store.set_runtime_state(
+                    "expected_confirmed_usd", "100", updated_at=NOW,
+                )
+                with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                    store.reconcile_authenticated_cash_adjustments(
+                        expected_cash=D("100"), confirmed_cash=D("90"),
+                        adjustments=(AuthenticatedCashAdjustment(
+                            "maker_rebate", "irrelevant", D(".08"),
+                            NOW + timedelta(minutes=1),
+                        ),),
+                        observed_at=NOW + timedelta(minutes=2),
+                    )
+                self.assertEqual(store.get_runtime_state("expected_confirmed_usd"), "100")
+            finally:
+                store.close()
+
+    def test_duplicate_or_unapproved_cash_credit_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "journal.sqlite")
+            try:
+                store.set_runtime_state(
+                    "expected_confirmed_usd", "100", updated_at=NOW,
+                )
+                duplicate = AuthenticatedCashAdjustment(
+                    "maker_rebate", "same", D(".04"), NOW + timedelta(minutes=1),
+                )
+                with self.assertRaisesRegex(RuntimeError, "duplicate identity"):
+                    store.reconcile_authenticated_cash_adjustments(
+                        expected_cash=D("100"), confirmed_cash=D("100.08"),
+                        adjustments=(duplicate, duplicate),
+                        observed_at=NOW + timedelta(minutes=2),
+                    )
+                with self.assertRaisesRegex(RuntimeError, "unapproved source"):
+                    store.reconcile_authenticated_cash_adjustments(
+                        expected_cash=D("100"), confirmed_cash=D("100.08"),
+                        adjustments=(AuthenticatedCashAdjustment(
+                            "mystery", "not-an-incentive", D(".08"),
+                            NOW + timedelta(minutes=1),
+                        ),),
+                        observed_at=NOW + timedelta(minutes=2),
+                    )
+            finally:
+                store.close()
+
+
+class IncentiveRestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incentive_reads_use_documented_query_parameters(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client.private_read = AsyncMock(side_effect=[
+            {"payouts": [{"id": 1}]},
+            {"daily_summaries": [{"payout_date": "2026-09-15"}]},
+        ])
+        self.assertEqual(await client.maker_rebate_payouts(), [{"id": 1}])
+        self.assertEqual(
+            await client.liquidity_reward_daily(
+                date_from="2026-09-08", date_to="2026-09-15",
+            ),
+            [{"payout_date": "2026-09-15"}],
+        )
+        self.assertEqual(
+            client.private_read.await_args_list[0].kwargs,
+            {"method": "POST", "query_params": {"limit": 100, "offset": 0}},
+        )
+        self.assertEqual(
+            client.private_read.await_args_list[1].kwargs,
+            {
+                "method": "GET",
+                "query_params": {"dateFrom": "2026-09-08", "dateTo": "2026-09-15"},
+            },
+        )
+
+    async def test_transfer_history_uses_bounded_slow_lane(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client._private_list_read = AsyncMock(return_value=[{"eid": 1}])
+        self.assertEqual(await client.past_transfers(since=NOW), [{"eid": 1}])
+        client._private_list_read.assert_awaited_once_with(
+            "/v2/transfers",
+            {"timestamp": int(NOW.timestamp() * 1000), "limit_transfers": 50},
+            lane="transfer_rest",
+        )
+        self.assertEqual(client.governor.lanes["transfer_rest"].minimum_interval_seconds, 5)
+
+    async def test_full_payout_or_transfer_window_fails_closed(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client.private_read = AsyncMock(return_value={
+            "payouts": [{"id": value} for value in range(2)],
+        })
+        with self.assertRaisesRegex(ApiError, "window_ceiling"):
+            await client.maker_rebate_payouts(limit=2)
+        client._private_list_read = AsyncMock(
+            return_value=[{"eid": value} for value in range(50)]
+        )
+        with self.assertRaisesRegex(ApiError, "window_ceiling"):
+            await client.past_transfers(since=NOW)
+
+    async def test_private_reward_query_is_in_url_not_signed_payload(self):
+        client = GeminiReadRestClient(
+            AdmissionGovernor(), api_key="account-fake", api_secret="fake-secret",
+        )
+        requests = []
+        def read(request):
+            requests.append(request)
+            return {"payouts": []}
+        client._open_json = read
+        await client.maker_rebate_payouts(limit=25, offset=50)
+        self.assertTrue(requests[0].full_url.endswith("?limit=25&offset=50"))
+        payload = json.loads(base64.b64decode(
+            requests[0].get_header("X-gemini-payload")
+        ))
+        self.assertEqual(payload["request"], "/v1/prediction-markets/maker-rebate/payouts")
+        self.assertNotIn("limit", payload)
+        self.assertNotIn("offset", payload)
+
+
 class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.fixture = repair_fixtures.RuntimeRepairTests()
@@ -56,6 +240,40 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(QuoteChangedBeforeSend):
             self.runtime._validate_send(payload)
+
+    async def test_exact_paid_rebate_repairs_cash_classification_only(self):
+        self.runtime.journal.set_runtime_state(
+            "expected_confirmed_usd", "100", updated_at=NOW,
+        )
+        self.runtime.journal.set_runtime_state(
+            "cash_reconciliation_watermark", "baseline", updated_at=NOW,
+        )
+        self.runtime.account.expected_confirmed_usd = D("100")
+        self.runtime.account.confirmed_usd = D("100.08")
+        self.runtime.rest.maker_rebate_payouts = AsyncMock(return_value=[{
+            "id": 19922,
+            "total_rebate_usd": ".08",
+            "status": "PAID",
+            "paid_at": (NOW + timedelta(minutes=1)).isoformat(),
+        }])
+        self.runtime.rest.liquidity_reward_daily = AsyncMock(return_value=[])
+        self.runtime.rest.past_transfers = AsyncMock(return_value=[])
+        self.runtime.rest.positions = AsyncMock(return_value=[])
+        self.runtime.rest.active_orders = AsyncMock(return_value=[])
+        with self.assertRaisesRegex(RuntimeError, "cannot be classified"):
+            await self.runtime._risk_mark()
+        with patch(
+            "gemini_bot.orchestrator._utc_now",
+            return_value=NOW + timedelta(minutes=2),
+        ):
+            self.assertEqual(
+                await self.runtime._reconcile_authenticated_nontrading_cash(), 1,
+            )
+        self.assertTrue(self.runtime.account.equity_classification_complete)
+        self.assertEqual(await self.runtime._risk_mark(), 30)
+        self.assertEqual(self.runtime.journal.realized_pnl_for_window(
+            *RiskWindowPolicy(D("30")).bounds(NOW)
+        ), (D("0"), True))
 
     async def test_transport_terminals_unsent_stale_maker_intent(self):
         transport = self.runtime.private

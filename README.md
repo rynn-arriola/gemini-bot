@@ -23,6 +23,7 @@ This is a native-Windows live-trading build. The production runtime is implement
 - One shared priority rate governor; REST remains bounded metadata/reconciliation transport.
 - Ten contracts per outcome leg, maximum 30 pending orders, $300 gross exposure, $90 per-market exposure, and separate position controls.
 - Six-hour Eastern realized-loss windows that keep the pending-order ceiling fixed at 30 below HARD and reduce it to zero at the approved $30 stop.
+- Polymarket-style accounting separation: authenticated deposits, withdrawals, liquidity rewards, and maker rebates reconcile cash but never enter fill-only realized trading P&L.
 - Pool-deduplicated profitability ranking v2: conservative reward share less fee/rebate, projected fill, adverse-move and exit-depth costs per capital-hour, with sticky cohorts and explicit uncertainty around Gemini's private scoring curve. See [the v2 model](docs/PROFITABILITY_RANKING_V2.md).
 - Durable SQLite order-intent and inventory-deadline journal plus a native Windows single-owner lock.
 - Durable account snapshots, fill IDs, local reward-uptime samples and six-hour loss high-water marks across restart.

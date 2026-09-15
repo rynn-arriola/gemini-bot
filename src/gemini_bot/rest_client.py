@@ -31,6 +31,9 @@ PRIVATE_READS = frozenset({
     "/v1/prediction-markets/positions/settled",
     "/v1/prediction-markets/liquidity-rewards/summary/daily",
     "/v1/prediction-markets/liquidity-rewards/summary/total",
+    "/v1/prediction-markets/maker-rebate/payouts",
+    "/v1/prediction-markets/maker-rebate/summary/total",
+    "/v2/transfers",
 })
 
 
@@ -112,11 +115,11 @@ class GeminiReadRestClient:
             await asyncio.sleep(delay)
             delay = self.governor.admit(lane, priority)
 
-    def _open_json(self, request: urllib.request.Request) -> dict[str, Any]:
+    def _open_json(self, request: urllib.request.Request) -> dict[str, Any] | list[Any]:
         try:
             with self._opener.open(request, timeout=self.timeout_seconds) as response:
                 value = json.load(response)
-                if not isinstance(value, dict):
+                if not isinstance(value, (dict, list)):
                     raise ApiError(response.status, "invalid_json_shape")
                 return value
         except urllib.error.HTTPError as exc:
@@ -139,16 +142,19 @@ class GeminiReadRestClient:
         request_factory = lambda: urllib.request.Request(
             url, method="GET", headers={"Accept": "application/json"},
         )
-        return await self._read_with_cooldown(request_factory, "public_rest")
+        result = await self._read_with_cooldown(request_factory, "public_rest")
+        if not isinstance(result, dict):
+            raise ApiError(200, "invalid_json_shape")
+        return result
 
     async def _read_with_cooldown(
         self,
         request_factory: Callable[[], urllib.request.Request],
         lane: str,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         priority = (
             Priority.ACCOUNT_RECONCILIATION
-            if lane == "private_rest" else Priority.REWARD_METADATA
+            if lane in {"private_rest", "transfer_rest"} else Priority.REWARD_METADATA
         )
         for attempt in range(3):
             try:
@@ -157,7 +163,7 @@ class GeminiReadRestClient:
                 if exc.status in {418, 429} or exc.retry_after is not None:
                     delay = max(60.0, exc.retry_after or 0.0)
                     # An IP/account limit can span public and private endpoints.
-                    for affected in ("public_rest", "private_rest"):
+                    for affected in ("public_rest", "private_rest", "transfer_rest"):
                         self.governor.apply_server_cooldown(affected, delay)
                 retryable = exc.status is None or exc.status == 408 or (
                     exc.status is not None and 500 <= exc.status < 600
@@ -176,6 +182,7 @@ class GeminiReadRestClient:
         fields: dict[str, object] | None = None,
         *,
         method: str = "POST",
+        query_params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         if path not in PRIVATE_READS:
             raise ValueError("private REST route is not an approved reconciliation read")
@@ -185,6 +192,8 @@ class GeminiReadRestClient:
             raise ValueError("private read requires credentials")
         async with self._private_lock:
             await self._pace("private_rest", Priority.ACCOUNT_RECONCILIATION)
+            query = urllib.parse.urlencode(query_params or {})
+            url = self.base_url + path + (("?" + query) if query else "")
             def request_factory() -> urllib.request.Request:
                 # Rebuild authentication for every idempotent read attempt so
                 # a timed-out request's nonce/signature is never replayed.
@@ -193,9 +202,34 @@ class GeminiReadRestClient:
                     int(time.time()),
                 )
                 return urllib.request.Request(
-                    self.base_url + path, method=method, headers=headers, data=None,
+                    url, method=method, headers=headers, data=None,
                 )
-            return await self._read_with_cooldown(request_factory, "private_rest")
+            result = await self._read_with_cooldown(request_factory, "private_rest")
+            if not isinstance(result, dict):
+                raise ApiError(200, "invalid_json_shape")
+            return result
+
+    async def _private_list_read(
+        self, path: str, fields: dict[str, object], *, lane: str,
+    ) -> list[Any]:
+        if path not in PRIVATE_READS:
+            raise ValueError("private REST route is not an approved reconciliation read")
+        if not self.api_key or not self.api_secret:
+            raise ValueError("private read requires credentials")
+        async with self._private_lock:
+            await self._pace(lane, Priority.ACCOUNT_RECONCILIATION)
+            def request_factory() -> urllib.request.Request:
+                headers = private_headers(
+                    path, fields, self.api_key or "", self.api_secret or "",
+                    int(time.time()),
+                )
+                return urllib.request.Request(
+                    self.base_url + path, method="POST", headers=headers, data=None,
+                )
+            result = await self._read_with_cooldown(request_factory, lane)
+            if not isinstance(result, list):
+                raise ApiError(200, "invalid_json_shape")
+            return result
 
     async def terms_status(self) -> dict[str, Any]:
         return await self.private_read("/v1/prediction-markets/terms/status", method="GET")
@@ -209,6 +243,60 @@ class GeminiReadRestClient:
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ApiError(200, "invalid_maker_rebate_rates_shape")
         return rows
+
+    async def maker_rebate_payouts(
+        self, *, limit: int = 100, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("maker-rebate payout pagination is invalid")
+        response = await self.private_read(
+            "/v1/prediction-markets/maker-rebate/payouts",
+            method="POST",
+            query_params={"limit": limit, "offset": offset},
+        )
+        rows = response.get("payouts")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ApiError(200, "invalid_maker_rebate_payouts_shape")
+        if len(rows) >= limit:
+            raise ApiError(200, "maker_rebate_payouts_window_ceiling_exceeded")
+        return rows
+
+    async def liquidity_reward_daily(
+        self, *, date_from: str, date_to: str,
+    ) -> list[dict[str, Any]]:
+        for value in (date_from, date_to):
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("liquidity-reward dates must use YYYY-MM-DD") from exc
+        if date_from > date_to:
+            raise ValueError("liquidity-reward date range must increase")
+        response = await self.private_read(
+            "/v1/prediction-markets/liquidity-rewards/summary/daily",
+            method="GET",
+            query_params={"dateFrom": date_from, "dateTo": date_to},
+        )
+        rows = response.get("daily_summaries")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ApiError(200, "invalid_liquidity_reward_daily_shape")
+        return rows
+
+    async def past_transfers(self, *, since: datetime) -> list[dict[str, Any]]:
+        if since.tzinfo is None:
+            raise ValueError("transfer-history boundary must be timezone-aware")
+        values = await self._private_list_read(
+            "/v2/transfers",
+            {
+                "timestamp": int(since.astimezone(timezone.utc).timestamp() * 1000),
+                "limit_transfers": 50,
+            },
+            lane="transfer_rest",
+        )
+        if any(not isinstance(value, dict) for value in values):
+            raise ApiError(200, "invalid_transfers_row")
+        if len(values) >= 50:
+            raise ApiError(200, "transfers_window_ceiling_exceeded")
+        return values
 
     async def reward_events(self, *, ceiling: int = 3000) -> list[dict[str, Any]]:
         # Offset pagination is not a snapshot. If Gemini inserts or reorders an

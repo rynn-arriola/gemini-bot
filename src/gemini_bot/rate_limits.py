@@ -58,6 +58,9 @@ class AdmissionGovernor:
         self.lanes = {
             "public_rest": Lane(1.0),
             "private_rest": Lane(0.2),
+            # Gemini documents a separate one-request-per-five-seconds limit
+            # for transfer history.
+            "transfer_rest": Lane(5.0),
             "public_ws": Lane(0.05),
             "private_ws": Lane(0.05),
         }

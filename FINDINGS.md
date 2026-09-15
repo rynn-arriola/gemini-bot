@@ -1,5 +1,11 @@
 # Gemini findings
 
+## September 15, 2026: $0.08 maker rebate and cash classification
+
+- Authenticated payout history identifies one paid $0.08 maker rebate from two SOL maker fills totaling $10.90 of volume. It is separate from liquidity rewards.
+- The rebate is non-trading cash. Current six-hour realized P&L remains -$0.28 because that meter reads only completed matched fills and recorded trading fees.
+- Gemini's authenticated `/v2/transfers` feed can classify bounded USD deposits and withdrawals. The bot uses the documented one-request-per-five-seconds lane and rejects full/ambiguous history.
+
 ## September 15, 2026: 17:00 fill race and fail-safe drain
 
 - Gemini filled BUY YES 10 on the XRP 21:00 September 16 contract at $0.81 while the paired NO leg was waiting for its private-WebSocket send slot. The pre-send guard correctly did not transmit the stale second leg.

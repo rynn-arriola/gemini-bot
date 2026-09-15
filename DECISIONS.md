@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026: deposits, withdrawals, liquidity rewards, and maker rebates are non-trading cash and must never enter realized trading P&L or the $30 six-hour stop. Reconcile them only from exact authenticated history; an unknown or non-exact cash movement pauses new risk. This follows the Polymarket accounting boundary while using Gemini's own payout and transfer APIs.
+
 - September 15, 2026: owner approved the follow-up review fixes and WebSocket improvements: 100 ms differential depth, connection-reported `conninfo` rate control, and authenticated order-stream cancellation confirmation before bounded REST fallback. Trading remains stopped until the owner explicitly requests restart. Rate and price corrections do not change the 30-slot/$30 six-hour/10-contract business policy.
 
 - September 15, 2026: every code or policy change must include an explicit impact check against Gemini's 50% qualifying-snapshot requirement. Preserve sticky pool uptime when safe; safety, exact exits, exposure controls, venue validity and reconciled ownership always override reward uptime.

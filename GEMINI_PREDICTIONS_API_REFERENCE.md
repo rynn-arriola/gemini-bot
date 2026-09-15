@@ -243,6 +243,8 @@ Official section: [Combos API](https://developer.gemini.com/rest-api/prediction-
 
 Maker rebates are fill-based and independent of liquidity rewards. A qualifying resting order can potentially earn both.
 
+Production uses paid payout rows only to reconcile non-trading cash. A payout never enters the execution-fill P&L ledger.
+
 The production selector reads the public rates endpoint once during preparation, chooses the latest currently effective category rule with the active default as fallback, and assumes zero rebate when the read is unavailable. This is ranking input only; authenticated payout data remains authoritative.
 
 Official section: [Rewards API](https://developer.gemini.com/rest-api/prediction-markets/rewards)
@@ -276,6 +278,10 @@ Reward-event pagination uses a maximum `limit` of 100. Program endpoints return 
 Observed shared-category rows additionally contain `pool_id`, `pool_event_count`, `pool_category_name`, `recurring_duration_value`, and `recurring_duration_unit`. Preserve these fields even when an older generated schema omits them. The current response supplies `ends_at` but no reward `starts_at`; do not invent a reward activation timestamp. `last_score_date` is a scoring date, not a precise timestamp proving competition is fresh. Event maker counts are not distinct pool-level account counts.
 
 Official endpoint: [List Liquidity Rewards Events](https://developer.gemini.com/rest-api/prediction-markets/rewards/list-liquidity-rewards-events)
+
+### Non-trading cash reconciliation
+
+`POST /v2/transfers` is the authenticated source for bounded deposit and withdrawal history. Production accepts only exact completed/advanced USD activity after its durable watermark, fails closed on a full 50-row window, and observes Gemini's one-request-per-five-seconds endpoint limit. Deposits, withdrawals, paid liquidity rewards, and paid maker rebates update expected cash but never trading P&L.
 
 ## Liquidity reward rules
 

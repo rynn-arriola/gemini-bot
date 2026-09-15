@@ -10,7 +10,7 @@ import json
 
 from .account_state import AccountReducer
 from .execution import IntentLedger, IntentState
-from .storage import SQLiteJournal
+from .storage import AuthenticatedCashAdjustment, SQLiteJournal
 
 
 def _event_time(frame: dict[str, Any]) -> datetime:
@@ -93,12 +93,24 @@ class AccountRuntime:
         # Timing proximity is never evidence that a cash movement is a fill.
         self._known_account_activity_at = time.monotonic()
 
-    def _persist_expected_cash(self) -> None:
+    def _persist_expected_cash(self, *, initialize_watermark: bool = False) -> None:
         if self.expected_confirmed_usd is not None:
+            observed_at = datetime.now(timezone.utc)
             self.journal.set_runtime_state(
                 "expected_confirmed_usd", str(self.expected_confirmed_usd),
-                updated_at=datetime.now(timezone.utc),
+                updated_at=observed_at,
             )
+            if (
+                initialize_watermark
+                and self.journal.get_runtime_state("cash_reconciliation_watermark") is None
+            ):
+                # The first authenticated balance already contains all earlier
+                # non-trading cash. Only later venue-paid credits may explain a
+                # future positive delta.
+                self.journal.set_runtime_state(
+                    "cash_reconciliation_watermark", "baseline",
+                    updated_at=observed_at,
+                )
 
     def switch_to_deltas(self) -> None:
         self.complete_position_snapshots = False
@@ -127,6 +139,26 @@ class AccountRuntime:
         self.expected_positions = {}
         self.expected_confirmed_usd = self.confirmed_usd
         self.blocked_entries.clear()
+
+    def reconcile_authenticated_cash_adjustments(
+        self,
+        adjustments: tuple[AuthenticatedCashAdjustment, ...],
+        *,
+        observed_at: datetime,
+    ) -> int:
+        """Classify exact authenticated account activity as non-trading cash."""
+        if self.confirmed_usd is None or self.expected_confirmed_usd is None:
+            raise RuntimeError("cash reconciliation requires both cash values")
+        if self.expected_positions != self.reducer.positions or self.unowned_order_seen:
+            raise RuntimeError("cash reconciliation requires matched account state")
+        count = self.journal.reconcile_authenticated_cash_adjustments(
+            expected_cash=self.expected_confirmed_usd,
+            confirmed_cash=self.confirmed_usd,
+            adjustments=adjustments,
+            observed_at=observed_at,
+        )
+        self.expected_confirmed_usd = self.confirmed_usd
+        return count
 
     def _signal(self, client_order_id: str) -> None:
         self.events.setdefault(client_order_id, asyncio.Event()).set()
@@ -162,7 +194,7 @@ class AccountRuntime:
                     confirmed = Decimal(str(row.get("c", "0")))
                     if self.expected_confirmed_usd is None:
                         self.expected_confirmed_usd = confirmed
-                        self._persist_expected_cash()
+                        self._persist_expected_cash(initialize_watermark=True)
                     self.available_usd = available
                     self.confirmed_usd = confirmed
             return
