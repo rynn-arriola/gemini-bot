@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from gemini_bot.execution import IntentLedger
+from gemini_bot.domain import Outcome, QuoteLeg, Side
 from gemini_bot.rate_limits import AdmissionGovernor, Priority
 from preflight_read_only import ReadOnlyAccountSocket
 
@@ -29,3 +30,15 @@ class ReadOnlyPreflightTests(unittest.IsolatedAsyncioTestCase):
         socket._connection.send.assert_awaited_once()
         with self.assertRaises(RuntimeError):
             await socket._send({"method": "SUBSCRIBE", "params": ["unexpected"]}, Priority.ACCOUNT_RECONCILIATION)
+
+    async def test_base_read_only_socket_blocks_before_durable_intent(self):
+        ledger = IntentLedger()
+        from gemini_bot.live_ws import LiveWebSocket
+        socket = LiveWebSocket(
+            "fake", "fake", AdmissionGovernor(), ledger,
+            read_only=True, cancel_on_disconnect=False,
+        )
+        self.assertIn("cancelOnDisconnect=false", socket._uri)
+        with self.assertRaisesRegex(RuntimeError, "read-only"):
+            await socket.place_maker(QuoteLeg("X", Outcome.YES, Side.BUY, 0.4, 10))
+        self.assertEqual(ledger.unresolved(), ())

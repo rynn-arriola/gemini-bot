@@ -12,7 +12,7 @@ from .storage import SQLiteJournal
 
 async def _prepare(config_path: Path, directory: Path) -> None:
     config = load_preflight_config(config_path)
-    runtime = ProductionOrchestrator(config, directory)
+    runtime = ProductionOrchestrator(config, directory, read_only=True)
     try:
         state = await runtime.prepare()
         print(

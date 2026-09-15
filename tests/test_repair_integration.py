@@ -194,6 +194,44 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["loss_high_water"], D("20"))
         self.assertEqual(self.runtime._dynamic_pending_cap, 10)
 
+    async def test_one_sided_position_uses_conservative_executable_risk_mark(self):
+        account = self.runtime.account
+        account.reducer.positions = {"X": D("10")}
+        account.expected_positions = {"X": D("10")}
+        self.runtime.public.books["X"].apply_snapshot([], [(D(".52"), D("100"))], 2, 2, NOW)
+        self.runtime.public.last_message_at = NOW
+        self.runtime._mark_live_risk()
+        stored = self.runtime.journal.load_risk_window(RiskWindowPolicy(D("25")).bounds(NOW)[0])
+        self.assertEqual(stored["opening_equity"], D("100"))
+        self.runtime.public.books["X"].apply_snapshot([(D(".40"), D("100"))], [], 3, 3, NOW)
+        self.runtime._mark_live_risk()
+        stored = self.runtime.journal.load_risk_window(RiskWindowPolicy(D("25")).bounds(NOW)[0])
+        self.assertEqual(stored["loss_high_water"], D("0"))
+
+    async def test_all_one_sided_markets_still_block_startup(self):
+        one_sided = LocalBook("X")
+        one_sided.apply_snapshot([(D(".48"), D("100"))], [], 1, 1, NOW)
+        self.runtime.public.books["X"] = one_sided
+        self.runtime.public.last_message_at = NOW
+        self.runtime.universe = [RewardedContract("E", candidate_pool(), candidate_rules(), (NOW + timedelta(hours=2)).isoformat())]
+        self.runtime.account.subscription_acknowledged = True
+        with self.assertRaises(TimeoutError):
+            await self.runtime._wait_ready(.01)
+
+    async def test_read_only_orchestrator_cannot_activate(self):
+        strategy, risk = load_policy()
+        read_only = ProductionOrchestrator(
+            LiveConfig("account-read-only", "fake-secret", "", True, strategy, risk),
+            Path(self.tmp.name) / "read-only", read_only=True,
+        )
+        try:
+            self.assertIn("cancelOnDisconnect=false", read_only.private._uri)
+            read_only.gate.state = EngineState.READY
+            with self.assertRaisesRegex(RuntimeError, "read-only"):
+                await read_only.activate(Path(self.tmp.name) / "missing-permit.json")
+        finally:
+            await read_only.close()
+
     async def test_sequence_gap_halts_without_reusing_buffered_delta(self):
         async def frames():
             yield {"e": "depthUpdate", "s": "X", "U": 5, "u": 5, "b": [], "a": []}

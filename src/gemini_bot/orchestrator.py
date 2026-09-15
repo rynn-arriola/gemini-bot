@@ -65,8 +65,9 @@ class ProductionOrchestrator:
     mutation path cannot be entered without a valid one-use activation permit.
     """
 
-    def __init__(self, config: LiveConfig, directory: Path) -> None:
+    def __init__(self, config: LiveConfig, directory: Path, *, read_only: bool = False) -> None:
         self.config = config
+        self.read_only = read_only
         self.directory = directory.resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.journal = SQLiteJournal(self.directory / "production.sqlite")
@@ -81,7 +82,8 @@ class ProductionOrchestrator:
         )
         self.public = PublicMarketSocket(self.governor)
         self.private = LiveWebSocket(
-            config.api_key, config.api_secret, self.governor, self.ledger
+            config.api_key, config.api_secret, self.governor, self.ledger,
+            read_only=read_only, cancel_on_disconnect=not read_only,
         )
         self.account = AccountRuntime(self.ledger, self.journal)
         self.account.inventory_age_seconds = config.risk.max_inventory_age_seconds
@@ -630,10 +632,16 @@ class ProductionOrchestrator:
         equity = self.account.confirmed_usd
         for symbol, signed in self.account.reducer.positions.items():
             book = self.public.books.get(symbol)
-            if not self._book_fresh(symbol) or book.top() is None:
+            if not self._book_fresh(symbol) or book is None:
                 return
-            midpoint = book.top().midpoint
-            equity += abs(signed) * (midpoint if signed > 0 else 1 - midpoint)
+            # Mark at the executable exit side. If that side is absent, zero is
+            # the conservative liquidation value; a one-sided book must never
+            # freeze the six-hour loss high-water calculation.
+            if signed > 0:
+                exit_mark = max(book.bids) if book.bids else Decimal("0")
+            else:
+                exit_mark = Decimal("1") - min(book.asks) if book.asks else Decimal("0")
+            equity += abs(signed) * exit_mark
         now = _utc_now()
         policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd)
         key = (equity, policy.bounds(now))
@@ -691,6 +699,8 @@ class ProductionOrchestrator:
 
     async def activate(self, permit_path: Path, *, commissioning_seconds: int | None = None, single_leg: bool = False) -> None:
         """Enter the mutation path only after preparation and one-use approval."""
+        if self.read_only:
+            raise RuntimeError("read-only orchestrator cannot activate")
         self.config.validate()
         if self.gate.state is not EngineState.READY:
             raise RuntimeError("read-only reconciliation must complete before activation")

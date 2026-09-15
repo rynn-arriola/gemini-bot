@@ -22,8 +22,7 @@ from gemini_bot.runtime_files import atomic_write_json
 
 class ReadOnlyAccountSocket(LiveWebSocket):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._uri = self._uri.replace("cancelOnDisconnect=true", "cancelOnDisconnect=false")
+        super().__init__(*args, **kwargs, read_only=True, cancel_on_disconnect=False)
         self.received = Counter()
         self.requests = 0
         self.blocked_mutations = 0
@@ -111,7 +110,7 @@ async def run(env: Path, directory: Path, seconds: int) -> int:
     if not 1 <= seconds <= 300:
         raise ValueError("preflight duration must be 1-300 seconds")
     config = load_preflight_config(env)
-    runtime = ProductionOrchestrator(config, directory)
+    runtime = ProductionOrchestrator(config, directory, read_only=True)
     runtime.private = ReadOnlyAccountSocket(config.api_key, config.api_secret, runtime.governor, runtime.ledger)
     runtime.public = ObservedPublicSocket(runtime.governor)
     report = {"read_only": True, "requested_seconds": seconds, "started_at": datetime.now(timezone.utc).isoformat(),
