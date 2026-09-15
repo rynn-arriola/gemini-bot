@@ -30,3 +30,7 @@ These are current account-owner decisions. Changing one requires a new explicit 
 - September 15, 2026: owner authorized one five-minute read-only preflight. It may authenticate, observe streams, and perform paced account/market reconciliation. It may not place/cancel orders, consume an activation permit, change account settings, or start continuous trading. The diagnostic connection disables cancel-on-disconnect.
 
 - September 15, 2026: the owner authorized up to $10 for live entry/exit testing and then selected aggressive limit fills rather than a resting maker test. This authority covered only the bounded YES and NO round-trip canaries; it does not activate the continuous reward bot or raise any standing limit.
+# September 15, 2026 — repeat read-only preflight authorized
+
+- The owner authorized one repeat five-minute preflight after the market-data readiness fixes.
+- This authorization is read-only only: no order placement, cancellation, activation permit, or account-setting changes.
