@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from .account_runtime import AccountRuntime
-from .activation import consume_activation_permit, load_activation_permit, policy_digest
+from .activation import (
+    consume_activation_permit,
+    finish_supervised_activation,
+    load_activation_permit,
+    policy_digest,
+)
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .discovery import RewardUniverseLoader
 from .catalog import join_reward_contracts
@@ -114,6 +119,7 @@ class ProductionOrchestrator:
         self._permitted_symbols: set[str] = set()
         self._last_live_mark: tuple[object, ...] | None = None
         self._permit_policy_digest: str | None = None
+        self._activation_consumed = False
         self._maker_ack_count = 0
         self._commissioning_ignore_uptime_proxy = False
         self._uptime_override_until: datetime | None = None
@@ -766,26 +772,121 @@ class ProductionOrchestrator:
             signed = snapshot.signed_positions.get(symbol, Decimal("0"))
             if not signed:
                 continue
-            book = self.public.books.get(symbol)
-            if not self._book_fresh(symbol):
-                raise RuntimeError("exit book is stale or unsynchronized")
-            leg = exact_crossing_exit(book, signed) if book is not None else None
-            if leg is None:
-                raise RuntimeError("fresh full depth cannot support an exact position exit")
-            self._exit_uncertain.add(symbol)
-            client_id = await self.private.exit_position(leg, signed_position=signed)
-            await self.account.wait_for_order_event(client_id)
-            deadline_at = asyncio.get_running_loop().time() + 10
-            while True:
-                rest_positions = build_account_snapshot(await self.rest.positions(), []).signed_positions
-                intent = self.ledger.get(client_id)
-                if (rest_positions.get(symbol, Decimal("0")) == 0
-                        and self.account.reducer.positions.get(symbol, Decimal("0")) == 0
-                        and intent is not None and intent.state is IntentState.TERMINAL):
+            exit_started_at = asyncio.get_running_loop().time()
+            attempt = 0
+            while signed:
+                if attempt >= 3 or asyncio.get_running_loop().time() - exit_started_at >= 30:
+                    raise RuntimeError("exact IOC exit exhausted its bounded retry authority")
+                if symbol in self._exit_uncertain or self.journal.pending_exit(symbol):
+                    raise TimeoutError("prior exit still requires terminal reconciliation; retry prohibited")
+                book = self.public.books.get(symbol)
+                if not self._book_fresh(symbol):
+                    raise RuntimeError("exit book is stale or unsynchronized")
+                leg = exact_crossing_exit(book, signed) if book is not None else None
+                if leg is None:
+                    raise RuntimeError("fresh full depth cannot support an exact position exit")
+
+                submitted_signed = signed
+                attempt += 1
+                self._exit_uncertain.add(symbol)
+                client_id = await self.private.exit_position(
+                    leg, signed_position=submitted_signed,
+                )
+                # A timeout here leaves the mutation ambiguous and deliberately
+                # retains _exit_uncertain, preventing emergency drain from
+                # blindly submitting another reducer.
+                remaining_window = 30 - (
+                    asyncio.get_running_loop().time() - exit_started_at
+                )
+                if remaining_window <= 0:
+                    raise TimeoutError("exact IOC exit exceeded its total retry window")
+                await self.account.wait_for_order_event(
+                    client_id, timeout=min(10, remaining_window),
+                )
+                confirmation_deadline = asyncio.get_running_loop().time() + 10
+                retry_residual: Decimal | None = None
+                while True:
+                    intent = self.ledger.get(client_id)
+                    order = (
+                        self.account.reducer.orders.get(intent.server_order_id)
+                        if intent is not None and intent.server_order_id else None
+                    )
+                    terminal = bool(
+                        intent is not None
+                        and intent.state is IntentState.TERMINAL
+                        and order is not None
+                        and not order.working
+                    )
+                    if terminal:
+                        # The prior network mutation is positively terminal.
+                        # A later REST failure may leave position state unknown,
+                        # but it must not falsely make this known-terminal IOC
+                        # permanently ambiguous to the emergency drain.
+                        self._exit_uncertain.discard(symbol)
+
+                    remaining_window = 30 - (
+                        asyncio.get_running_loop().time() - exit_started_at
+                    )
+                    if remaining_window <= 0:
+                        raise TimeoutError("exact IOC exit exceeded its total retry window")
+                    rest_positions = build_account_snapshot(
+                        await asyncio.wait_for(
+                            self.rest.positions(), timeout=remaining_window,
+                        ), [],
+                    ).signed_positions
+                    rest_signed = rest_positions.get(symbol, Decimal("0"))
+                    websocket_signed = self.account.reducer.positions.get(
+                        symbol, Decimal("0"),
+                    )
+                    if terminal and rest_signed == 0 and websocket_signed == 0:
+                        signed = Decimal("0")
+                        break
+                    if terminal and order is not None and order.status == "REJECTED":
+                        raise RuntimeError("exact IOC exit was rejected; automatic retry prohibited")
+                    if (
+                        terminal
+                        and order is not None
+                        and order.status == "CANCELED"
+                        and rest_signed == websocket_signed
+                        and rest_signed != 0
+                        and (rest_signed > 0) == (submitted_signed > 0)
+                        and abs(rest_signed) <= abs(submitted_signed)
+                    ):
+                        # Gemini documents that IOC orders end CANCELED even
+                        # after partial/full execution. Once that terminal state
+                        # and the exact residual agree across REST and the
+                        # authenticated WebSocket, a new exact reducer is safe.
+                        retry_residual = rest_signed
+                        self.journal.audit("exit_ioc_terminal_residual", {
+                            "symbol": symbol,
+                            "attempt": attempt,
+                            "remaining_quantity": str(abs(rest_signed)),
+                        })
+                        break
+                    if (
+                        terminal
+                        and order is not None
+                        and order.status == "CANCELED"
+                        and rest_signed == websocket_signed
+                        and rest_signed != 0
+                        and (
+                            (rest_signed > 0) != (submitted_signed > 0)
+                            or abs(rest_signed) > abs(submitted_signed)
+                        )
+                    ):
+                        raise RuntimeError("exact IOC exit moved inventory away from flat")
+                    if asyncio.get_running_loop().time() >= confirmation_deadline:
+                        raise RuntimeError("exact IOC exit did not prove a safe terminal result")
+                    await asyncio.sleep(0.25)
+
+                if signed == 0:
                     break
-                if asyncio.get_running_loop().time() >= deadline_at:
-                    raise RuntimeError("exact IOC exit did not prove the position flat")
-                await asyncio.sleep(0.25)
+                if retry_residual is None:
+                    raise RuntimeError("exact IOC exit residual state is unavailable")
+                if attempt >= 3 or asyncio.get_running_loop().time() - exit_started_at >= 30:
+                    raise RuntimeError("exact IOC exit exhausted its bounded retry authority")
+                signed = retry_residual
+                await asyncio.sleep(min(2 ** (attempt - 1), 5))
             self.journal.clear_deadline(symbol, outcome.value)
             self._exit_uncertain.discard(symbol)
             self.account.blocked_entries.discard(symbol)
@@ -941,8 +1042,9 @@ class ProductionOrchestrator:
         ignore_uptime_proxy: bool = False,
         expected_yes_price: Decimal | None = None,
         expected_no_price: Decimal | None = None,
+        supervisor_session_id: str | None = None,
     ) -> None:
-        """Enter the mutation path only after preparation and one-use approval."""
+        """Enter the mutation path only after preparation and bounded approval."""
         if self.read_only:
             raise RuntimeError("read-only orchestrator cannot activate")
         self.config.validate()
@@ -988,9 +1090,13 @@ class ProductionOrchestrator:
         self._uptime_override_until = permit.uptime_override_until if ignore_uptime_proxy else None
         self._commissioning_expected_yes_price = expected_yes_price
         self._commissioning_expected_no_price = expected_no_price
-        # A permit is consumed before the first possible mutation. A failed attempt
-        # therefore cannot be replayed without fresh owner approval.
-        consume_activation_permit(permit, self.journal)
+        # Authority is persisted before the first possible mutation. Versions
+        # 2-4 cannot replay; version 5 can resume only through the same bounded
+        # supervisor session after this runner later records proven-flat exit.
+        consume_activation_permit(
+            permit, self.journal, supervisor_session_id=supervisor_session_id,
+        )
+        self._activation_consumed = True
         self._permit_expires_at = permit.expires_at
         safety: asyncio.Task[None] | None = None
         safety_clock: asyncio.Task[None] | None = None
@@ -1002,7 +1108,11 @@ class ProductionOrchestrator:
                 await self._exit_due_positions(force=True)
             await self._risk_mark()
             self.gate.activate(True)
-            activation_reason = f"one-use permit {permit.permit_id} consumed"
+            activation_reason = (
+                f"bounded supervised permit {permit.permit_id} active"
+                if permit.permit_version == 5
+                else f"one-use permit {permit.permit_id} consumed"
+            )
             if ignore_uptime_proxy:
                 activation_reason += "; uptime proxy exception active; no reward eligibility claim"
             self._write_status("quoting", True, activation_reason)
@@ -1114,14 +1224,25 @@ class ProductionOrchestrator:
             await self.drain()
             if commissioning_seconds is not None and self._maker_ack_count == 0:
                 raise RuntimeError("commissioning did not observe a working maker order; no success claimed")
+            finish_supervised_activation(
+                permit, self.journal,
+                supervisor_session_id=supervisor_session_id, outcome="closed",
+            )
         except Exception as exc:
             self.log.exception("active_runtime_failed", ErrorClass.EXECUTION, exc)
+            drained_flat = False
             try:
                 await self.drain()
+                drained_flat = True
             except Exception as drain_exc:
                 self.gate.halt()
                 self.log.exception("emergency_drain_failed", ErrorClass.EXECUTION, drain_exc)
                 self._write_status("halted", False, "emergency drain failed; manual reconciliation required")
+            finish_supervised_activation(
+                permit, self.journal,
+                supervisor_session_id=supervisor_session_id,
+                outcome="recoverable_flat" if drained_flat else "attention",
+            )
             raise
         finally:
             if safety_clock is not None:
@@ -1152,6 +1273,22 @@ class ProductionOrchestrator:
         self._exit_uncertain.clear()
         self.gate.halt()
         self._write_status("stopped_flat", False, "drain completed and account is flat")
+
+    def reconcile_verified_manual_flat(self) -> None:
+        """Repair expected account state after a separately verified manual close."""
+        if not self.read_only:
+            raise RuntimeError("manual-flat reconciliation must use read-only venue access")
+        if self.gate.state is not EngineState.READY:
+            raise RuntimeError("manual-flat reconciliation requires completed startup reconciliation")
+        if self._last_snapshot.positions or self._last_snapshot.active_orders:
+            raise RuntimeError("manual-flat reconciliation requires a flat, order-free REST snapshot")
+        self.account.adopt_verified_manual_flat(observed_at=_utc_now())
+        if not self.account.equity_classification_complete:
+            raise RuntimeError("manual-flat baseline did not reconcile account classification")
+        self._write_status(
+            "ready_paused", False,
+            "verified manual flatten reconciled; fresh activation still required",
+        )
 
     async def close(self) -> None:
         if self._closed:

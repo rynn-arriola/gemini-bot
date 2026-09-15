@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from gemini_bot.account_runtime import AccountRuntime
 from gemini_bot.activation import (
     consume_activation_permit,
+    finish_supervised_activation,
     load_activation_permit,
     policy_digest,
     build_digest,
@@ -122,7 +123,6 @@ class PersistentRiskTests(unittest.TestCase):
             self.assertEqual(loss.loss_high_water, Decimal("10.000000000000000001"))
             self.assertEqual(loss.pending_order_cap, 20)
             store.close()
-
             reopened = SQLiteJournal(path)
             recovered = PersistentRiskWindow(policy, reopened).update(
                 now=NOW + timedelta(minutes=2), adjusted_equity=Decimal("310"),
@@ -265,6 +265,97 @@ class ActivationTests(unittest.TestCase):
                 load_activation_permit(
                     path, policy_path=DEFAULT_POLICY_PATH, store=store,
                     now=NOW + timedelta(minutes=1), account_fingerprint="fake-account",
+                )
+            store.close()
+
+    def test_version_five_session_allows_only_two_proven_flat_restarts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteJournal(root / "journal.sqlite")
+            path = root / "permit.json"
+            self._write(path)
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value.update({
+                "permit_version": 5,
+                "universe_scope": "reward_catalog",
+                "uptime_override_until": (NOW + timedelta(minutes=30)).isoformat(),
+                "supervised_restart_limit": 2,
+            })
+            value.pop("symbols")
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+            for activation_number in range(1, 4):
+                permit = load_activation_permit(
+                    path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                    now=NOW + timedelta(minutes=activation_number),
+                    account_fingerprint="fake-account",
+                )
+                consume_activation_permit(
+                    permit, store, now=NOW + timedelta(minutes=activation_number),
+                    supervisor_session_id="session-a",
+                )
+                finish_supervised_activation(
+                    permit, store, supervisor_session_id="session-a",
+                    outcome="recoverable_flat",
+                    now=NOW + timedelta(minutes=activation_number),
+                )
+            with self.assertRaisesRegex(ValueError, "not recoverable"):
+                load_activation_permit(
+                    path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                    now=NOW + timedelta(minutes=4), account_fingerprint="fake-account",
+                )
+            store.close()
+
+    def test_version_five_session_refuses_cross_session_or_nonflat_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteJournal(root / "journal.sqlite")
+            path = root / "permit.json"
+            self._write(path)
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value.update({
+                "permit_version": 5,
+                "universe_scope": "reward_catalog",
+                "uptime_override_until": (NOW + timedelta(minutes=30)).isoformat(),
+                "supervised_restart_limit": 2,
+            })
+            value.pop("symbols")
+            path.write_text(json.dumps(value), encoding="utf-8")
+            permit = load_activation_permit(
+                path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                now=NOW + timedelta(minutes=1), account_fingerprint="fake-account",
+            )
+            with self.assertRaisesRegex(ValueError, "session identity"):
+                consume_activation_permit(permit, store)
+            consume_activation_permit(
+                permit, store, supervisor_session_id="session-a",
+                now=NOW + timedelta(minutes=1),
+            )
+            finish_supervised_activation(
+                permit, store, supervisor_session_id="session-a",
+                outcome="recoverable_flat", now=NOW + timedelta(minutes=1),
+            )
+            resumable = load_activation_permit(
+                path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                now=NOW + timedelta(minutes=2), account_fingerprint="fake-account",
+            )
+            with self.assertRaisesRegex(ValueError, "cannot be resumed"):
+                consume_activation_permit(
+                    resumable, store, supervisor_session_id="session-b",
+                    now=NOW + timedelta(minutes=2),
+                )
+            consume_activation_permit(
+                resumable, store, supervisor_session_id="session-a",
+                now=NOW + timedelta(minutes=2),
+            )
+            finish_supervised_activation(
+                resumable, store, supervisor_session_id="session-a",
+                outcome="attention", now=NOW + timedelta(minutes=2),
+            )
+            with self.assertRaisesRegex(ValueError, "not recoverable"):
+                load_activation_permit(
+                    path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                    now=NOW + timedelta(minutes=3), account_fingerprint="fake-account",
                 )
             store.close()
 

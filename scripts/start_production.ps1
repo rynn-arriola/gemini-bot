@@ -30,11 +30,13 @@ if ($Mode -eq "Prepare") {
         throw "Live mode requires an owner-approved activation permit path."
     }
     $PermitPath = (Resolve-Path (Join-Path $ProjectRoot $ActivationPermit)).Path
-    $Arguments += @("run-live", "--env", $EnvironmentPath, "--directory", $RuntimePath,
-                    "--activation-permit", $PermitPath)
-    if ($IgnoreUptimeProxy) {
-        $Arguments += "--ignore-uptime-proxy"
-    }
+    $Supervisor = Join-Path $PSScriptRoot "supervise_production.ps1"
+    $Arguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Supervisor,
+        "-EnvironmentPath", $EnvironmentPath, "-RuntimePath", $RuntimePath,
+        "-PermitPath", $PermitPath
+    )
+    if ($IgnoreUptimeProxy) { $Arguments += "-IgnoreUptimeProxy" }
 }
 
 $OutLog = Join-Path $RuntimePath "launcher.stdout.log"
@@ -43,7 +45,8 @@ $QuotedArguments = $Arguments | ForEach-Object {
     if ($_ -match '"') { throw "Argument contains an unsupported quote." }
     '"' + $_.TrimEnd('\') + '"'
 }
-$Process = Start-Process -FilePath $Python -ArgumentList ($QuotedArguments -join ' ') -WorkingDirectory $ProjectRoot `
+$Executable = if ($Mode -eq "Live") { "powershell.exe" } else { $Python }
+$Process = Start-Process -FilePath $Executable -ArgumentList ($QuotedArguments -join ' ') -WorkingDirectory $ProjectRoot `
     -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrorLog -PassThru
 Set-Content -LiteralPath (Join-Path $RuntimePath "process.id") -Value $Process.Id -Encoding ascii
-Write-Output "Started $Mode process $($Process.Id). Inspect status.json and logs; this script does not grant approval."
+Write-Output "Started $Mode process $($Process.Id). Live mode uses the Windows supervisor; inspect status files and logs."

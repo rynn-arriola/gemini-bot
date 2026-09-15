@@ -8,6 +8,7 @@ import json
 import hashlib
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
@@ -102,6 +103,69 @@ class AccountRepairTests(unittest.TestCase):
         restored.apply({"e": "balanceUpdate", "B": [{"a": "USD", "c": "200", "f": "200"}]})
         restored.apply({"e": "positionReport", "P": [], "u": 1})
         self.assertFalse(restored.equity_classification_complete)
+
+    def test_verified_manual_flat_adopts_baseline_and_preserves_risk_window(self):
+        self.store.persist_deadline("X", "YES", NOW, NOW + timedelta(minutes=5), D("10"))
+        window_start, window_end = RiskWindowPolicy(D("25")).bounds(NOW)
+        self.store.upsert_risk_window(
+            window_start=window_start, window_end=window_end,
+            opening_equity=D("300"), loss_high_water=D("7.25"),
+            pending_order_cap=20, classification_complete=True, updated_at=NOW,
+        )
+        self.account.expected_positions = {"X": D("10")}
+        self.account.expected_confirmed_usd = D("96")
+        self.account.confirmed_usd = D("99")
+        self.account.subscription_acknowledged = True
+        self.account.last_balance_at = self.account.last_position_at = time.monotonic()
+
+        self.account.adopt_verified_manual_flat(observed_at=NOW)
+
+        self.assertEqual(self.account.expected_positions, {})
+        self.assertEqual(self.account.expected_confirmed_usd, D("99"))
+        self.assertIsNone(self.store.get_deadline("X", "YES"))
+        risk = self.store.load_risk_window(window_start)
+        self.assertEqual(risk["opening_equity"], D("300"))
+        self.assertEqual(risk["loss_high_water"], D("7.25"))
+        restored = AccountRuntime(IntentLedger(self.store), self.store)
+        self.assertEqual(restored.expected_positions, {})
+        self.assertEqual(restored.expected_confirmed_usd, D("99"))
+
+    def test_manual_flat_refuses_nonterminal_bot_intent(self):
+        intent = self.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.SELL, D(".4"), D("10")),
+            OrderPurpose.EXIT,
+        )
+        self.ledger.mark_sent(intent.client_order_id)
+        self.account.subscription_acknowledged = True
+        self.account.last_balance_at = self.account.last_position_at = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "terminal bot intents"):
+            self.account.adopt_verified_manual_flat(observed_at=NOW)
+
+    def test_manual_flat_refuses_nonzero_or_stale_account_state(self):
+        self.account.subscription_acknowledged = True
+        self.account.last_balance_at = 0
+        with self.assertRaisesRegex(RuntimeError, "fresh account snapshots"):
+            self.account.adopt_verified_manual_flat(observed_at=NOW)
+        self.account.last_balance_at = self.account.last_position_at = time.monotonic()
+        self.account.reducer.positions["X"] = D("10")
+        with self.assertRaisesRegex(RuntimeError, "zero positions"):
+            self.account.adopt_verified_manual_flat(observed_at=NOW)
+
+    def test_manual_flat_refuses_a_working_account_order(self):
+        intent = self.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.BUY, D(".4"), D("10")),
+            OrderPurpose.ENTRY,
+        )
+        self.ledger.mark_sent(intent.client_order_id)
+        self.account.apply({
+            "e": "orderUpdate", "i": "working", "c": intent.client_order_id,
+            "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "10",
+            "p": ".4", "X": "OPEN",
+        })
+        self.account.subscription_acknowledged = True
+        self.account.last_balance_at = self.account.last_position_at = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "zero active orders"):
+            self.account.adopt_verified_manual_flat(observed_at=NOW)
 
     def test_snapshot_sql_error_rolls_back_both_tables_on_reopen(self):
         row = {"symbol": "X", "outcome": "YES", "signed_quantity": "10", "average_price": ".4", "market_value": "4"}

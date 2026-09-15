@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 from pathlib import Path
+import sys
 
 from .config import ConfigurationError, load_live_config, load_policy, load_preflight_config
 from .orchestrator import ProductionOrchestrator
 from .storage import SQLiteJournal
+
+
+class LiveRunnerExit(RuntimeError):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 async def _prepare(config_path: Path, directory: Path) -> None:
@@ -24,13 +32,50 @@ async def _prepare(config_path: Path, directory: Path) -> None:
 
 
 async def _run_live(
-    config_path: Path, directory: Path, permit: Path, *, ignore_uptime_proxy: bool
+    config_path: Path,
+    directory: Path,
+    permit: Path,
+    *,
+    ignore_uptime_proxy: bool,
+    supervisor_session_id: str | None,
 ) -> None:
     config = load_live_config(config_path)
     runtime = ProductionOrchestrator(config, directory)
     try:
+        try:
+            await runtime.prepare()
+            await runtime.activate(
+                permit,
+                ignore_uptime_proxy=ignore_uptime_proxy,
+                supervisor_session_id=supervisor_session_id,
+            )
+        except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
+            if runtime._activation_consumed:
+                phase = "unknown"
+                try:
+                    phase = str(json.loads(
+                        (directory / "status.json").read_text(encoding="utf-8")
+                    ).get("phase", "unknown"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+                raise LiveRunnerExit(
+                    5 if phase == "stopped_flat" else 3, str(exc),
+                ) from exc
+            raise
+    finally:
+        await runtime.close()
+
+
+async def _reconcile_manual_flat(config_path: Path, directory: Path) -> None:
+    config = load_preflight_config(config_path)
+    runtime = ProductionOrchestrator(config, directory, read_only=True)
+    try:
         await runtime.prepare()
-        await runtime.activate(permit, ignore_uptime_proxy=ignore_uptime_proxy)
+        runtime.reconcile_verified_manual_flat()
+        print(
+            "Authenticated Gemini state is flat and order-free; the manual close was "
+            "adopted without resetting the six-hour risk window. No orders were submitted."
+        )
     finally:
         await runtime.close()
 
@@ -45,10 +90,22 @@ def main() -> int:
     prepare = sub.add_parser("prepare-live", help="read-only reconcile/rank, then disconnect")
     prepare.add_argument("--env", type=Path, default=Path(".env"))
     prepare.add_argument("--directory", type=Path, default=Path("data/production"))
-    live = sub.add_parser("run-live", help="reconcile then activate with a one-use permit")
+    manual_flat = sub.add_parser(
+        "reconcile-manual-flat",
+        help="adopt a verified manual flatten without submitting orders",
+    )
+    manual_flat.add_argument("--env", type=Path, default=Path(".env"))
+    manual_flat.add_argument("--directory", type=Path, default=Path("data/production"))
+    manual_flat.add_argument(
+        "--acknowledgement", required=True,
+        choices=("I_CONFIRM_MANUAL_FLAT",),
+        help="explicit operator acknowledgement required",
+    )
+    live = sub.add_parser("run-live", help="reconcile then activate with a bounded permit")
     live.add_argument("--env", type=Path, default=Path(".env"))
     live.add_argument("--directory", type=Path, default=Path("data/production"))
     live.add_argument("--activation-permit", type=Path, required=True)
+    live.add_argument("--supervisor-session-id")
     live.add_argument(
         "--ignore-uptime-proxy", action="store_true",
         help="requires a permit-bound expiry; does not claim Gemini reward eligibility",
@@ -85,12 +142,22 @@ def main() -> int:
         except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
             parser.error(str(exc))
         return 0
+    if args.command == "reconcile-manual-flat":
+        try:
+            asyncio.run(_reconcile_manual_flat(args.env, args.directory))
+        except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
+            parser.error(str(exc))
+        return 0
     if args.command == "run-live":
         try:
             asyncio.run(_run_live(
                 args.env, args.directory, args.activation_permit,
                 ignore_uptime_proxy=args.ignore_uptime_proxy,
+                supervisor_session_id=args.supervisor_session_id,
             ))
+        except LiveRunnerExit as exc:
+            print(f"live runner stopped: {exc}", file=sys.stderr)
+            return exc.code
         except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
             parser.error(str(exc))
         return 0

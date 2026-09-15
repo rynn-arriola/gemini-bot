@@ -1,5 +1,12 @@
 # Gemini findings
 
+## September 15, 2026: first production fills and exit-recovery defect
+
+- The live reward-catalog run filled BUY NO 10 on one ETH and one SOL interval contract. The ETH five-minute exit sent SELL NO 10 @ $0.90 IOC; Gemini terminated it `CANCELED` with zero filled. No SOL exit was attempted because the runtime halted on the first symbol.
+- The send was not ambiguous. Gemini documents that IOC orders finish with `CANCELED` and execution quantity determines whether they filled. The defect was local: terminal zero-fill was treated as failure-to-prove-flat, then the retained ambiguity latch prohibited emergency drain from retrying the known residual.
+- The owner manually closed both positions. Subsequent authenticated REST plus WebSocket preparation proved zero positions and zero active orders. The supported manual-flat command adopted that truth, cleared two stale deadlines, left all prior bot intents terminal, and preserved the existing risk window.
+- Gemini's `c` balance-stream field is documented as confirmed balance and `f` as available balance, confirming the runtime mapping used during reconciliation.
+
 ## September 15, 2026: profitability ranking v2
 
 - The prior live top-15 candidates all had the same 8.96 quote-quality proxy and $9.50 reservation proxy at the fixed two-tick placement. Selection therefore mostly reduced to pool budget divided by coarse maker count; it did not subtract execution costs.

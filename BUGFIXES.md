@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 15, 2026 — terminal IOC residual and manual-close recovery
+
+- Symptom: the first five-minute live exit submitted an exact IOC SELL, received a terminal `CANCELED` event with zero execution, then timed out because the position remained open. The symbol stayed marked ambiguous, so emergency drain refused a second reducer even though Gemini had positively terminated the first order.
+- Correction: distinguish terminal-unfilled/partial IOC outcomes from ambiguous sends. Retry at most three times within 30 seconds, only after REST and authenticated WebSocket agree on the same-sign, non-increasing exact residual; re-read fresh exit depth before each attempt. Rejection, missing terminal proof, sign reversal, increased exposure, stale depth, or state disagreement never retries.
+- Manual recovery: `reconcile-manual-flat` adopts an operator-confirmed external close only after fresh flat/order-free REST and WebSocket proof and terminal bot intents. It clears stale inventory deadlines but preserves the six-hour risk-window rows and records an audit event without writing balances to logs.
+- Supervision: the Windows live launcher now starts a single supervisor. A version-5 permit authorizes at most two same-session recovery restarts, and the prior runner must durably mark itself recoverable only after successful account-wide drain. Cross-session reuse, active/nonflat state, ambiguous exit, the third fast failure, or exhausted authority enters `ATTENTION_REQUIRED`; a final read-only preparation records current venue health.
+- Regression: terminal zero-fill retry, partial-fill exact residual, rejected/ambiguous no-retry, manual-flat refusal/success, deadline cleanup, durable restart state, and loss high-water preservation are covered offline.
+
 ## September 15, 2026 — reward-only ranking replaced by profitability v2
 
 - Symptom: fixed two-tick candidates often had identical quote-quality and capital proxies, so pool dollars and coarse maker count dominated ranking while fill/exit inputs remained unpopulated placeholders.

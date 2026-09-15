@@ -247,6 +247,47 @@ class SQLiteJournal:
             "DELETE FROM position_deadline WHERE symbol=? AND outcome=?", (symbol, outcome)
         )
 
+    def adopt_verified_flat_baseline(
+        self, *, confirmed_usd: Decimal, observed_at: datetime
+    ) -> None:
+        """Adopt an operator-confirmed manual flatten after venue reconciliation.
+
+        This is deliberately narrower than a general account repair: current
+        durable account truth must already be flat/order-free and every sent
+        bot intent must be terminal.  Risk-window rows are intentionally not
+        touched, so a manual close cannot forgive the six-hour loss high-water.
+        """
+        if observed_at.tzinfo is None:
+            raise ValueError("manual-flat reconciliation timestamp must be timezone-aware")
+        with self.transaction():
+            if self.connection.execute("SELECT 1 FROM account_position LIMIT 1").fetchone():
+                raise RuntimeError("manual-flat reconciliation requires zero positions")
+            if self.connection.execute("SELECT 1 FROM account_order LIMIT 1").fetchone():
+                raise RuntimeError("manual-flat reconciliation requires zero active orders")
+            if self.connection.execute(
+                "SELECT 1 FROM order_intent WHERE state IN ('sent_unknown','acknowledged') LIMIT 1"
+            ).fetchone():
+                raise RuntimeError("manual-flat reconciliation requires terminal bot intents")
+            self.connection.execute("DELETE FROM position_deadline")
+            self.connection.execute(
+                """INSERT INTO runtime_state(key,value,updated_at) VALUES('expected_positions','{}',?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                (observed_at.isoformat(),),
+            )
+            self.connection.execute(
+                """INSERT INTO runtime_state(key,value,updated_at) VALUES('expected_confirmed_usd',?,?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                (str(confirmed_usd), observed_at.isoformat()),
+            )
+            self.connection.execute(
+                "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
+                (
+                    observed_at.isoformat(),
+                    "operator_manual_flat_reconciled",
+                    '{"account_orders":0,"account_positions":0,"risk_window_preserved":true}',
+                ),
+            )
+
     def audit(self, kind: str, details: dict[str, object]) -> None:
         self.connection.execute(
             "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(datetime('now'),?,?)",

@@ -174,7 +174,18 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         async def exit_position(leg, *, signed_position):
             intent = self.runtime.ledger.prepare(leg, OrderPurpose.EXIT)
             self.runtime.ledger.mark_sent(intent.client_order_id)
-            self.runtime.ledger.mark_terminal(intent.client_order_id)
+            order_id = f"exit-{intent.client_order_id}"
+            frame = {
+                "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                "s": leg.symbol, "S": "SELL", "O": leg.outcome.value,
+                "q": str(leg.quantity), "p": str(leg.price), "z": str(leg.quantity),
+                "Z": "0", "X": "NEW",
+            }
+            self.runtime.account.apply(frame)
+            self.runtime.account.apply({
+                **frame, "z": "0", "Z": str(leg.quantity), "X": "CANCELED",
+                "t": f"fill-{intent.client_order_id}", "L": str(leg.price),
+            })
             self.runtime.account.reducer.positions.pop(leg.symbol, None)
             return intent.client_order_id
         self.runtime.private.exit_position = AsyncMock(side_effect=exit_position)
@@ -216,6 +227,143 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 await self.runtime._exit_due_positions(force=True)
         self.assertEqual(self.runtime.private.exit_position.await_count, 1)
+
+    async def test_terminal_unfilled_ioc_retries_exact_residual_then_flattens(self):
+        self.install_exit()
+        attempts = 0
+
+        async def exit_position(leg, *, signed_position):
+            nonlocal attempts
+            attempts += 1
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.EXIT)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            order_id = f"exit-{attempts}"
+            frame = {
+                "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                "s": "X", "S": "SELL", "O": "YES", "q": "10",
+                "p": str(leg.price), "z": "10", "Z": "0", "X": "NEW",
+            }
+            self.runtime.account.apply(frame)
+            if attempts == 1:
+                self.runtime.account.apply({**frame, "z": "0", "X": "CANCELED"})
+            else:
+                self.runtime.account.apply({
+                    **frame, "z": "0", "Z": "10", "X": "CANCELED",
+                    "t": "retry-fill", "L": str(leg.price),
+                })
+                self.runtime.account.reducer.positions.pop("X", None)
+            return intent.client_order_id
+
+        self.runtime.private.exit_position = AsyncMock(side_effect=exit_position)
+        self.runtime.account.wait_for_order_event = AsyncMock()
+        with patch("gemini_bot.orchestrator.asyncio.sleep", new=AsyncMock()):
+            await self.runtime._exit_due_positions(force=True)
+        self.assertEqual(self.runtime.private.exit_position.await_count, 2)
+        self.assertNotIn("X", self.runtime.account.reducer.positions)
+        self.assertFalse(self.runtime.journal.pending_exit("X"))
+        self.assertNotIn("X", self.runtime._exit_uncertain)
+
+    async def test_terminal_partial_ioc_retries_only_authenticated_residual(self):
+        self.install_exit()
+        quantities = []
+
+        async def exit_position(leg, *, signed_position):
+            quantities.append(leg.quantity)
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.EXIT)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            order_id = f"partial-{len(quantities)}"
+            frame = {
+                "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                "s": "X", "S": "SELL", "O": "YES", "q": str(leg.quantity),
+                "p": str(leg.price), "z": str(leg.quantity), "Z": "0", "X": "NEW",
+            }
+            self.runtime.account.apply(frame)
+            if len(quantities) == 1:
+                self.runtime.account.apply({
+                    **frame, "z": "6", "Z": "4", "X": "CANCELED",
+                    "t": "partial-fill", "L": str(leg.price),
+                })
+                self.runtime.account.reducer.positions["X"] = D("6")
+            else:
+                self.runtime.account.apply({
+                    **frame, "z": "0", "Z": "6", "X": "CANCELED",
+                    "t": "residual-fill", "L": str(leg.price),
+                })
+                self.runtime.account.reducer.positions.pop("X", None)
+            return intent.client_order_id
+
+        self.runtime.private.exit_position = AsyncMock(side_effect=exit_position)
+        self.runtime.account.wait_for_order_event = AsyncMock()
+        with patch("gemini_bot.orchestrator.asyncio.sleep", new=AsyncMock()):
+            await self.runtime._exit_due_positions(force=True)
+        self.assertEqual(quantities, [D("10"), D("6")])
+
+    async def test_rejected_exit_is_not_automatically_retried(self):
+        self.install_exit()
+
+        async def exit_position(leg, *, signed_position):
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.EXIT)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            frame = {
+                "e": "orderUpdate", "i": "rejected-exit", "c": intent.client_order_id,
+                "s": "X", "S": "SELL", "O": "YES", "q": "10",
+                "p": str(leg.price), "z": "0", "Z": "0", "X": "REJECTED",
+            }
+            self.runtime.account.apply(frame)
+            return intent.client_order_id
+
+        self.runtime.private.exit_position = AsyncMock(side_effect=exit_position)
+        self.runtime.account.wait_for_order_event = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, "rejected"):
+            await self.runtime._exit_due_positions(force=True)
+        self.runtime.private.exit_position.assert_awaited_once()
+        self.assertNotIn("X", self.runtime._exit_uncertain)
+
+    async def test_terminal_unfilled_ioc_stops_after_three_attempts(self):
+        self.install_exit()
+
+        async def exit_position(leg, *, signed_position):
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.EXIT)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            order_id = f"unfilled-{intent.client_order_id}"
+            frame = {
+                "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                "s": "X", "S": "SELL", "O": "YES", "q": "10",
+                "p": str(leg.price), "z": "10", "Z": "0", "X": "NEW",
+            }
+            self.runtime.account.apply(frame)
+            self.runtime.account.apply({**frame, "z": "0", "X": "CANCELED"})
+            return intent.client_order_id
+
+        self.runtime.private.exit_position = AsyncMock(side_effect=exit_position)
+        self.runtime.account.wait_for_order_event = AsyncMock()
+        with patch("gemini_bot.orchestrator.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "bounded retry authority"):
+                await self.runtime._exit_due_positions(force=True)
+        self.assertEqual(self.runtime.private.exit_position.await_count, 3)
+        self.assertFalse(self.runtime.journal.pending_exit("X"))
+        self.assertNotIn("X", self.runtime._exit_uncertain)
+
+    async def test_terminal_exit_inventory_increase_is_not_retried(self):
+        self.install_exit()
+
+        async def exit_position(leg, *, signed_position):
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.EXIT)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            frame = {
+                "e": "orderUpdate", "i": "bad-residual", "c": intent.client_order_id,
+                "s": "X", "S": "SELL", "O": "YES", "q": "10",
+                "p": str(leg.price), "z": "0", "Z": "0", "X": "CANCELED",
+            }
+            self.runtime.account.apply(frame)
+            self.runtime.account.reducer.positions["X"] = D("11")
+            return intent.client_order_id
+
+        self.runtime.private.exit_position = AsyncMock(side_effect=exit_position)
+        self.runtime.account.wait_for_order_event = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, "away from flat"):
+            await self.runtime._exit_due_positions(force=True)
+        self.runtime.private.exit_position.assert_awaited_once()
 
     async def test_position_without_deadline_does_not_silently_skip_safety(self):
         self.install_exit()

@@ -107,6 +107,25 @@ class AccountRuntime:
             updated_at=datetime.now(timezone.utc),
         )
 
+    def adopt_verified_manual_flat(self, *, observed_at: datetime) -> None:
+        """Adopt a proven external/manual flatten without inventing fill facts."""
+        if not self.readiness.complete or not self.snapshots_fresh:
+            raise RuntimeError("manual-flat reconciliation requires fresh account snapshots")
+        if self.confirmed_usd is None:
+            raise RuntimeError("manual-flat reconciliation requires a confirmed USD balance")
+        if self.reducer.positions:
+            raise RuntimeError("manual-flat reconciliation requires zero positions")
+        if self.reducer.pending_order_count():
+            raise RuntimeError("manual-flat reconciliation requires zero active orders")
+        if self.unowned_order_seen:
+            raise RuntimeError("manual-flat reconciliation cannot accept unknown order ownership")
+        self.journal.adopt_verified_flat_baseline(
+            confirmed_usd=self.confirmed_usd, observed_at=observed_at,
+        )
+        self.expected_positions = {}
+        self.expected_confirmed_usd = self.confirmed_usd
+        self.blocked_entries.clear()
+
     def _signal(self, client_order_id: str) -> None:
         self.events.setdefault(client_order_id, asyncio.Event()).set()
 

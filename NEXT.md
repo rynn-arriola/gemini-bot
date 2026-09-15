@@ -1,6 +1,6 @@
 # Next work
 
-The owner-approved September 15 profitability-v2 observation is active under a fresh, one-use, midnight-Eastern permit in `data/production-today-20260915-profitability-v2-current`. Do not start a second mutation process or reuse any prior permit. Monitor the first real fill and verify immediate sibling cancellation, authenticated signed-position accounting, the exact same-outcome SELL exit, the five-minute or earlier deadline, fees and final flat reconciliation.
+The September 15 profitability-v2 process is stopped after exposing a terminal-unfilled IOC recovery defect. The account has since been authenticated flat/order-free and the operator-confirmed manual closes were reconciled without resetting the loss window. Complete release checks and push, then use a fresh build-bound version-5 bounded-session permit for the already authorized date-bounded policy; no prior permit may be reused. Restart through the Windows supervisor and verify the bounded exact-residual exit on the next fill.
 
 After the Eastern reward day closes, compare authenticated liquidity reward, maker-rebate and fee records with v2's recorded reward/share/cost proxies. Calibrate projected fills and adverse-move cost only from reconciled evidence; public trade touches remain non-authoritative. Confirm the process drains at permit expiry.
 
@@ -36,4 +36,4 @@ Add a read-only Gemini Statuspage monitor in a later tested release. Record upco
 4. Observe the first real fill. Verify immediate sibling-order cancellation, exact position accounting, 300-second timed exit, fee classification, and final reconciliation. Any ambiguity must halt rather than be inferred.
 5. Compare authenticated daily-summary snapshot totals against the Eastern proxy after the completed reward day and review actual reward and fee evidence.
 
-An OS-level Task Scheduler restart policy is optional after live commissioning. Automatic restart must return to paused/reconcile and require a fresh permit; it must never automatically reactivate quoting.
+The native-Windows supervisor is implemented without Task Scheduler. Version-5 approval permits at most two same-session restarts after the prior runner proves flat, using bounded backoff and a three-fast-failure stop. Nonflat, ambiguous, cross-session, startup/integrity, and exhausted cases remain in `ATTENTION_REQUIRED`; a final read-only preparation records current venue health.

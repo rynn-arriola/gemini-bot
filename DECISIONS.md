@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026: manual position closes should recover like the Polymarket workflow. Only an explicit operator reconciliation may adopt the new baseline, and only after fresh authenticated REST/WebSocket proof of zero positions, zero active orders, and terminal bot intents. It must preserve the current six-hour loss window and must not invent bot fills. Exit retries are allowed only after the prior IOC is proven terminal and the exact residual agrees across authenticated sources.
+- September 15, 2026: owner approved a bounded supervised session patterned after Polymarket's fail-closed boundaries. Version-5 approval permits at most two recovery restarts, only in the same supervisor session and only after the prior runner durably proves flat. Use 10/20-second backoff and stop after three fast failures. Nonflat, ambiguous, exhausted, cross-session, startup, or integrity failures enter `ATTENTION_REQUIRED` and cannot reactivate.
 - September 15, 2026: use profitability ranking v2 directly, without a shadow phase. Keep the approved two-tick/10-contract quote policy unchanged. Rank unique reward pools by conservative expected liquidity reward plus applicable maker rebate, less fee/adverse-selection/exit-depth costs, normalized by capital-hours. Keep healthy selected pools sticky so short-term telemetry cannot destroy reward uptime. The owner approved a graceful restart after validation.
 - Product is intended for live Gemini Predictions trading, not paper execution.
 - Native Windows is the only supported production platform.

@@ -2,7 +2,7 @@
 
 **A date-bounded profitability-v2 reward-catalog run is active.** The Windows process quotes up to 15 rewarded pools/30 pending orders under the owner-approved September 15 permit. It started from an authenticated flat account, remains subject to the $300 gross, $90 per-market, $25/six-hour, five-minute inventory and pregame controls, and must drain when the permit expires at midnight Eastern. See [STATUS.md](STATUS.md) for the current operational truth and [NEXT.md](NEXT.md) for remaining verification.
 
-This is a native-Windows live-trading build. The production runtime is implemented under `src/gemini_bot`. WebSocket is primary and REST is bounded discovery/reconciliation fallback. Reward timing is tracked per event inside Eastern payout days while shared pools remain one budget; the unpublished reward-start boundary remains explicitly non-certified. One- and two-leg maker canaries passed, and a clean zero-fill maker-or-cancel race is now handled locally only after authenticated flat reconciliation. The current permit is one-use and date-bounded, not reusable. The earlier public-data paper observer remains research evidence, not the execution engine.
+This is a native-Windows live-trading build. The production runtime is implemented under `src/gemini_bot`. WebSocket is primary and REST is bounded discovery/reconciliation fallback. Reward timing is tracked per event inside Eastern payout days while shared pools remain one budget; the unpublished reward-start boundary remains explicitly non-certified. One- and two-leg maker canaries passed, and a clean zero-fill maker-or-cancel race is now handled locally only after authenticated flat reconciliation. Approval remains date/build/policy/account bounded; version-5 recovery is limited to the same supervisor session after durable flat proof. The earlier public-data paper observer remains research evidence, not the execution engine.
 
 - [AI operator entry point](AI_OPERATOR.md)
 - [Current status](STATUS.md)
@@ -28,7 +28,7 @@ This is a native-Windows live-trading build. The production runtime is implement
 - Durable account snapshots, fill IDs, local reward-uptime samples and six-hour loss high-water marks across restart.
 - A 300-second exact inventory exit, five-minute pre-expiry override, and exactly one monetary stop: $25 per six-hour Eastern window.
 - Pool-deduplicated `rank-report.json`, atomic `status.json`, redacted rotating JSONL logs, and graceful `STOP` drain.
-- Separate read-only preparation and live activation commands. Live activation requires the exact acknowledgement and a short-lived, one-use permit bound to account, Python build and policy; version 4 may authorize a capped dynamic reward-catalog scope only after owner approval.
+- Separate read-only preparation and live activation commands. Live activation requires the exact acknowledgement and a short-lived permit bound to account, Python build and policy; version 4 may authorize capped dynamic reward-catalog scope, while version 5 may additionally authorize at most two same-supervisor recovery restarts after durable flat proof.
 
 Install the package into the existing virtual environment:
 
@@ -67,7 +67,16 @@ permit expiry. Version 4 may set `universe_scope` to `reward_catalog`, allowing
 automatic capped rotation across the reconciled rewarded universe. This affects only the local feasibility filter; it
 does not assert that Gemini's 50% reward threshold will be met.
 
-The Windows launcher is `scripts\start_production.ps1`; `-Mode Prepare` remains non-ordering and `-Mode Live` requires the permit. `scripts\stop_production.ps1` writes a graceful drain request. Confirm `status.json` reaches `stopped_flat`; do not kill the process first.
+The Windows launcher is `scripts\start_production.ps1`; `-Mode Prepare` remains non-ordering and `-Mode Live` requires the permit. Live mode starts `scripts\supervise_production.ps1`, which owns one runner. A version-5 bounded session may restart it at most twice, with backoff, only after the runner durably proves flat; otherwise the supervisor performs one read-only reconciliation and enters `ATTENTION_REQUIRED`. `scripts\stop_production.ps1` disables supervisor recovery and writes a graceful drain request. Confirm `status.json` reaches `stopped_flat`; do not kill the process first.
+
+After the owner manually closes all bot inventory, adopt the new baseline only with fresh authenticated proof:
+
+```powershell
+.\.venv\Scripts\python.exe -m gemini_bot reconcile-manual-flat --env .env `
+  --directory data\manual-flat-reconcile --acknowledgement I_CONFIRM_MANUAL_FLAT
+```
+
+This command is venue-read-only. It refuses any position, active order, nonterminal bot intent, stale account snapshot, or unknown order ownership, and it never resets the six-hour loss window.
 
 ## Run a bounded observation
 

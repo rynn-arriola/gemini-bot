@@ -1,6 +1,6 @@
 # Production architecture
 
-September 15 implementation update: [repair evidence](REPAIR_REPORT_2026-09-15.md) is authoritative where older design descriptions below differ. The runtime now uses host-wide canonical ownership, serialized order lifecycles, event-driven risk marks, full 1 Hz account snapshots (no mixed delta transition), exact-symbol/account/build-bound version-2 permits, and fail-closed recovery requiring fresh reconciliation/approval. Maker commissioning uses the production safety path. No automatic live restart is installed.
+September 15 implementation update: [repair evidence](REPAIR_REPORT_2026-09-15.md) is authoritative where older design descriptions below differ. The runtime now uses host-wide canonical ownership, serialized order lifecycles, event-driven risk marks, full 1 Hz account snapshots (no mixed delta transition), account/build/policy-bound permits, and fail-closed recovery. Version-5 approval allows at most two same-supervisor restarts only after the prior runner durably proves flat; all other restarts require fresh approval. Maker commissioning uses the production safety path.
 
 ## Data and control flow
 

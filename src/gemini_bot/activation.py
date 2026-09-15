@@ -25,6 +25,8 @@ class ActivationPermit:
     symbols: tuple[str, ...]
     uptime_override_until: datetime | None = None
     universe_scope: str | None = None
+    permit_version: int = 2
+    supervised_restart_limit: int = 0
 
 
 def policy_digest(policy_path: Path) -> str:
@@ -33,7 +35,11 @@ def policy_digest(policy_path: Path) -> str:
 def build_digest() -> str:
     root = Path(__file__).resolve().parents[2]
     digest = hashlib.sha256()
-    files = sorted(list((root / "src").rglob("*.py")) + list((root / "scripts").glob("*.py")))
+    files = sorted(
+        list((root / "src").rglob("*.py"))
+        + list((root / "scripts").glob("*.py"))
+        + list((root / "scripts").glob("*.ps1"))
+    )
     for path in files:
         digest.update(path.relative_to(root).as_posix().encode())
         digest.update(b"\0")
@@ -66,12 +72,15 @@ def load_activation_permit(
         2: required,
         3: required | {"uptime_override_until"},
         4: (required - {"symbols"}) | {"uptime_override_until", "universe_scope"},
+        5: (required - {"symbols"}) | {
+            "uptime_override_until", "universe_scope", "supervised_restart_limit",
+        },
     }
     if version not in schemas or set(raw) != schemas[version]:
         raise ValueError("activation permit schema/version mismatch")
     override = (
         datetime.fromisoformat(str(raw["uptime_override_until"]))
-        if version in {3, 4} else None
+        if version in {3, 4, 5} else None
     )
     permit = ActivationPermit(
         permit_id=str(raw["permit_id"]),
@@ -83,7 +92,9 @@ def load_activation_permit(
         build_sha256=str(raw["build_sha256"]),
         symbols=tuple(raw["symbols"]) if isinstance(raw.get("symbols"), list) else (),
         uptime_override_until=override,
-        universe_scope=str(raw["universe_scope"]) if version == 4 else None,
+        universe_scope=str(raw["universe_scope"]) if version in {4, 5} else None,
+        permit_version=int(version),
+        supervised_restart_limit=int(raw.get("supervised_restart_limit", 0)),
     )
     if not permit.permit_id or permit.approved_at.tzinfo is None or permit.expires_at.tzinfo is None:
         raise ValueError("activation permit identity and timezone-aware timestamps are required")
@@ -112,8 +123,25 @@ def load_activation_permit(
             raise ValueError("activation permit requires exact unique uppercase symbols within pool breadth")
     elif permit.universe_scope != "reward_catalog":
         raise ValueError("activation permit universe scope is not approved")
-    if store.get_runtime_state(f"consumed_permit:{permit.permit_id}") is not None:
-        raise ValueError("activation permit has already been consumed")
+    if permit.permit_version == 5 and not 1 <= permit.supervised_restart_limit <= 2:
+        raise ValueError("supervised permit restart limit must be between one and two")
+    consumed = store.get_runtime_state(f"consumed_permit:{permit.permit_id}")
+    if consumed is not None:
+        if permit.permit_version != 5:
+            raise ValueError("activation permit has already been consumed")
+        try:
+            session = json.loads(consumed)
+            valid_session = (
+                isinstance(session, dict)
+                and session.get("status") == "recoverable_flat"
+                and isinstance(session.get("session_id"), str)
+                and bool(session["session_id"])
+                and int(session.get("activations", 0)) < 1 + permit.supervised_restart_limit
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            valid_session = False
+        if not valid_session:
+            raise ValueError("supervised activation session is not recoverable")
     return permit
 
 
@@ -122,10 +150,73 @@ def consume_activation_permit(
     store: PermitStore,
     *,
     now: datetime | None = None,
+    supervisor_session_id: str | None = None,
 ) -> None:
     current = now or datetime.now(timezone.utc)
+    if permit.permit_version == 5:
+        if not supervisor_session_id:
+            raise ValueError("supervised permit requires a supervisor session identity")
+        key = f"consumed_permit:{permit.permit_id}"
+        prior = store.get_runtime_state(key)
+        activations = 1
+        if prior is not None:
+            try:
+                state = json.loads(prior)
+            except json.JSONDecodeError as exc:
+                raise ValueError("supervised activation state is unreadable") from exc
+            if (
+                state.get("session_id") != supervisor_session_id
+                or state.get("status") != "recoverable_flat"
+            ):
+                raise ValueError("supervised activation session cannot be resumed")
+            activations = int(state.get("activations", 0)) + 1
+        if activations > 1 + permit.supervised_restart_limit:
+            raise ValueError("supervised activation restart limit is exhausted")
+        store.set_runtime_state(
+            key,
+            json.dumps({
+                "session_id": supervisor_session_id,
+                "activations": activations,
+                "status": "active",
+            }, separators=(",", ":"), sort_keys=True),
+            updated_at=current,
+        )
+        return
     store.set_runtime_state(
         f"consumed_permit:{permit.permit_id}",
         current.isoformat(),
+        updated_at=current,
+    )
+
+
+def finish_supervised_activation(
+    permit: ActivationPermit,
+    store: PermitStore,
+    *,
+    supervisor_session_id: str | None,
+    outcome: str,
+    now: datetime | None = None,
+) -> None:
+    """Close or release a v5 session only from an active matching runner."""
+    if permit.permit_version != 5:
+        return
+    if outcome not in {"recoverable_flat", "closed", "attention"}:
+        raise ValueError("unknown supervised activation outcome")
+    if not supervisor_session_id:
+        raise ValueError("supervised permit requires a supervisor session identity")
+    key = f"consumed_permit:{permit.permit_id}"
+    raw = store.get_runtime_state(key)
+    if raw is None:
+        raise RuntimeError("supervised activation state is missing")
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("supervised activation state is unreadable") from exc
+    if state.get("session_id") != supervisor_session_id or state.get("status") != "active":
+        raise RuntimeError("supervised activation state does not match the active runner")
+    state["status"] = outcome
+    current = now or datetime.now(timezone.utc)
+    store.set_runtime_state(
+        key, json.dumps(state, separators=(",", ":"), sort_keys=True),
         updated_at=current,
     )
