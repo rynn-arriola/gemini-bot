@@ -11,7 +11,7 @@ Violation of an invariant blocks new risk and requires reconciliation or a termi
 7. A first fill immediately removes permission to add on the same directional exposure and prioritizes cancellation of the opposite/risk-adding leg.
 8. Exact authenticated position quantity—not intended or locally inferred quantity—controls reduction.
 8a. A close is exact and outcome-correct: SELL YES for a positive YES position, SELL NO for a negative NO position. Full haircut-adjusted depth must cover it; a terminal IOC status alone never proves flat.
-9. A differential-depth gap, crossed local book, stale book, contract closure, stream loss, stale account state, or unknown ownership removes permission to quote.
+9. A differential-depth gap, crossed local book, stale shared market-data stream, contract closure, stale account state, or unknown ownership removes permission to quote. A quiet symbol may retain its last sequenced book while the single shared WebSocket has recent verified traffic; a one-sided book cannot enter the two-sided quote strategy.
 10. REST cannot silently replace WebSocket streaming. It is bounded reconciliation and metadata transport.
 11. Server throttles and `Retry-After` are honored. Safety priority never bypasses a server cooldown, and extra keys/connections are not used to evade limits.
 12. A timed/expiry exit cancels risk-adding orders and confirms terminal state before sending an exact reducer.

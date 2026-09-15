@@ -1,6 +1,6 @@
 # Gemini Predictions liquidity-rewards bot
 
-**Live preflight blocked; trading remains stopped.** Earlier offline repairs passed, but the [five-minute read-only preflight](docs/PREFLIGHT_2026-09-15.md) exposed one-sided-market startup and quiet-book freshness issues. Account checks passed; no orders or cancellations were sent. See [NEXT.md](NEXT.md) before any further commissioning.
+**Preflight issues fixed offline; trading remains stopped.** The [five-minute read-only preflight](docs/PREFLIGHT_2026-09-15.md) exposed one-sided-market startup and quiet-book freshness issues; both now have tested fail-closed repairs. Account checks passed and no orders/cancellations were sent. A repeat approved read-only preflight is required before maker commissioning. See [NEXT.md](NEXT.md).
 
 This is a native-Windows live-trading build. The production runtime is implemented under `src/gemini_bot`. Read-only production preparation has now been attempted and failed market readiness; no live maker canary or continuous reward run has started and no live activation permit exists. Construction, tests, release validation, and process startup cannot grant trading approval. The earlier public-data paper observer remains research evidence, not the execution engine.
 

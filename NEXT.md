@@ -2,12 +2,12 @@
 
 The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification, but the subsequent [five-minute live read-only preflight](docs/PREFLIGHT_2026-09-15.md) exposed startup/data-health blockers. The bot is stopped and live trading remains unapproved.
 
-## New blockers from live preflight
+## Preflight blockers repaired offline
 
-1. With owner approval, fix readiness so four one-sided/unusable selected markets do not block every otherwise valid market. Preserve all per-market trade gates and exact-symbol approval.
-2. Diagnose/repair the distinction between quiet unchanged books and genuinely stale/unconfirmed depth. Keep bounded WS verification and rate limits; do not simply disable freshness checks.
-3. Add live-shape offline tests, then repeat an authorized five-minute read-only preflight. The completed run used 300.516 seconds, with healthy account reconciliation and zero order/cancel commands, but did not pass production readiness.
-4. Ensure any prepare-only entry point preserves the diagnostic's explicit no-cancel-on-disconnect and mutation-block guarantees. Do not launch the live maker canary until these blockers are closed.
+1. Readiness accepts a fully initialized cohort when at least one current, two-sided, pre-expiry market is usable. One-sided contracts remain tracked but cannot enter this two-sided strategy.
+2. Quiet books retain their sequenced state while recent traffic on the one shared public socket proves continuity. A stale connection or sequence gap still blocks entry. One-sided held inventory is marked at its executable side, or zero when no exit bid exists.
+3. `prepare-live` and the diagnostic now use a transport-enforced read-only mode and `cancelOnDisconnect=false`; they cannot create intents, place/cancel orders, or activate.
+4. 113 production and 28 script/observer tests pass. Repeat an authorized five-minute read-only preflight before the maker canary; offline tests do not prove current live behavior.
 
 ## Completed offline
 
@@ -18,7 +18,7 @@ The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline veri
 
 ## Later, with explicit owner approval at each mutation boundary
 
-1. Re-run offline release validation and review the 106 production plus 25 observer test results after any code change.
+1. Re-run offline release validation and review the 113 production plus 28 script/observer test results after any code change.
 2. Obtain approval to run `prepare-live`; reconcile accepted terms, balance, positions, active orders, streams, current reward universe, and `rank-report.json` without submitting orders.
 3. Show the owner the selected unique pool, exact 10-contract price/side, maximum reservation, current six-hour loss/cap mark, available USD, and every preflight result.
 4. Verify standard same-outcome SELL is supported for the selected account/contract, and resolve any legacy journal/cash discrepancies without discarding evidence. Only after new explicit approval, create a one-hour, one-pool version-2 permit bound to current policy/build/account/exact symbol and run the one-leg MOC maker canary. Verify resting acknowledgment, cancellation terminality, and flat account.

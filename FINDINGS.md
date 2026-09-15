@@ -1,5 +1,11 @@
 # Gemini findings
 
+## September 15, 2026: preflight blockers repaired offline
+
+- Startup now requires snapshots for all tracked books but only one usable two-sided market; one-sided markets are isolated from the pair strategy. Quiet books use current shared-WebSocket continuity rather than last-price-change time. A stale shared stream and any per-symbol sequence gap still fail closed.
+- Risk marks now value held inventory at the executable exit side and use zero if that side is absent, so a one-sided book cannot freeze the six-hour high-water stop. Read-only transports cannot mutate or activate and use `cancelOnDisconnect=false`.
+- 113 production and 28 script/observer tests pass. No network connection, order, cancellation, permit or process launch occurred for this fix. A repeat read-only preflight remains required.
+
 ## September 15, 2026: five-minute authenticated read-only preflight — blocked
 
 - Completed 300.516 seconds at 10:34:43 Eastern; 32 markets observed, account streams/reconciliation healthy, no sequence gaps or throttle failures, 0.411% average of one logical CPU core. Zero order/cancel commands, no permit consumed; all connections closed.

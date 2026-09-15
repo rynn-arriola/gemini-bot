@@ -1,5 +1,7 @@
 # Five-minute read-only preflight — September 15, 2026
 
+**Post-report update:** the startup and freshness defects identified below were repaired offline the same day. One-sided markets no longer block usable two-sided candidates; quiet synchronized books use shared gap-checked WebSocket continuity; stale transport still blocks entry. Read-only mode is now enforced in the production adapter. Offline tests pass, but this historical report remains a failed preflight until a new owner-approved read-only run verifies the fix live.
+
 ## Verdict: live startup blocked
 
 The owner authorized a five-minute non-ordering preflight. The completed run lasted **300.516 seconds**, from 10:29:42 to 10:34:43 America/New_York, including startup and final reconciliation. Account streams ran for approximately 253 seconds after discovery/subscription. An earlier attempt stopped after 70.626 seconds on the same readiness timeout; it is preserved separately and is not counted as the completed five-minute run.
