@@ -1,5 +1,12 @@
 # Bug fixes
 
+## September 15, 2026 — realized HARD, fixed breadth and pre-send exit race
+
+- The six-hour meter incorrectly let open executable marks ratchet pending orders from 30 down to 20. Owner policy now keeps 30 pending entry slots below one $30 HARD and counts only completed matched bot fill lifecycles plus recorded fees. The legacy marked-equity table is retained as history; a separate realized-risk table prevents silent reinterpretation.
+- Both deadline exits actually filled and flattened, but a retry was prepared while REST/position snapshots lagged. The last-moment guard correctly rejected the now-stale exact quantity before `websocket.send`; the transport incorrectly left that definitely-unsent intent ambiguous. Guard rejection now terminalizes the local intent, and exit control waits up to five seconds for REST/WebSocket agreement before deciding flat, retryable residual, or unsafe disagreement.
+- A dedicated public-WebSocket dirty queue now triggers fast cancellation when a working entry moves inside the approved two-tick distance. It does not churn an order merely because the touch moved away. Normal sticky replacement remains serialized after terminal cancellation, preserving reward uptime when safe.
+- Startup no longer scans global order history, which exceeded the 1,000-row safety ceiling during recovery. It reads only the newest symbol-filtered page for unresolved intents; a full page that omits a target remains ambiguous and blocks startup.
+
 ## September 15, 2026 — terminal IOC residual and manual-close recovery
 
 - Symptom: the first five-minute live exit submitted an exact IOC SELL, received a terminal `CANCELED` event with zero execution, then timed out because the position remained open. The symbol stayed marked ambiguous, so emergency drain refused a second reducer even though Gemini had positively terminated the first order.

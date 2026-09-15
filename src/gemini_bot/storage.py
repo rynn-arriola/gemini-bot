@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import os
@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS risk_window_state (
     window_start TEXT PRIMARY KEY,
     window_end TEXT NOT NULL,
     opening_equity TEXT NOT NULL,
+    loss_high_water TEXT NOT NULL,
+    pending_order_cap INTEGER NOT NULL,
+    classification_complete INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS realized_risk_window_state (
+    window_start TEXT PRIMARY KEY,
+    window_end TEXT NOT NULL,
+    realized_pnl TEXT NOT NULL,
     loss_high_water TEXT NOT NULL,
     pending_order_cap INTEGER NOT NULL,
     classification_complete INTEGER NOT NULL,
@@ -188,6 +197,16 @@ class SQLiteJournal:
             "SELECT client_order_id FROM order_intent WHERE state IN ('sent_unknown','acknowledged')"
         ))
 
+    def nonterminal_sent_intents(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (str(row[0]), str(row[1]))
+            for row in self.connection.execute(
+                """SELECT client_order_id,symbol FROM order_intent
+                   WHERE state IN ('sent_unknown','acknowledged')
+                   ORDER BY symbol,client_order_id"""
+            )
+        )
+
     def reconcile_working_intent(self, client_order_id: str, order_id: str) -> None:
         if not order_id:
             raise ValueError("working reconciliation requires order identity")
@@ -210,6 +229,41 @@ class SQLiteJournal:
         ).rowcount
         if changed not in {0, 1}:
             raise RuntimeError("intent reconciliation affected multiple rows")
+
+    def resolve_verified_presend_not_sent(
+        self, client_order_ids: tuple[str, ...], *, observed_at: datetime,
+    ) -> None:
+        """Terminalize only exit intents proven rejected before socket send."""
+        if not client_order_ids or observed_at.tzinfo is None:
+            raise ValueError("verified pre-send repair requires IDs and aware timestamp")
+        unique_ids = tuple(dict.fromkeys(client_order_ids))
+        with self.transaction():
+            for client_id in unique_ids:
+                row = self.connection.execute(
+                    """SELECT purpose,state,server_order_id FROM order_intent
+                       WHERE client_order_id=?""",
+                    (client_id,),
+                ).fetchone()
+                if row != ("exit", "sent_unknown", None):
+                    raise RuntimeError(
+                        "pre-send repair target is not an unresolved serverless exit"
+                    )
+            placeholders = ",".join("?" for _ in unique_ids)
+            changed = self.connection.execute(
+                f"""UPDATE order_intent SET state='terminal',updated_at=?
+                    WHERE client_order_id IN ({placeholders})""",
+                (observed_at.isoformat(), *unique_ids),
+            ).rowcount
+            if changed != len(unique_ids):
+                raise RuntimeError("pre-send repair did not update every exact target")
+            self.connection.execute(
+                "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
+                (
+                    observed_at.isoformat(),
+                    "verified_presend_exit_not_sent_reconciled",
+                    json.dumps({"intent_count": len(unique_ids)}, separators=(",", ":")),
+                ),
+            )
 
     def persist_deadline(
         self,
@@ -368,6 +422,122 @@ class SQLiteJournal:
             ),
         ).rowcount
         return changed == 1
+
+    def realized_pnl_for_window(
+        self, window_start: datetime, window_end: datetime
+    ) -> tuple[Decimal, bool]:
+        """Replay durable fills and count P&L only when inventory returns flat.
+
+        Open lifecycle cash and marks are excluded. An operator-confirmed manual
+        flatten resets unmatched cost basis without inventing an execution.
+        """
+        if window_start.tzinfo is None or window_end.tzinfo is None:
+            raise ValueError("realized-P&L window timestamps must be timezone-aware")
+        def parsed_utc(value: object) -> datetime:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        events: list[tuple[datetime, int, tuple[object, ...]]] = []
+        for row in self.connection.execute(
+            """SELECT trade_id,symbol,side,outcome,quantity,price,fee,event_at
+               FROM execution_fill ORDER BY event_at,trade_id"""
+        ):
+            occurred = parsed_utc(row[7])
+            if occurred < window_end:
+                events.append((occurred, 1, tuple(row)))
+        for row in self.connection.execute(
+            """SELECT sequence,occurred_at FROM audit_event
+               WHERE kind='operator_manual_flat_reconciled' ORDER BY occurred_at,sequence"""
+        ):
+            occurred = parsed_utc(row[1])
+            if occurred < window_end:
+                events.append((occurred, 0, tuple(row)))
+        events.sort(key=lambda item: (item[0], item[1], str(item[2][0])))
+
+        positions: dict[str, tuple[Decimal, Decimal]] = {}
+        realized = Decimal("0")
+        complete = True
+        for occurred, kind, row in events:
+            if kind == 0:
+                positions.clear()
+                continue
+            _, symbol, side, outcome, quantity, price, fee, _ = row
+            qty = Decimal(str(quantity))
+            execution_price = Decimal(str(price))
+            execution_fee = Decimal(str(fee))
+            outcome_sign = Decimal("1") if str(outcome).upper() == "YES" else Decimal("-1")
+            side_sign = Decimal("1") if str(side).upper() == "BUY" else Decimal("-1")
+            signed_delta = qty * outcome_sign * side_sign
+            cash_delta = (
+                -qty * execution_price if str(side).upper() == "BUY"
+                else qty * execution_price
+            ) - execution_fee
+            prior_qty, prior_cash = positions.get(str(symbol), (Decimal("0"), Decimal("0")))
+            new_qty = prior_qty + signed_delta
+            new_cash = prior_cash + cash_delta
+            if prior_qty == 0 and str(side).upper() != "BUY":
+                complete = False
+            if prior_qty != 0 and new_qty != 0 and (prior_qty > 0) != (new_qty > 0):
+                complete = False
+            if new_qty == 0:
+                if prior_qty != 0 and window_start <= occurred < window_end:
+                    realized += new_cash
+                positions.pop(str(symbol), None)
+            else:
+                positions[str(symbol)] = (new_qty, new_cash)
+        return realized, complete
+
+    def load_realized_risk_window(self, window_start: datetime) -> dict[str, object] | None:
+        row = self.connection.execute(
+            """SELECT window_end,realized_pnl,loss_high_water,pending_order_cap,
+                      classification_complete,updated_at
+               FROM realized_risk_window_state WHERE window_start=?""",
+            (window_start.isoformat(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "window_start": window_start,
+            "window_end": datetime.fromisoformat(str(row[0])),
+            "realized_pnl": Decimal(str(row[1])),
+            "loss_high_water": Decimal(str(row[2])),
+            "pending_order_cap": int(row[3]),
+            "classification_complete": bool(row[4]),
+            "updated_at": datetime.fromisoformat(str(row[5])),
+        }
+
+    def upsert_realized_risk_window(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        realized_pnl: Decimal,
+        loss_high_water: Decimal,
+        pending_order_cap: int,
+        classification_complete: bool,
+        updated_at: datetime,
+    ) -> None:
+        if any(value.tzinfo is None for value in (window_start, window_end, updated_at)):
+            raise ValueError("risk-window timestamps must be timezone-aware")
+        self.connection.execute(
+            """INSERT INTO realized_risk_window_state
+               (window_start,window_end,realized_pnl,loss_high_water,pending_order_cap,
+                classification_complete,updated_at)
+               VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(window_start) DO UPDATE SET
+                 realized_pnl=excluded.realized_pnl,
+                 loss_high_water=excluded.loss_high_water,
+                 pending_order_cap=excluded.pending_order_cap,
+                 classification_complete=excluded.classification_complete,
+                 updated_at=excluded.updated_at""",
+            (
+                window_start.isoformat(), window_end.isoformat(), str(realized_pnl),
+                str(loss_high_water), pending_order_cap, int(classification_complete),
+                updated_at.isoformat(),
+            ),
+        )
 
     def load_risk_window(self, window_start: datetime) -> dict[str, object] | None:
         row = self.connection.execute(

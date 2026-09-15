@@ -1,5 +1,5 @@
 {
-  "policy_version": 1,
+  "policy_version": 2,
   "platform": "windows",
   "quote_quantity": "10",
   "quote_offset_ticks": 2,
@@ -10,17 +10,11 @@
   "max_gross_reservation_usd": "300",
   "max_market_exposure_usd": "90",
   "max_stressed_exit_loss_usd": "40",
-  "risk_window_stop_loss_usd": "25",
+  "risk_window_stop_loss_usd": "30",
+  "risk_window_accounting": "closed_fill_realized_pnl",
   "risk_window_timezone": "America/New_York",
   "risk_window_start_hours": [0, 6, 12, 18],
-  "risk_window_pending_order_tiers": [
-    {"remaining_fraction": "1.00", "max_pending_orders": 30},
-    {"remaining_fraction": "0.80", "max_pending_orders": 25},
-    {"remaining_fraction": "0.60", "max_pending_orders": 20},
-    {"remaining_fraction": "0.40", "max_pending_orders": 15},
-    {"remaining_fraction": "0.20", "max_pending_orders": 10},
-    {"remaining_fraction": "0.00", "max_pending_orders": 0}
-  ],
+  "risk_window_pending_order_policy": "fixed_30_until_stop",
   "max_inventory_age_seconds": 300,
   "force_exit_before_expiry_seconds": 300,
   "monetary_stop_authorities": 1

@@ -21,6 +21,7 @@
 
 ## Evidence
 
+- Before accepting any runtime or policy change, state whether it can reduce qualifying snapshot uptime, rotate a sticky pool, or create an unquoted interval against Gemini's 50% rule. Uptime never overrides a safety or reconciliation invariant.
 - “Eligible” means the locally known published requirements pass; it is not proof Gemini awarded a snapshot.
 - Ranking v2's `priority_score` is a conservative net-profit-per-capital-hour proxy, not expected or guaranteed dollars. Its component reward/share/cost values must retain `_proxy` labels because Gemini does not publish the exact quadratic spread curve or final competitor scores.
 - Public qualifying-maker count is a coarse competition signal, not a pool-level unique-account denominator.

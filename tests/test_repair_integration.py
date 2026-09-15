@@ -21,6 +21,7 @@ from gemini_bot.domain import EngineState, Outcome, QuoteLeg, Side
 from gemini_bot.execution import IntentLedger, OrderPurpose, place_request
 from gemini_bot.market_state import LocalBook
 from gemini_bot.orchestrator import ProductionOrchestrator
+from gemini_bot.live_ws import MutationNotSentError
 from gemini_bot.public_ws import PublicMarketSocket
 from gemini_bot.rate_limits import AdmissionGovernor, Priority
 from gemini_bot.rank_report import rank_live_universe
@@ -106,11 +107,11 @@ class AccountRepairTests(unittest.TestCase):
 
     def test_verified_manual_flat_adopts_baseline_and_preserves_risk_window(self):
         self.store.persist_deadline("X", "YES", NOW, NOW + timedelta(minutes=5), D("10"))
-        window_start, window_end = RiskWindowPolicy(D("25")).bounds(NOW)
-        self.store.upsert_risk_window(
+        window_start, window_end = RiskWindowPolicy(D("90")).bounds(NOW)
+        self.store.upsert_realized_risk_window(
             window_start=window_start, window_end=window_end,
-            opening_equity=D("300"), loss_high_water=D("7.25"),
-            pending_order_cap=20, classification_complete=True, updated_at=NOW,
+            realized_pnl=D("-7.25"), loss_high_water=D("7.25"),
+            pending_order_cap=30, classification_complete=True, updated_at=NOW,
         )
         self.account.expected_positions = {"X": D("10")}
         self.account.expected_confirmed_usd = D("96")
@@ -123,8 +124,8 @@ class AccountRepairTests(unittest.TestCase):
         self.assertEqual(self.account.expected_positions, {})
         self.assertEqual(self.account.expected_confirmed_usd, D("99"))
         self.assertIsNone(self.store.get_deadline("X", "YES"))
-        risk = self.store.load_risk_window(window_start)
-        self.assertEqual(risk["opening_equity"], D("300"))
+        risk = self.store.load_realized_risk_window(window_start)
+        self.assertEqual(risk["realized_pnl"], D("-7.25"))
         self.assertEqual(risk["loss_high_water"], D("7.25"))
         restored = AccountRuntime(IntentLedger(self.store), self.store)
         self.assertEqual(restored.expected_positions, {})
@@ -166,6 +167,33 @@ class AccountRepairTests(unittest.TestCase):
         self.account.last_balance_at = self.account.last_position_at = time.monotonic()
         with self.assertRaisesRegex(RuntimeError, "zero active orders"):
             self.account.adopt_verified_manual_flat(observed_at=NOW)
+
+    def test_verified_presend_not_sent_repair_is_exact_and_audited(self):
+        intent = self.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.SELL, D(".40"), D("10")),
+            OrderPurpose.EXIT,
+        )
+        self.ledger.mark_sent(intent.client_order_id)
+        self.store.resolve_verified_presend_not_sent(
+            (intent.client_order_id,), observed_at=NOW,
+        )
+        self.assertFalse(self.store.pending_exit("X"))
+        audit = self.store.connection.execute(
+            "SELECT kind,details_json FROM audit_event ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(audit[0], "verified_presend_exit_not_sent_reconciled")
+        self.assertEqual(json.loads(audit[1]), {"intent_count": 1})
+
+    def test_presend_not_sent_repair_refuses_nonexit_or_server_order(self):
+        entry = self.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.BUY, D(".40"), D("10")),
+            OrderPurpose.ENTRY,
+        )
+        self.ledger.mark_sent(entry.client_order_id)
+        with self.assertRaisesRegex(RuntimeError, "serverless exit"):
+            self.store.resolve_verified_presend_not_sent(
+                (entry.client_order_id,), observed_at=NOW,
+            )
 
     def test_snapshot_sql_error_rolls_back_both_tables_on_reopen(self):
         row = {"symbol": "X", "outcome": "YES", "signed_quantity": "10", "average_price": ".4", "market_value": "4"}
@@ -247,6 +275,38 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.runtime._resolve_prior_intents([{"clientOrderId": intent.client_order_id, "orderId": "exit1", "status": "cancelled"}])
         self.assertFalse(self.runtime.journal.pending_exit("X"))
 
+    async def test_startup_history_is_targeted_only_to_unresolved_symbols(self):
+        intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.SELL, D(".40"), D("10")),
+            OrderPurpose.EXIT,
+        )
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        terminal = {
+            "clientOrderId": intent.client_order_id,
+            "orderId": "exit1", "status": "cancelled",
+        }
+        self.runtime.rest.recent_order_history = AsyncMock(return_value=[terminal])
+        self.runtime.rest.order_history = AsyncMock(
+            side_effect=AssertionError("global history must not be read"),
+        )
+        history = await self.runtime._targeted_prior_intent_history([])
+        self.runtime._resolve_prior_intents(history)
+        self.runtime.rest.recent_order_history.assert_awaited_once_with(symbol="X")
+        self.runtime.rest.order_history.assert_not_awaited()
+        self.assertFalse(self.runtime.journal.pending_exit("X"))
+
+    async def test_full_targeted_history_without_intent_remains_ambiguous(self):
+        intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.SELL, D(".40"), D("10")),
+            OrderPurpose.EXIT,
+        )
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        self.runtime.rest.recent_order_history = AsyncMock(
+            return_value=[{"clientOrderId": f"other-{value}"} for value in range(1000)],
+        )
+        with self.assertRaisesRegex(RuntimeError, "history is full"):
+            await self.runtime._targeted_prior_intent_history([])
+
     async def test_exit_send_guard_requires_same_outcome_and_exact_quantity(self):
         self.runtime.account.reducer.positions["X"] = D("-3")
         payload = {"params": {"symbol": "X", "side": "SELL", "quantity": "3", "eventOutcome": "NO"}}
@@ -254,6 +314,81 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         payload["params"]["eventOutcome"] = "YES"
         with self.assertRaises(RuntimeError):
             self.runtime._validate_send(payload)
+
+    async def test_guard_rejection_is_proven_not_sent_and_terminal(self):
+        send = AsyncMock()
+        self.runtime.private._connection = SimpleNamespace(send=send)
+        leg = QuoteLeg("X", Outcome.YES, Side.SELL, D(".40"), D("10"))
+        with self.assertRaises(MutationNotSentError):
+            await self.runtime.private.exit_position(leg, signed_position=D("10"))
+        send.assert_not_awaited()
+        self.assertFalse(self.runtime.journal.pending_exit("X"))
+
+    async def test_presend_exit_race_reconciles_flat_without_duplicate_order(self):
+        self.runtime.account.reducer.positions["X"] = D("10")
+        self.runtime.account.expected_positions = {"X": D("10")}
+        self.runtime.journal.persist_deadline("X", "YES", NOW, NOW, D("10"))
+        position = {
+            "symbol": "X", "outcome": "YES", "totalQuantity": "10",
+            "avgPrice": ".40", "marketValue": "4",
+        }
+        self.runtime.rest.positions = AsyncMock(side_effect=[[position], []])
+
+        async def filled_before_retry(*args, **kwargs):
+            self.runtime.account.reducer.positions.clear()
+            self.runtime.account.expected_positions = {}
+            raise MutationNotSentError("position changed while waiting")
+
+        self.runtime.private.exit_position = AsyncMock(side_effect=filled_before_retry)
+        await self.runtime._exit_due_positions()
+        self.assertFalse(self.runtime.journal.pending_exit("X"))
+        self.assertIsNone(self.runtime.journal.get_deadline("X", "YES"))
+        self.runtime.private.exit_position.assert_awaited_once()
+
+    async def test_websocket_adverse_guard_cancels_quote_that_moves_inside_two_ticks(self):
+        self.runtime.universe = [
+            RewardedContract(
+                "E", candidate_pool(), candidate_rules(),
+                (NOW + timedelta(hours=2)).isoformat(),
+            )
+        ]
+        intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.BUY, D(".46"), D("10")),
+            OrderPurpose.ENTRY,
+        )
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        self.runtime.account.apply({
+            "e": "orderUpdate", "i": "working", "c": intent.client_order_id,
+            "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "10",
+            "p": ".46", "X": "OPEN",
+        })
+        self.runtime.public.books["X"].apply_snapshot(
+            [(D(".40"), D("100"))], [(D(".60"), D("100"))], 2, 2, NOW,
+        )
+        self.runtime._cancel_symbol_entries = AsyncMock()
+        self.assertTrue(await self.runtime._cancel_too_aggressive_quote("X"))
+        self.runtime._cancel_symbol_entries.assert_awaited_once_with("X")
+
+    async def test_websocket_adverse_guard_does_not_churn_quote_farther_from_touch(self):
+        self.runtime.universe = [
+            RewardedContract(
+                "E", candidate_pool(), candidate_rules(),
+                (NOW + timedelta(hours=2)).isoformat(),
+            )
+        ]
+        intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.BUY, D(".40"), D("10")),
+            OrderPurpose.ENTRY,
+        )
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        self.runtime.account.apply({
+            "e": "orderUpdate", "i": "working", "c": intent.client_order_id,
+            "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "10",
+            "p": ".40", "X": "OPEN",
+        })
+        self.runtime._cancel_symbol_entries = AsyncMock()
+        self.assertFalse(await self.runtime._cancel_too_aggressive_quote("X"))
+        self.runtime._cancel_symbol_entries.assert_not_awaited()
 
     async def test_sports_entry_stops_at_published_game_start(self):
         self.runtime._sports_start["X"] = NOW
@@ -267,32 +402,32 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             self.runtime._validate_send(self.payload())
 
-    async def test_live_marks_preserve_transient_loss_between_rest_polls(self):
+    async def test_open_position_marks_do_not_reduce_pending_capacity(self):
         account = self.runtime.account
         account.reducer.positions = {"X": D("100")}
         account.expected_positions = {"X": D("100")}
         self.runtime._mark_live_risk()
         self.runtime.public.books["X"].apply_snapshot([(D(".28"), D("100"))], [(D(".32"), D("100"))], 2, 2, NOW)
         self.runtime._mark_live_risk()
-        self.assertEqual(self.runtime._dynamic_pending_cap, 10)
+        self.assertEqual(self.runtime._dynamic_pending_cap, 30)
         self.runtime.public.books["X"] = book()
         self.runtime._mark_live_risk()
-        stored = self.runtime.journal.load_risk_window(RiskWindowPolicy(D("25")).bounds(NOW)[0])
-        self.assertEqual(stored["loss_high_water"], D("20"))
-        self.assertEqual(self.runtime._dynamic_pending_cap, 10)
+        stored = self.runtime.journal.load_realized_risk_window(RiskWindowPolicy(D("90")).bounds(NOW)[0])
+        self.assertEqual(stored["loss_high_water"], D("0"))
+        self.assertEqual(self.runtime._dynamic_pending_cap, 30)
 
-    async def test_one_sided_position_uses_conservative_executable_risk_mark(self):
+    async def test_one_sided_position_does_not_enter_realized_loss_meter(self):
         account = self.runtime.account
         account.reducer.positions = {"X": D("10")}
         account.expected_positions = {"X": D("10")}
         self.runtime.public.books["X"].apply_snapshot([], [(D(".52"), D("100"))], 2, 2, NOW)
         self.runtime.public.last_message_at = NOW
         self.runtime._mark_live_risk()
-        stored = self.runtime.journal.load_risk_window(RiskWindowPolicy(D("25")).bounds(NOW)[0])
-        self.assertEqual(stored["opening_equity"], D("100"))
+        stored = self.runtime.journal.load_realized_risk_window(RiskWindowPolicy(D("90")).bounds(NOW)[0])
+        self.assertEqual(stored["realized_pnl"], D("0"))
         self.runtime.public.books["X"].apply_snapshot([(D(".40"), D("100"))], [], 3, 3, NOW)
         self.runtime._mark_live_risk()
-        stored = self.runtime.journal.load_risk_window(RiskWindowPolicy(D("25")).bounds(NOW)[0])
+        stored = self.runtime.journal.load_realized_risk_window(RiskWindowPolicy(D("90")).bounds(NOW)[0])
         self.assertEqual(stored["loss_high_water"], D("0"))
 
     async def test_all_one_sided_markets_still_block_startup(self):

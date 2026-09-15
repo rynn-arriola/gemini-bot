@@ -25,7 +25,7 @@ Tooling status: `prepare-live` completed at 10:57:01 Eastern on September 15. It
 
 ## Stage 2 — approved owner policy
 
-The reviewed source is `config/live_policy.json`: $300 gross, $90/market, $40 stressed-exit entry gate, one $25/six-hour stop, size 10, max 30 pending, 15 two-sided quotes, 32 tracked owners, two ticks behind touch, 75% uptime target, 300-second inventory exit and five-minute pre-expiry exit. Configuration must prove `monetary_stop_authorities=1`; no daily or per-position loss stop exists.
+The reviewed source is `config/live_policy.json`: $300 gross, $90/market, $40 stressed-exit entry gate, one $30/six-hour realized-loss stop, size 10, fixed 30 pending below HARD, 15 two-sided quotes, 32 tracked owners, two ticks behind touch, 75% uptime target, 300-second inventory exit and five-minute pre-expiry exit. Configuration must prove `monetary_stop_authorities=1`; no daily or per-position loss stop exists.
 
 ## Stage 3 — first bounded live quote
 

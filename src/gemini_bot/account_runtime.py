@@ -60,6 +60,7 @@ class AccountRuntime:
         self.hard_exit_cutoff: dict[str, datetime] = {}
         self.blocked_entries: set[str] = set()
         self.changed = asyncio.Event()
+        self.fill_version = 0
         saved_positions = journal.get_runtime_state("expected_positions")
         self.expected_positions = None if saved_positions is None else {
             key: Decimal(value) for key, value in json.loads(saved_positions).items()
@@ -209,6 +210,8 @@ class AccountRuntime:
                     fee=Decimal(str(frame.get("n", "0"))),
                     event_at=_event_time(frame),
                 )
+                if recorded:
+                    self.fill_version += 1
                 if recorded and self.expected_confirmed_usd is not None:
                     price = Decimal(str(frame.get("L", frame.get("p", "0"))))
                     if not Decimal("0") < price < Decimal("1"):

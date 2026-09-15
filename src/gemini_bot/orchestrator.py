@@ -22,7 +22,7 @@ from .domain import EngineState, Outcome
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .exit_pricing import exact_crossing_exit
-from .live_ws import LiveWebSocket
+from .live_ws import LiveWebSocket, MutationNotSentError
 from .operational_logging import ErrorClass, OperationalLogger, configure_logging
 from .persistent_risk import PersistentRiskWindow
 from .profitability import ProfitabilityTracker, active_maker_rebate_fractions
@@ -111,7 +111,6 @@ class ProductionOrchestrator:
         self._expiry: dict[str, datetime] = {}
         self._trade_start: dict[str, datetime] = {}
         self._sports_start: dict[str, datetime] = {}
-        self._opening_equity_marked = False
         self._dynamic_pending_cap = config.risk.max_pending_orders
         self._last_snapshot = AccountSnapshot((), ())
         self._uptime = {}
@@ -270,6 +269,31 @@ class ProductionOrchestrator:
                 raise RuntimeError("an earlier mutation is not terminal")
             self.journal.resolve_intent_terminal(client_id, str(row.get("orderId", "")) or None)
 
+    async def _targeted_prior_intent_history(
+        self, active_orders: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Read history only for unresolved symbols absent from active orders."""
+        active_client_ids = {
+            str(row.get("clientOrderId", "")) for row in active_orders
+        }
+        unresolved_by_symbol: dict[str, set[str]] = {}
+        for client_id, symbol in self.journal.nonterminal_sent_intents():
+            if client_id not in active_client_ids:
+                unresolved_by_symbol.setdefault(symbol, set()).add(client_id)
+        history: list[dict[str, Any]] = []
+        for symbol in sorted(unresolved_by_symbol):
+            rows = await self.rest.recent_order_history(symbol=symbol)
+            if len(rows) >= 1000:
+                # An absent ID on a full newest page is not proof that an older
+                # mutation never existed or became terminal.
+                found = {str(row.get("clientOrderId", "")) for row in rows}
+                if not unresolved_by_symbol[symbol] <= found:
+                    raise RuntimeError(
+                        "symbol order history is full and cannot resolve prior intent"
+                    )
+            history.extend(rows)
+        return history
+
     async def prepare(self, *, timeout: float = 30) -> PreparedState:
         """Read-only startup. This method contains no order mutation call."""
         self.lock.acquire()
@@ -300,9 +324,8 @@ class ProductionOrchestrator:
         self.gate.begin_reconciliation()
         self._write_status("reconciling", False, "read-only startup")
         try:
-            terms, positions_before, orders_before, history = await asyncio.gather(
+            terms, positions_before, orders_before = await asyncio.gather(
                 self.rest.terms_status(), self.rest.positions(), self.rest.active_orders(),
-                self.rest.order_history(),
             )
             if not terms.get("hasAcceptedLatest"):
                 raise RuntimeError("latest Gemini Predictions terms are not accepted")
@@ -318,6 +341,7 @@ class ProductionOrchestrator:
                     self._maker_rebate_fractions = active_maker_rebate_fractions(
                         rebate_rows, now=_utc_now(),
                     )
+            history = await self._targeted_prior_intent_history(orders_before)
             self._resolve_prior_intents(history, orders_before)
             before = build_account_snapshot(positions_before, orders_before)
             for order in before.active_orders:
@@ -690,6 +714,58 @@ class ProductionOrchestrator:
             ):
                 await self._cancel_symbol_entries(order.symbol)
 
+    def _current_quote_target(self, symbol: str) -> Any | None:
+        contract = next(
+            (item for item in self.universe if item.rules.symbol == symbol), None,
+        )
+        if contract is None or not self._book_fresh(symbol):
+            return None
+        candidates = rank_live_universe(
+            [contract], self.public.books, now=_utc_now(),
+            quantity=self.config.strategy.quote_quantity,
+            offset_ticks=self.config.strategy.quote_offset_ticks,
+            account=self.account.reducer,
+            market_data_verified_at=self._market_data_verified_at(),
+            target_uptime=self.config.strategy.target_uptime,
+        )
+        return candidates[0].quote if candidates else None
+
+    async def _cancel_too_aggressive_quote(self, symbol: str) -> bool:
+        """Cancel when a book move leaves our entry closer than two ticks.
+
+        Moving away from the touch is not canceled here; the normal sticky
+        maintenance path can improve it without turning every depth frame into
+        quote churn that harms qualifying uptime.
+        """
+        working = [
+            order for order in self.account.reducer.orders.values()
+            if order.symbol == symbol and order.working and order.side.value == "BUY"
+        ]
+        if not working:
+            return False
+        target = self._current_quote_target(symbol)
+        if target is None:
+            await self._cancel_symbol_entries(symbol)
+            return True
+        targets = {Outcome.YES: target.yes.price, Outcome.NO: target.no.price}
+        if any(order.price > targets[order.outcome] for order in working):
+            await self._cancel_symbol_entries(symbol)
+            self.journal.audit("adverse_move_quote_canceled", {
+                "symbol": symbol,
+                "reason": "inside_approved_two_tick_distance",
+            })
+            return True
+        return False
+
+    async def _adverse_quote_guard(self) -> None:
+        """Event-driven fast cancellation; replacement stays in one owner loop."""
+        while self.gate.state is EngineState.QUOTING:
+            await self.public.depth_changed.wait()
+            self.public.depth_changed.clear()
+            while (symbol := self.public.adverse_dirty.pop()) is not None:
+                async with self._lifecycle_lock:
+                    await self._cancel_too_aggressive_quote(symbol)
+
     async def _maintain_candidate_locked(self, candidate: Any) -> None:
         working = [
             order for order in self.account.reducer.orders.values()
@@ -789,9 +865,49 @@ class ProductionOrchestrator:
                 submitted_signed = signed
                 attempt += 1
                 self._exit_uncertain.add(symbol)
-                client_id = await self.private.exit_position(
-                    leg, signed_position=submitted_signed,
-                )
+                try:
+                    client_id = await self.private.exit_position(
+                        leg, signed_position=submitted_signed,
+                    )
+                except MutationNotSentError:
+                    # The guard runs after pacing but before websocket.send.
+                    # Reconcile the changed position instead of converting a
+                    # successful prior fill into an ambiguous duplicate exit.
+                    self._exit_uncertain.discard(symbol)
+                    reconciliation_deadline = min(
+                        exit_started_at + 30,
+                        asyncio.get_running_loop().time() + 5,
+                    )
+                    while True:
+                        rest_signed = build_account_snapshot(
+                            await self.rest.positions(), [],
+                        ).signed_positions.get(symbol, Decimal("0"))
+                        websocket_signed = self.account.reducer.positions.get(
+                            symbol, Decimal("0"),
+                        )
+                        if rest_signed == websocket_signed == 0:
+                            signed = Decimal("0")
+                            break
+                        if (
+                            rest_signed == websocket_signed
+                            and rest_signed != 0
+                            and (rest_signed > 0) == (submitted_signed > 0)
+                            and abs(rest_signed) <= abs(submitted_signed)
+                        ):
+                            signed = rest_signed
+                            self.journal.audit("exit_presend_position_reconciled", {
+                                "symbol": symbol,
+                                "remaining_quantity": str(abs(signed)),
+                            })
+                            break
+                        if asyncio.get_running_loop().time() >= reconciliation_deadline:
+                            raise RuntimeError(
+                                "exit position changed before send and did not reconcile safely"
+                            )
+                        await asyncio.sleep(0.25)
+                    if signed == 0:
+                        break
+                    continue
                 # A timeout here leaves the mutation ambiguous and deliberately
                 # retains _exit_uncertain, preventing emergency drain from
                 # blindly submitting another reducer.
@@ -894,18 +1010,22 @@ class ProductionOrchestrator:
     async def _risk_mark(self) -> int:
         snapshot = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
         assert_position_consistency(snapshot, self.account.reducer.positions)
-        if self.account.confirmed_usd is None:
-            raise RuntimeError("confirmed USD balance is unknown")
-        adjusted = self.account.confirmed_usd + snapshot.position_market_value
+        now = _utc_now()
+        policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd)
+        start, end = policy.bounds(now)
+        realized_pnl, history_complete = self.journal.realized_pnl_for_window(start, end)
         mark = PersistentRiskWindow(
-            RiskWindowPolicy(self.config.risk.risk_window_loss_usd), self.journal
+            policy, self.journal
         ).update(
-            now=_utc_now(), adjusted_equity=adjusted,
-            classification_complete=self.account.equity_classification_complete,
+            now=now, realized_pnl=realized_pnl,
+            classification_complete=(
+                self.account.equity_classification_complete and history_complete
+            ),
         )
         if not mark.classification_complete:
-            raise RuntimeError("equity changes cannot be classified safely")
+            raise RuntimeError("closed-fill realized P&L cannot be classified safely")
         self._last_snapshot = snapshot
+        self._last_live_mark = (self.account.fill_version, (start, end))
         self._dynamic_pending_cap = mark.pending_order_cap
         return mark.pending_order_cap
 
@@ -948,25 +1068,18 @@ class ProductionOrchestrator:
     def _mark_live_risk(self) -> None:
         if self.gate.state is not EngineState.QUOTING or not self.account.equity_classification_complete:
             return
-        equity = self.account.confirmed_usd
-        for symbol, signed in self.account.reducer.positions.items():
-            book = self.public.books.get(symbol)
-            if not self._book_fresh(symbol) or book is None:
-                return
-            # Mark at the executable exit side. If that side is absent, zero is
-            # the conservative liquidation value; a one-sided book must never
-            # freeze the six-hour loss high-water calculation.
-            if signed > 0:
-                exit_mark = max(book.bids) if book.bids else Decimal("0")
-            else:
-                exit_mark = Decimal("1") - min(book.asks) if book.asks else Decimal("0")
-            equity += abs(signed) * exit_mark
         now = _utc_now()
         policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd)
-        key = (equity, policy.bounds(now))
+        start, end = policy.bounds(now)
+        key = (self.account.fill_version, (start, end))
         if key == self._last_live_mark:
             return
-        mark = PersistentRiskWindow(policy, self.journal).update(now=now, adjusted_equity=equity, classification_complete=True)
+        realized_pnl, history_complete = self.journal.realized_pnl_for_window(start, end)
+        mark = PersistentRiskWindow(policy, self.journal).update(
+            now=now,
+            realized_pnl=realized_pnl,
+            classification_complete=history_complete,
+        )
         self._last_live_mark = key
         self._dynamic_pending_cap = mark.pending_order_cap
 
@@ -1100,6 +1213,7 @@ class ProductionOrchestrator:
         self._permit_expires_at = permit.expires_at
         safety: asyncio.Task[None] | None = None
         safety_clock: asyncio.Task[None] | None = None
+        adverse_guard: asyncio.Task[None] | None = None
         reward_check: asyncio.Task[bool] | None = None
         try:
             for order in self._last_snapshot.active_orders:
@@ -1118,6 +1232,9 @@ class ProductionOrchestrator:
             self._write_status("quoting", True, activation_reason)
             safety = asyncio.create_task(self._safety_loop(), name="gemini-fill-safety")
             safety_clock = asyncio.create_task(self._live_safety_clock(), name="gemini-live-safety-clock")
+            adverse_guard = asyncio.create_task(
+                self._adverse_quote_guard(), name="gemini-adverse-quote-guard",
+            )
             next_rank_at = 0.0
             next_stale_check_at = 0.0
             next_risk_at = asyncio.get_running_loop().time() + 60
@@ -1129,6 +1246,8 @@ class ProductionOrchestrator:
                     safety.result()
                 if safety_clock is not None and safety_clock.done():
                     safety_clock.result()
+                if adverse_guard is not None and adverse_guard.done():
+                    adverse_guard.result()
                 for task in self._tasks:
                     if task.done():
                         task.result()
@@ -1248,6 +1367,9 @@ class ProductionOrchestrator:
             if safety_clock is not None:
                 safety_clock.cancel()
                 await asyncio.gather(safety_clock, return_exceptions=True)
+            if adverse_guard is not None:
+                adverse_guard.cancel()
+                await asyncio.gather(adverse_guard, return_exceptions=True)
             if reward_check is not None:
                 reward_check.cancel()
                 await asyncio.gather(reward_check, return_exceptions=True)

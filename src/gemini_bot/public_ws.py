@@ -41,6 +41,8 @@ class PublicMarketSocket:
         self._request_id = 0
         self.books: dict[str, LocalBook] = {}
         self.dirty = DirtySymbolScheduler(queue_capacity)
+        self.adverse_dirty = DirtySymbolScheduler(queue_capacity)
+        self.depth_changed = asyncio.Event()
         self.resync_required: set[str] = set()
         # Differential depth is event-driven in observed production traffic: a
         # quiet book can be unchanged for minutes.  Connection activity proves
@@ -158,6 +160,8 @@ class PublicMarketSocket:
             self.resync_required.add(symbol)
             return symbol
         self.dirty.mark(symbol)
+        self.adverse_dirty.mark(symbol)
+        self.depth_changed.set()
         return symbol
 
     async def frames(self) -> AsyncIterator[dict[str, Any]]:

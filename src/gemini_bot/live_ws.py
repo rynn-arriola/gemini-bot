@@ -25,6 +25,10 @@ from .rate_limits import AdmissionGovernor, Priority
 PRODUCTION_WS = "wss://ws.gemini.com"
 
 
+class MutationNotSentError(RuntimeError):
+    """A local last-moment guard rejected a mutation before socket send."""
+
+
 class LiveWebSocket:
     """Authenticated production transport; no simulation or automatic mutations."""
 
@@ -86,7 +90,10 @@ class LiveWebSocket:
                 await asyncio.sleep(delay)
                 delay = self._governor.admit("private_ws", priority)
             if payload.get("method") == "order.place" and self.mutation_guard is not None:
-                self.mutation_guard(payload)
+                try:
+                    self.mutation_guard(payload)
+                except Exception as exc:
+                    raise MutationNotSentError(str(exc)) from exc
             await self._connection.send(json.dumps(payload, separators=(",", ":")))
 
     async def subscribe_account(self) -> None:
@@ -126,7 +133,11 @@ class LiveWebSocket:
         # Persist/own the intent before the only network mutation. Once send is
         # attempted its outcome is ambiguous until account reconciliation.
         self._ledger.mark_sent(intent.client_order_id)
-        await self._send(payload, Priority.ORDER_SAFETY)
+        try:
+            await self._send(payload, Priority.ORDER_SAFETY)
+        except MutationNotSentError:
+            self._ledger.mark_terminal(intent.client_order_id)
+            raise
         return intent.client_order_id
 
     async def place_ioc_entry(self, leg: QuoteLeg) -> str:
@@ -136,7 +147,11 @@ class LiveWebSocket:
         intent = self._ledger.prepare(leg, OrderPurpose.ENTRY)
         payload = immediate_entry_request(self._next_id(), intent)
         self._ledger.mark_sent(intent.client_order_id)
-        await self._send(payload, Priority.ORDER_SAFETY)
+        try:
+            await self._send(payload, Priority.ORDER_SAFETY)
+        except MutationNotSentError:
+            self._ledger.mark_terminal(intent.client_order_id)
+            raise
         return intent.client_order_id
 
     async def cancel(self, order_id: str) -> None:
@@ -150,7 +165,11 @@ class LiveWebSocket:
         intent = self._ledger.prepare(leg, OrderPurpose.EXIT)
         payload = exit_request(self._next_id(), intent, signed_position=signed_position)
         self._ledger.mark_sent(intent.client_order_id)
-        await self._send(payload, Priority.ORDER_SAFETY)
+        try:
+            await self._send(payload, Priority.ORDER_SAFETY)
+        except MutationNotSentError:
+            self._ledger.mark_terminal(intent.client_order_id)
+            raise
         return intent.client_order_id
 
     async def cancel_all(self) -> None:

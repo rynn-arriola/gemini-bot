@@ -127,25 +127,22 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         "max_pending_orders", "max_two_sided_quotes", "max_tracked_markets",
         "max_gross_reservation_usd", "max_market_exposure_usd",
         "max_stressed_exit_loss_usd", "risk_window_stop_loss_usd",
-        "risk_window_timezone", "risk_window_start_hours", "risk_window_pending_order_tiers",
+        "risk_window_accounting", "risk_window_timezone", "risk_window_start_hours",
+        "risk_window_pending_order_policy",
         "max_inventory_age_seconds", "force_exit_before_expiry_seconds", "monetary_stop_authorities",
     }
-    if set(raw) != required or raw["policy_version"] != 1 or raw["platform"] != "windows":
+    if set(raw) != required or raw["policy_version"] != 2 or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
         raise ConfigurationError("risk-window clock does not match approved Eastern windows")
     if raw["monetary_stop_authorities"] != 1:
         raise ConfigurationError("policy must contain exactly one monetary stop authority")
-    expected_tiers = [
-        {"remaining_fraction": "1.00", "max_pending_orders": 30},
-        {"remaining_fraction": "0.80", "max_pending_orders": 25},
-        {"remaining_fraction": "0.60", "max_pending_orders": 20},
-        {"remaining_fraction": "0.40", "max_pending_orders": 15},
-        {"remaining_fraction": "0.20", "max_pending_orders": 10},
-        {"remaining_fraction": "0.00", "max_pending_orders": 0},
-    ]
-    if raw["risk_window_pending_order_tiers"] != expected_tiers:
-        raise ConfigurationError("risk-window order tiers differ from approved policy")
+    if raw["risk_window_accounting"] != "closed_fill_realized_pnl":
+        raise ConfigurationError("risk-window accounting must use closed-fill realized P&L")
+    if raw["risk_window_pending_order_policy"] != "fixed_30_until_stop":
+        raise ConfigurationError("risk-window pending-order policy must remain fixed until stop")
+    if raw["max_pending_orders"] != 30:
+        raise ConfigurationError("fixed pending-order policy requires exactly 30 orders")
     strategy = StrategyConfig(
         quote_quantity=Decimal(raw["quote_quantity"]),
         quote_offset_ticks=int(raw["quote_offset_ticks"]),

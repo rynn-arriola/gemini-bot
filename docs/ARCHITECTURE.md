@@ -47,7 +47,7 @@ Sports events are not quoted within 20 minutes of play. Their published event `s
 
 ## Order and position ownership
 
-Pending orders have a hard cap of 30. Positions do not count as pending orders because a fill replaces order reservation with a different risk object. This does not make positions free: the approved $300 gross and $90 per-market exposure gates, settlement state, and time exits remain independent controls. Up to 32 market owners may be tracked, but at most 15 can be fully two-sided simultaneously.
+Pending orders have a hard cap of 30. Positions do not falsely increment the exchange pending-order count because a fill replaces an order with a different risk object. However, every open-position pool reserves one of the 15 active two-sided pool allocations (two planned quote slots), so the selector cannot replace it with a sixteenth market before the position is flattened. Positions also remain subject to the approved $300 gross and $90 per-market exposure gates, settlement state, and time exits. Up to 32 market owners may be tracked, but at most 15 can be fully two-sided simultaneously.
 
 Each order has a durable client ID and intent state. A send timeout is ambiguous; no blind retry is allowed. Startup/reconnect reconstructs open orders, positions, balances, and unresolved intents before activation.
 
@@ -78,7 +78,7 @@ The deadline can only tighten through restart. Unknown account/book state halts 
 
 ## Six-hour loss windows
 
-Independent risk windows begin at 00:00, 06:00, 12:00, and 18:00 America/New_York and use civil-time boundaries across daylight-saving transitions. Reconciled adjusted equity supplies the opening/current/marked values. At $5, $10, $15, $20, and $25 of loss, the maximum pending-order cap ratchets from 30 to 25, 20, 15, 10, and 0. Open marks can provisionally tighten or pause entry but cannot erase realized loss. The $25 window threshold is the single monetary stop-loss authority; there is no daily, session, market, or position loss stop.
+Independent risk windows begin at 00:00, 06:00, 12:00, and 18:00 America/New_York and use civil-time boundaries across daylight-saving transitions. The risk ledger replays durable bot fills, includes their recorded fees, and realizes P&L only when a matched position lifecycle returns flat. Operator-confirmed manual flattening resets unmatched local basis without fabricating a close. Open inventory and executable marks do not enter this meter. Pending-entry capacity remains fixed at 30 below $30 realized loss and becomes zero at HARD; the reached high-water persists for the window. This $30 threshold is the single monetary stop-loss authority; there is no daily, session, market, or position loss stop.
 
 ## Operational logging
 

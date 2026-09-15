@@ -81,7 +81,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(risk.max_gross_reservation_usd, Decimal("300"))
         self.assertEqual(risk.max_market_exposure_usd, Decimal("90"))
         self.assertEqual(risk.max_stressed_exit_loss_usd, Decimal("40"))
-        self.assertEqual(risk.risk_window_loss_usd, Decimal("25"))
+        self.assertEqual(risk.risk_window_loss_usd, Decimal("30"))
         self.assertEqual(risk.max_two_sided_quotes, 15)
         self.assertEqual(risk.max_tracked_markets, 32)
 
@@ -217,6 +217,19 @@ class RankingTests(unittest.TestCase):
         )
         self.assertEqual([item.pool_id for item in replaced], ["challenger"])
         self.assertEqual(pool_ids, {"challenger"})
+
+    def test_open_position_pool_reserves_active_capacity(self) -> None:
+        challenger = rank_candidate(RankInput(
+            RewardPool("challenger", D("200")), rules("A"), book("A"),
+        ), now=NOW)
+        selected, pool_ids = select_sticky_candidates(
+            [challenger], sticky_pool_ids=set(),
+            locked_pool_ids={"position-pool"}, permitted_symbols={"A"},
+            maximum_active_pools=1, actionable=lambda _: True,
+            entry_time_valid=lambda _: True,
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(pool_ids, {"position-pool"})
 
 
 class ProfitabilityTests(unittest.TestCase):
@@ -481,21 +494,20 @@ class InventoryTests(unittest.TestCase):
 
 class RiskWindowTests(unittest.TestCase):
     def test_six_hour_eastern_boundaries(self) -> None:
-        policy = RiskWindowPolicy(Decimal("25"))
+        policy = RiskWindowPolicy(Decimal("30"))
         start, end = policy.bounds(datetime(2026, 9, 15, 15, 0, tzinfo=timezone.utc))
         self.assertEqual(start.hour, 10)  # 06:00 EDT
         self.assertEqual(end.hour, 16)    # 12:00 EDT
 
-    def test_loss_reduces_pending_cap_and_mark_can_pause(self) -> None:
-        policy = RiskWindowPolicy(Decimal("25"))
-        self.assertEqual(policy.pending_order_cap(Decimal("0"), Decimal("5")), 25)
-        self.assertEqual(policy.pending_order_cap(Decimal("0"), Decimal("25")), 0)
+    def test_cap_stays_fixed_until_realized_hard_stop(self) -> None:
+        policy = RiskWindowPolicy(Decimal("30"))
+        self.assertEqual(policy.pending_order_cap(Decimal("29.99")), 30)
+        self.assertEqual(policy.pending_order_cap(Decimal("30")), 0)
 
-    def test_positions_are_not_added_to_window_order_count(self) -> None:
+    def test_open_position_marks_do_not_reduce_pending_capacity(self) -> None:
         mark = evaluate_window(
-            RiskWindowPolicy(Decimal("25")), now=NOW,
-            opening_equity=Decimal("100"), current_equity=Decimal("100"),
-            marked_equity=Decimal("99"),
+            RiskWindowPolicy(Decimal("30")), now=NOW,
+            realized_pnl=Decimal("-10"),
         )
         self.assertEqual(mark.pending_order_cap, 30)
 

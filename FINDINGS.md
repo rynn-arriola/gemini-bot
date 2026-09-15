@@ -1,5 +1,11 @@
 # Gemini findings
 
+## September 15, 2026: second production fill/exit evidence
+
+- The supervised run filled BUY YES 10 on one ETH and one SOL hourly interval. Their five-minute SELL YES exits both filled completely; the account snapshot ended flat/order-free. Recorded round-trip P&L was approximately -$2.42 including fees.
+- The old $13.10 risk reading was not closed trading loss; it came from open-position executable marks. The two completed lifecycles are the correct durable realized evidence under the owner's replacement policy.
+- A filled IOC can flatten after one REST view still reports the former position. Preparing a retry before that convergence is safe only if the final pre-send guard can prove non-send and control then waits for fresh REST/WebSocket agreement. The prior code proved non-send but persisted ambiguity anyway.
+
 ## September 15, 2026: first production fills and exit-recovery defect
 
 - The live reward-catalog run filled BUY NO 10 on one ETH and one SOL interval contract. The ETH five-minute exit sent SELL NO 10 @ $0.90 IOC; Gemini terminated it `CANCELED` with zero filled. No SOL exit was attempted because the runtime halted on the first symbol.
@@ -79,7 +85,7 @@
 
 - Owner-authorized aggressive LIMIT+IOC round trips validated both directions on current reward contracts. YES used BUY 10 at $0.03 then SELL 10 at $0.02. NO used BUY 10 at $0.06 then SELL 10 at a $0.05 average. All four orders filled completely; final authenticated REST reconciliation showed zero positions and zero active orders, and the journal had no unknown intents. Total gross spread cost was $0.20 before any fees. The fully filled NO IOC was reported historically as `cancelled` with filled quantity 10, confirming that executed quantity—not terminal status—must determine fills. These tests validate Gemini's same-outcome SELL reduction paths, not reward eligibility, maker uptime, or profitability.
 - Live commissioning established an empirically enforced 36-character maximum for `clientOrderId`: a longer ID received status 400 / code -1013 and created no order or position. The generator and regression test now enforce the observed limit.
-- The user chose a native-Windows live product, 10-contract base per reward leg, and a 30-pending-order ceiling separate from positions. Continuous live activation has not occurred; only the separately authorized bounded entry/exit canary was performed.
+- The user chose a native-Windows live product, 10-contract base per reward leg, and a 30-pending-order ceiling distinct from actual positions. Later explicitly authorized bounded live sessions did occur; their fills and recovery evidence are recorded above and in `STATUS.md`.
 - The useful Polymarket lessons are ownership, restart durability, cancel-confirm-exact-exit ordering, time-aware inventory reduction, fail-closed state, and disciplined documentation. Gemini-specific scoring, two-outcome order representation, 50% daily uptime, shared pools, WebSocket protocol, limits, and settlement remain independent designs.
 - Production core now passes 49 deterministic tests. The preserved observer suite still passes 25 tests. Coverage includes shared-pool deduplication, eligibility, stale books, impossible uptime, sequence gaps, MOC and IOC envelopes, entry/exit purpose separation, all four side/outcome deltas, ambiguous-send retry refusal, partial/duplicate/terminal fill semantics, signed-position exact YES/NO exits, complete-position snapshots, haircut-adjusted depth refusal, activation reconciliation, 30-order capacity, six-hour Eastern risk windows, timed/expiry exits, server cooldowns, coalescing, durable intents/deadlines, and native Windows process ownership.
 - Ranking uses Gemini's known rules but intentionally calls its local curve a `quality_proxy`. The exact quadratic spread function and final competing daily scores are not public, so priority cannot honestly be labeled expected dollars.

@@ -1,12 +1,12 @@
 # Next work
 
-The repaired September 15 profitability-v2 process is live under the version-5 Windows supervisor from pushed commit `6f52ed2`. It started after fresh authenticated flat/order-free preflight and currently owns the only mutation session. Monitor the next fill and verify the bounded exact-residual exit; do not induce a crash or duplicate process merely to test supervision.
+The September 15 profitability-v2 process is halted after two successful five-minute exits exposed a definitely-unsent retry-intent bookkeeping race. Finish the fixed-30/$30-realized-HARD and WebSocket adverse-move release, authenticate flat/order-free state plus absence of the two rejected client IDs from Gemini history, reconcile those local rows, and run a fresh preflight. Do not restart on the old policy/build-bound permit.
 
 After the Eastern reward day closes, compare authenticated liquidity reward, maker-rebate and fee records with v2's recorded reward/share/cost proxies. Calibrate projected fills and adverse-move cost only from reconciled evidence; public trade touches remain non-authoritative. Confirm the process drains at permit expiry.
 
 For normal operation after today, omit the uptime override. Form a sticky top-ranked cohort for each scoring window, target 75% local qualifying snapshots against Gemini's 50% requirement, and rotate only when a pool ends, becomes unsafe/ineligible, cannot still qualify, or has completed its target. Do not scatter uptime across more pools than the 30-order/15-pool capacity can support.
 
-The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification. The repeat preflight and production preparation passed data/account readiness. The [maker canary record](docs/MAKER_CANARY_2026-09-15.md) now includes successful one- and two-sided resting/cancellation tests. The separately authorized September 15 continuous observation is active.
+The earlier [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification. The repeat preflight and production preparation passed data/account readiness. The [maker canary record](docs/MAKER_CANARY_2026-09-15.md) includes successful one- and two-sided resting/cancellation tests. The continuous observation is currently halted pending the newer release and fresh authorization artifact.
 
 ## Preflight blockers repaired offline
 

@@ -107,42 +107,99 @@ class ReconciliationTests(unittest.TestCase):
 
 
 class PersistentRiskTests(unittest.TestCase):
-    def test_loss_and_classification_only_tighten_across_restart(self) -> None:
+    def test_only_a_closed_fill_lifecycle_enters_realized_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "risk.sqlite")
+            start, end = RiskWindowPolicy(Decimal("30")).bounds(NOW)
+            store.record_fill(
+                trade_id="entry", order_id="o1", client_order_id="c1",
+                symbol="X", side="BUY", outcome="YES", quantity=Decimal("10"),
+                price=Decimal(".40"), fee=Decimal(".01"), event_at=NOW,
+            )
+            self.assertEqual(store.realized_pnl_for_window(start, end), (Decimal("0"), True))
+            store.record_fill(
+                trade_id="exit", order_id="o2", client_order_id="c2",
+                symbol="X", side="SELL", outcome="YES", quantity=Decimal("10"),
+                price=Decimal(".30"), fee=Decimal(".02"),
+                event_at=NOW + timedelta(minutes=1),
+            )
+            self.assertEqual(
+                store.realized_pnl_for_window(start, end),
+                (Decimal("-1.03"), True),
+            )
+            store.close()
+
+    def test_manual_flat_resets_unmatched_basis_without_fabricating_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "risk.sqlite")
+            start, end = RiskWindowPolicy(Decimal("30")).bounds(NOW)
+            store.record_fill(
+                trade_id="old-entry", order_id="o1", client_order_id="c1",
+                symbol="X", side="BUY", outcome="NO", quantity=Decimal("10"),
+                price=Decimal(".70"), fee=Decimal("0"), event_at=NOW,
+            )
+            reset_at = NOW + timedelta(minutes=1)
+            store.connection.execute(
+                "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
+                (reset_at.isoformat(), "operator_manual_flat_reconciled", "{}"),
+            )
+            store.record_fill(
+                trade_id="new-entry", order_id="o2", client_order_id="c2",
+                symbol="X", side="BUY", outcome="YES", quantity=Decimal("10"),
+                price=Decimal(".40"), fee=Decimal("0"),
+                event_at=NOW + timedelta(minutes=2),
+            )
+            store.record_fill(
+                trade_id="new-exit", order_id="o3", client_order_id="c3",
+                symbol="X", side="SELL", outcome="YES", quantity=Decimal("10"),
+                price=Decimal(".35"), fee=Decimal("0"),
+                event_at=NOW + timedelta(minutes=3),
+            )
+            pnl, complete = store.realized_pnl_for_window(start, end)
+            self.assertEqual(pnl, Decimal("-.50"))
+            self.assertTrue(complete)
+            store.close()
+
+    def test_realized_loss_keeps_fixed_cap_until_hard_and_tightens_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "risk.sqlite"
             store = SQLiteJournal(path)
-            policy = RiskWindowPolicy(Decimal("25"))
+            policy = RiskWindowPolicy(Decimal("30"))
             first = PersistentRiskWindow(policy, store).update(
-                now=NOW, adjusted_equity=Decimal("300"), classification_complete=True
+                now=NOW, realized_pnl=Decimal("0"), classification_complete=True
             )
             self.assertEqual(first.pending_order_cap, 30)
             loss = PersistentRiskWindow(policy, store).update(
-                now=NOW + timedelta(minutes=1), adjusted_equity=Decimal("289.999999999999999999"),
+                now=NOW + timedelta(minutes=1), realized_pnl=Decimal("-29.999999999999999999"),
                 classification_complete=False,
             )
-            self.assertEqual(loss.loss_high_water, Decimal("10.000000000000000001"))
-            self.assertEqual(loss.pending_order_cap, 20)
+            self.assertEqual(loss.loss_high_water, Decimal("29.999999999999999999"))
+            self.assertEqual(loss.pending_order_cap, 30)
+            hard = PersistentRiskWindow(policy, store).update(
+                now=NOW + timedelta(minutes=2), realized_pnl=Decimal("-30"),
+                classification_complete=True,
+            )
+            self.assertEqual(hard.pending_order_cap, 0)
             store.close()
             reopened = SQLiteJournal(path)
             recovered = PersistentRiskWindow(policy, reopened).update(
-                now=NOW + timedelta(minutes=2), adjusted_equity=Decimal("310"),
+                now=NOW + timedelta(minutes=3), realized_pnl=Decimal("10"),
                 classification_complete=True,
             )
-            self.assertEqual(recovered.loss_high_water, loss.loss_high_water)
-            self.assertEqual(recovered.pending_order_cap, 20)
+            self.assertEqual(recovered.loss_high_water, hard.loss_high_water)
+            self.assertEqual(recovered.pending_order_cap, 0)
             self.assertFalse(recovered.classification_complete)
             reopened.close()
 
-    def test_new_six_hour_window_gets_new_opening_equity(self) -> None:
+    def test_new_six_hour_window_gets_new_realized_loss_high_water(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteJournal(Path(directory) / "risk.sqlite")
-            policy = PersistentRiskWindow(RiskWindowPolicy(Decimal("25")), store)
-            policy.update(now=NOW, adjusted_equity=Decimal("300"), classification_complete=True)
+            policy = PersistentRiskWindow(RiskWindowPolicy(Decimal("30")), store)
+            policy.update(now=NOW, realized_pnl=Decimal("-20"), classification_complete=True)
             later = policy.update(
-                now=NOW + timedelta(hours=6), adjusted_equity=Decimal("280"),
+                now=NOW + timedelta(hours=6), realized_pnl=Decimal("0"),
                 classification_complete=True,
             )
-            self.assertEqual(later.opening_equity, Decimal("280"))
             self.assertEqual(later.loss_high_water, Decimal("0"))
             store.close()
 
