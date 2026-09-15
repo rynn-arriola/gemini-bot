@@ -362,9 +362,12 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
                 }]}}
 
         class Public:
-            def __init__(self): self.books = {}
+            def __init__(self):
+                self.books = {}
+                self.last_message_at = None
             async def connect(self): return None
             async def subscribe(self, symbols):
+                self.last_message_at = datetime.now(timezone.utc)
                 for symbol in symbols:
                     value = LocalBook(symbol)
                     value.apply_snapshot(

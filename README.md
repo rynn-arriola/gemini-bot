@@ -1,8 +1,8 @@
 # Gemini Predictions liquidity-rewards bot
 
-**Repaired offline; live remains unapproved.** All 15 review regressions now pass, with 106 production tests and 25 observer tests passing. See the [repair evidence and limits](docs/REPAIR_REPORT_2026-09-15.md) and [next commissioning steps](NEXT.md). No bot was started and no live permit exists.
+**Live preflight blocked; trading remains stopped.** Earlier offline repairs passed, but the [five-minute read-only preflight](docs/PREFLIGHT_2026-09-15.md) exposed one-sided-market startup and quiet-book freshness issues. Account checks passed; no orders or cancellations were sent. See [NEXT.md](NEXT.md) before any further commissioning.
 
-This is a native-Windows live-trading build. The production runtime is implemented under `src/gemini_bot`, but no production preparation or maker canary has been run and no live activation permit exists. Construction, tests, release validation, and process startup cannot grant trading approval. The earlier public-data paper observer remains research evidence, not the execution engine.
+This is a native-Windows live-trading build. The production runtime is implemented under `src/gemini_bot`. Read-only production preparation has now been attempted and failed market readiness; no live maker canary or continuous reward run has started and no live activation permit exists. Construction, tests, release validation, and process startup cannot grant trading approval. The earlier public-data paper observer remains research evidence, not the execution engine.
 
 - [AI operator entry point](AI_OPERATOR.md)
 - [Current status](STATUS.md)

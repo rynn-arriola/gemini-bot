@@ -1,6 +1,13 @@
 # Next work
 
-The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification. The bot is stopped and live operation remains unapproved.
+The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification, but the subsequent [five-minute live read-only preflight](docs/PREFLIGHT_2026-09-15.md) exposed startup/data-health blockers. The bot is stopped and live trading remains unapproved.
+
+## New blockers from live preflight
+
+1. With owner approval, fix readiness so four one-sided/unusable selected markets do not block every otherwise valid market. Preserve all per-market trade gates and exact-symbol approval.
+2. Diagnose/repair the distinction between quiet unchanged books and genuinely stale/unconfirmed depth. Keep bounded WS verification and rate limits; do not simply disable freshness checks.
+3. Add live-shape offline tests, then repeat an authorized five-minute read-only preflight. The completed run used 300.516 seconds, with healthy account reconciliation and zero order/cancel commands, but did not pass production readiness.
+4. Ensure any prepare-only entry point preserves the diagnostic's explicit no-cancel-on-disconnect and mutation-block guarantees. Do not launch the live maker canary until these blockers are closed.
 
 ## Completed offline
 

@@ -1,5 +1,7 @@
 # Live commissioning
 
+Latest evidence: the owner-approved [five-minute read-only preflight](PREFLIGHT_2026-09-15.md) completed but failed production market readiness. Stage 1 is attempted, not passed. Repair one-sided-cohort startup and verify quiet-book freshness handling before any maker canary. Earlier "not run" statements below describe the pre-preflight checkpoint.
+
 **Offline review repairs verified, September 15:** all 15 regression cases now pass. Live preparation and maker commissioning remain unapproved and unperformed. Read the [repair report and remaining limits](REPAIR_REPORT_2026-09-15.md) before connecting.
 Separately authorized LIMIT+IOC entry/exit round trips have validated both YES and NO side/outcome semantics and ended globally flat. They did not activate the reward bot or complete the maker-quote stages below. Commission remaining stages in bounded steps and record evidence after each stage.
 

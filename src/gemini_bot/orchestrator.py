@@ -172,12 +172,23 @@ class ProductionOrchestrator:
                 if task.done():
                     task.result()
                     raise RuntimeError("stream ended during reconciliation")
-            books_ready = bool(self.universe) and all(
+            books_initialized = bool(self.universe) and all(
                 (book := self.public.books.get(item.rules.symbol)) is not None
-                and book.synchronized and book.top() is not None
+                and book.synchronized
                 for item in self.universe
             )
-            if self.account.readiness.complete and books_ready:
+            usable_book_exists = any(
+                (book := self.public.books.get(item.rules.symbol)) is not None
+                and book.synchronized and book.top() is not None
+                and self._entry_time_valid(item.rules.symbol)
+                for item in self.universe
+            )
+            if (
+                self.account.readiness.complete
+                and books_initialized
+                and usable_book_exists
+                and self._public_stream_fresh()
+            ):
                 return
             await asyncio.sleep(0.05)
         raise TimeoutError("account/depth startup snapshots did not become ready")
@@ -281,7 +292,9 @@ class ProductionOrchestrator:
             self._last_snapshot = after
             now = _utc_now()
             self._uptime = sample_and_load_progress(
-                self.journal, self.universe, self.account.reducer, now=now, books=self.public.books
+                self.journal, self.universe, self.account.reducer, now=now,
+                books=self.public.books,
+                market_data_verified_at=self._market_data_verified_at(),
             )
             self.ranked = rank_live_universe(
                 self.universe, self.public.books, now=now,
@@ -289,6 +302,7 @@ class ProductionOrchestrator:
                 offset_ticks=self.config.strategy.quote_offset_ticks,
                 uptime=self._uptime,
                 account=self.account.reducer,
+                market_data_verified_at=self._market_data_verified_at(),
             )
             atomic_write_json(
                 self.directory / "rank-report.json",
@@ -379,10 +393,26 @@ class ProductionOrchestrator:
                     or params["eventOutcome"] != ("YES" if position > 0 else "NO")):
                 raise RuntimeError("position changed while waiting to send exact exit")
 
+    def _market_data_verified_at(self) -> datetime | None:
+        observed = getattr(self.public, "last_message_at", None)
+        if observed is not None:
+            return observed
+        # Test adapters and old recorded fixtures may not expose connection
+        # metadata. Their newest applied book timestamp is the conservative
+        # equivalent; production PublicMarketSocket always exposes it.
+        values = [book.observed_at for book in self.public.books.values() if book.observed_at is not None]
+        return max(values) if values else None
+
+    def _public_stream_fresh(self) -> bool:
+        observed = self._market_data_verified_at()
+        if observed is None:
+            return False
+        age = (_utc_now() - observed).total_seconds()
+        return 0 <= age <= float(self.config.strategy.stale_book_seconds)
+
     def _book_fresh(self, symbol: str) -> bool:
         book = self.public.books.get(symbol)
-        return bool(book is not None and book.synchronized and book.observed_at is not None
-                    and 0 <= (_utc_now() - book.observed_at).total_seconds() <= float(self.config.strategy.stale_book_seconds))
+        return bool(book is not None and book.synchronized and self._public_stream_fresh())
 
     async def _quote_pair_locked(self, candidate: Any) -> None:
         if not self.gate.may_submit or not candidate.eligible_now or candidate.quote is None:
@@ -737,7 +767,9 @@ class ProductionOrchestrator:
                     if clock >= next_uptime_at:
                         now = _utc_now()
                         self._uptime = sample_and_load_progress(
-                            self.journal, self.universe, self.account.reducer, now=now, books=self.public.books
+                            self.journal, self.universe, self.account.reducer, now=now,
+                            books=self.public.books,
+                            market_data_verified_at=self._market_data_verified_at(),
                         )
                         next_uptime_at = clock + 60
                     self.ranked = rank_live_universe(
@@ -746,6 +778,7 @@ class ProductionOrchestrator:
                         offset_ticks=self.config.strategy.quote_offset_ticks,
                         uptime=self._uptime,
                         account=self.account.reducer,
+                        market_data_verified_at=self._market_data_verified_at(),
                     )
                     if clock >= getattr(self, "_next_report_at", 0.0):
                         atomic_write_json(

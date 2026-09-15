@@ -1,6 +1,8 @@
 # Gemini current status
 
-- **Repaired offline; stopped; live activation still requires owner approval.** No authenticated network request, real order, canary or runtime launch occurred during the review-repair turn. No real activation permit was created.
+- **Live preflight blocked; stopped; no trading authorized.** The owner-approved five-minute read-only preflight completed September 15 at 10:34:43 Eastern. Account/API consistency passed, but production market-data readiness failed. No orders, cancellations or activation permit consumption occurred; both connections are closed.
+- Four one-sided markets blocked readiness of the entire 32-market cohort. Only 2–5 books passed the three-second freshness rule per sample. These live-feed conditions require startup-selection/freshness repairs and another preflight before live commissioning. See [preflight evidence](docs/PREFLIGHT_2026-09-15.md).
+- Read-only CPU averaged 0.411% of one logical core; no sequence gaps, dropped work/logs or throttle failures were observed. Account was flat at the recorded start/final checks. No balances are published. No matching Gemini Python process remained at completion.
 - September 15, 2026: **106 production tests and 25 observer tests pass**, including all 15 original review regressions. Native Windows release/storage validation, Python compilation and PowerShell launcher syntax checks passed.
 - Current evidence: [repair report](docs/REPAIR_REPORT_2026-09-15.md). The [original review](docs/CODE_REVIEW_2026-09-15.md) is retained as pre-repair evidence, not current source behavior.
 - Approved policy is unchanged: 10 contracts/leg; 30 pending orders; $300 gross/$90 market; $40 stressed-exit entry filter; exactly one $25 six-hour Eastern monetary stop; 900-second inventory and 300-second pre-expiry exits; two ticks behind touch; 75% local uptime target.

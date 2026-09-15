@@ -41,6 +41,24 @@ class PublicMarketSocket:
         self.books: dict[str, LocalBook] = {}
         self.dirty = DirtySymbolScheduler(queue_capacity)
         self.resync_required: set[str] = set()
+        # Differential depth is event-driven in observed production traffic: a
+        # quiet book can be unchanged for minutes.  Connection activity proves
+        # that the shared sequenced stream is alive; LocalBook.observed_at keeps
+        # its separate meaning of "last state change for this symbol".
+        self.last_message_at: datetime | None = None
+
+    def note_message(self, observed_at: datetime | None = None) -> datetime:
+        timestamp = observed_at or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None:
+            raise ValueError("WebSocket observation timestamp must be timezone-aware")
+        self.last_message_at = timestamp.astimezone(timezone.utc)
+        return self.last_message_at
+
+    def stream_fresh(self, *, now: datetime, stale_after_seconds: Decimal) -> bool:
+        if now.tzinfo is None or stale_after_seconds <= 0 or self.last_message_at is None:
+            return False
+        age = Decimal(str((now - self.last_message_at).total_seconds()))
+        return Decimal("0") <= age <= stale_after_seconds
 
     async def connect(self) -> None:
         self._connection = await websockets.connect(
@@ -94,6 +112,7 @@ class PublicMarketSocket:
         await self._send("SUBSCRIBE", [f"{symbol}@depth"], Priority.MARKET_RESYNC)
 
     def apply_frame(self, frame: dict[str, Any], observed_at: datetime | None = None) -> str | None:
+        timestamp = self.note_message(observed_at)
         if "status" in frame and frame["status"] != 200:
             if frame["status"] in {418, 429}:
                 self._governor.apply_server_cooldown("public_ws", 60)
@@ -108,7 +127,6 @@ class PublicMarketSocket:
         last = int(frame["u"])
         bids = _levels(frame.get("b", []))
         asks = _levels(frame.get("a", []))
-        timestamp = observed_at or datetime.now(timezone.utc)
         try:
             if not local.synchronized:
                 local.apply_snapshot(bids, asks, first, last, timestamp)
@@ -127,4 +145,5 @@ class PublicMarketSocket:
             if isinstance(raw, str):
                 value = json.loads(raw)
                 if isinstance(value, dict):
+                    self.note_message()
                     yield value

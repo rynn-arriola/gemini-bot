@@ -219,6 +219,52 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("X", self.runtime.account.blocked_entries)
         self.assertFalse(self.runtime.gate.may_submit)
 
+    async def test_one_sided_market_does_not_block_initialized_cohort(self):
+        one_sided = LocalBook("Y")
+        one_sided.apply_snapshot([(D(".20"), D("25"))], [], 1, 1, NOW)
+        self.runtime.public.books["Y"] = one_sided
+        self.runtime.public.last_message_at = NOW
+        self.runtime.universe = [
+            RewardedContract("E1", candidate_pool(), candidate_rules(), (NOW + timedelta(hours=2)).isoformat()),
+            RewardedContract(
+                "E2", type(candidate_pool())("pool-y", D("50")),
+                type(candidate_rules())("Y", D(".01"), D("1"), D("1")),
+                (NOW + timedelta(hours=2)).isoformat(),
+            ),
+        ]
+        self.runtime._expiry["Y"] = NOW + timedelta(hours=2)
+        self.runtime.account.subscription_acknowledged = True
+        await self.runtime._wait_ready(.1)
+
+    async def test_quiet_book_uses_fresh_shared_stream_continuity(self):
+        quiet = book()
+        quiet.observed_at = NOW - timedelta(minutes=10)
+        self.runtime.public.books["X"] = quiet
+        self.runtime.public.last_message_at = NOW
+        self.assertTrue(self.runtime._book_fresh("X"))
+        rows = rank_live_universe(
+            [RewardedContract("E", candidate_pool(), candidate_rules(), (NOW + timedelta(hours=2)).isoformat())],
+            {"X": quiet}, now=NOW, quantity=D("10"), offset_ticks=2,
+            account=self.runtime.account.reducer, market_data_verified_at=NOW,
+        )
+        self.assertTrue(rows[0].eligible_now)
+
+    async def test_stale_shared_stream_blocks_every_entry_even_if_book_changed_recently(self):
+        self.runtime.public.last_message_at = NOW - timedelta(seconds=4)
+        self.assertFalse(self.runtime._book_fresh("X"))
+        with self.assertRaises(RuntimeError):
+            self.runtime._validate_send(self.payload())
+
+    async def test_one_sided_book_is_initialized_but_not_ranked_for_pair_strategy(self):
+        one_sided = LocalBook("X")
+        one_sided.apply_snapshot([(D(".48"), D("100"))], [], 1, 1, NOW)
+        rows = rank_live_universe(
+            [RewardedContract("E", candidate_pool(), candidate_rules(), (NOW + timedelta(hours=2)).isoformat())],
+            {"X": one_sided}, now=NOW, quantity=D("10"), offset_ticks=2,
+            market_data_verified_at=NOW,
+        )
+        self.assertEqual(rows, [])
+
     async def test_bounded_canary_uses_activation_safety_and_terminal_drain(self):
         runtime = self.runtime
         strategy, risk = load_policy()

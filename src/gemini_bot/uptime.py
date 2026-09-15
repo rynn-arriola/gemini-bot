@@ -27,9 +27,17 @@ def parse_reward_window(contract: RewardedContract) -> tuple[datetime, datetime]
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
-def locally_qualifying(contract: RewardedContract, account: AccountReducer, book: LocalBook | None = None, *, now: datetime | None = None) -> bool:
+def locally_qualifying(
+    contract: RewardedContract,
+    account: AccountReducer,
+    book: LocalBook | None = None,
+    *,
+    now: datetime | None = None,
+    market_data_verified_at: datetime | None = None,
+) -> bool:
+    freshness_at = market_data_verified_at or (book.observed_at if book is not None else None)
     if (book is None or not book.synchronized or book.top() is None or now is None
-            or not 0 <= (now - book.observed_at).total_seconds() <= 3
+            or freshness_at is None or not 0 <= (now - freshness_at).total_seconds() <= 3
             or not contract.pool.active or not contract.rules.active or contract.rules.post_only_mode):
         return False
     midpoint = book.top().midpoint
@@ -52,6 +60,7 @@ def sample_and_load_progress(
     *,
     now: datetime,
     books: dict[str, LocalBook] | None = None,
+    market_data_verified_at: datetime | None = None,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -86,7 +95,10 @@ def sample_and_load_progress(
             store.sample_reward_uptime(
                 pool_id=contract.pool.pool_id, window_start=start, window_end=end,
                 sample_at=now, eligible=contract.pool.active and contract.rules.active,
-                qualifying=locally_qualifying(contract, account, (books or {}).get(contract.rules.symbol), now=now),
+                qualifying=locally_qualifying(
+                    contract, account, (books or {}).get(contract.rules.symbol),
+                    now=now, market_data_verified_at=market_data_verified_at,
+                ),
             )
         eligible, qualifying = store.load_reward_uptime(contract.pool.pool_id, start, end)
         remaining = max(0, int((end - max(now, start)).total_seconds() // 60))

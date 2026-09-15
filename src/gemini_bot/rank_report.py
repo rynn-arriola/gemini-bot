@@ -20,6 +20,7 @@ def rank_live_universe(
     offset_ticks: int,
     uptime: dict[str, UptimeProgress] | None = None,
     account: AccountReducer | None = None,
+    market_data_verified_at: datetime | None = None,
 ) -> list[RankedCandidate]:
     inputs: list[RankInput] = []
     progress = uptime or {}
@@ -40,6 +41,13 @@ def rank_live_universe(
         top = book.top() if book is not None else None
         if top is None:
             continue
+        if market_data_verified_at is not None:
+            # The book's levels may be unchanged while another message on the
+            # same gap-checked WebSocket proves connection continuity.
+            top = type(top)(
+                top.symbol, top.bid, top.bid_size, top.ask, top.ask_size,
+                top.update_id, market_data_verified_at,
+            )
         inputs.append(RankInput(
             pool=contract.pool,
             rules=contract.rules,

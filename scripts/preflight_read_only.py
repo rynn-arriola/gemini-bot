@@ -77,12 +77,15 @@ def sample(runtime):
         quantity=runtime.config.strategy.quote_quantity,
         offset_ticks=runtime.config.strategy.quote_offset_ticks,
         uptime=runtime._uptime, account=runtime.account.reducer,
+        market_data_verified_at=runtime._market_data_verified_at(),
     )
     reasons = Counter(reason for item in ranked for reason in item.reasons)
     return {
         "at": now.isoformat(), "tracked": len(runtime.universe),
         "synchronized": sum(book.synchronized for book in runtime.public.books.values()),
         "fresh_books": sum(runtime._book_fresh(symbol) for symbol in runtime.public.books),
+        "two_sided_books": sum(book.top() is not None for book in runtime.public.books.values()),
+        "public_stream_fresh": runtime._public_stream_fresh(),
         "account_snapshots_fresh": runtime.account.snapshots_fresh,
         "cash_and_positions_matched": runtime.account.equity_classification_complete,
         "eligible_candidates": sum(item.eligible_now for item in ranked),

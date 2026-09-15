@@ -1,5 +1,11 @@
 # Gemini findings
 
+## September 15, 2026: five-minute authenticated read-only preflight — blocked
+
+- Completed 300.516 seconds at 10:34:43 Eastern; 32 markets observed, account streams/reconciliation healthy, no sequence gaps or throttle failures, 0.411% average of one logical CPU core. Zero order/cancel commands, no permit consumed; all connections closed.
+- Production readiness timed out because four selected books had only one side, while startup requires all 32 to be two-sided. Only 2–5 books passed the three-second last-depth-change freshness rule at each sample. These real-feed conditions were not covered by earlier passing offline tests.
+- Full evidence and limits: [preflight report](docs/PREFLIGHT_2026-09-15.md). Trading code was not changed to bypass the failure. Live activation remains blocked pending new repairs and another preflight.
+
 ## September 15, 2026: review repairs verified offline
 
 - 106 production tests plus 25 observer tests pass; this includes all 15 previously failing review regressions and realistic late-fill, exact-exit, transient-loss, cash-ordering, approval, storage, and fake-canary integration cases.
