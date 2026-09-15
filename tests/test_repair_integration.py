@@ -24,7 +24,7 @@ from gemini_bot.public_ws import PublicMarketSocket
 from gemini_bot.rate_limits import AdmissionGovernor, Priority
 from gemini_bot.rank_report import rank_live_universe
 from gemini_bot.risk_windows import RiskWindowPolicy
-from gemini_bot.storage import SQLiteJournal
+from gemini_bot.storage import SQLiteJournal, WindowsOwnerLock
 from gemini_bot.uptime import locally_qualifying
 from gemini_bot.catalog import RewardedContract
 
@@ -92,6 +92,11 @@ class AccountRepairTests(unittest.TestCase):
         self.assertEqual(self.store.get_deadline("X", "YES"), deadline)
         self.assertIn("X", self.account.blocked_entries)
 
+    def test_fill_deadline_honors_earlier_sports_flat_cutoff(self):
+        self.account.hard_exit_cutoff["X"] = NOW + timedelta(seconds=60)
+        self.fill()
+        self.assertEqual(self.store.get_deadline("X", "YES"), NOW + timedelta(seconds=60))
+
     def test_restart_cannot_accept_new_cash_as_fresh_baseline(self):
         restored = AccountRuntime(IntentLedger(self.store), self.store)
         restored.apply({"e": "balanceUpdate", "B": [{"a": "USD", "c": "200", "f": "200"}]})
@@ -115,6 +120,8 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         strategy, risk = load_policy()
         self.runtime = ProductionOrchestrator(LiveConfig("account-fake", "fake-secret", "", True, strategy, risk), Path(self.tmp.name))
+        self.runtime.control_directory = Path(self.tmp.name) / "isolated-control"
+        self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")
         self.runtime.public.books["X"] = book()
         self.runtime._expiry["X"] = NOW + timedelta(hours=2)
         self.runtime._permitted_symbols = {"X"}
@@ -146,6 +153,10 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.runtime._permit_expires_at = NOW
         with self.assertRaises(RuntimeError):
             self.runtime._validate_send(self.payload())
+
+    async def test_sports_entry_stops_twenty_minutes_before_start(self):
+        self.runtime._sports_start["X"] = NOW + timedelta(minutes=20)
+        self.assertFalse(self.runtime._entry_time_valid("X"))
 
     async def test_send_guard_rejects_unapproved_symbol(self):
         self.runtime._permitted_symbols.clear()
@@ -179,6 +190,18 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         payload["params"]["eventOutcome"] = "YES"
         with self.assertRaises(RuntimeError):
             self.runtime._validate_send(payload)
+
+    async def test_sports_entry_stops_at_published_game_start(self):
+        self.runtime._sports_start["X"] = NOW
+        self.assertFalse(self.runtime._entry_time_valid("X"))
+        with self.assertRaises(RuntimeError):
+            self.runtime._validate_send(self.payload())
+
+    async def test_entry_waits_for_contract_effective_time(self):
+        self.runtime._trade_start["X"] = NOW + timedelta(seconds=1)
+        self.assertFalse(self.runtime._entry_time_valid("X"))
+        with self.assertRaises(RuntimeError):
+            self.runtime._validate_send(self.payload())
 
     async def test_live_marks_preserve_transient_loss_between_rest_polls(self):
         account = self.runtime.account
@@ -248,14 +271,15 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.close()
         self.assertIsNone(self.runtime.lock._file)
 
-    async def test_contract_closure_invalidates_permission(self):
-        async def frames():
-            yield {"e": "contractStatus", "s": "x", "n": "Closed"}
-        self.runtime.public.frames = frames
-        with self.assertRaises(RuntimeError):
-            await self.runtime._public_pump()
+    async def test_flat_contract_closure_is_isolated_without_global_halt(self):
+        self.runtime._handle_contract_status({"e": "contractStatus", "s": "x", "n": "Closed"})
         self.assertIn("X", self.runtime.account.blocked_entries)
-        self.assertFalse(self.runtime.gate.may_submit)
+        self.assertTrue(self.runtime.gate.may_submit)
+
+    async def test_contract_closure_with_inventory_halts(self):
+        self.runtime.account.reducer.positions["X"] = D("10")
+        with self.assertRaises(RuntimeError):
+            self.runtime._handle_contract_status({"e": "contractStatus", "s": "x", "n": "Closed"})
 
     async def test_one_sided_market_does_not_block_initialized_cohort(self):
         one_sided = LocalBook("Y")
@@ -345,6 +369,87 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.gate.may_submit)
         status = json.loads((Path(self.tmp.name) / "status.json").read_text())
         self.assertEqual(status["phase"], "stopped_flat")
+
+    async def test_mechanics_canary_can_ignore_only_uptime_proxy(self):
+        runtime = self.runtime
+        strategy, risk = load_policy()
+        runtime.config = LiveConfig("account-fake", "fake-secret", "I_UNDERSTAND_THIS_TRADES_REAL_MONEY", True, strategy, risk)
+        runtime.gate.state = EngineState.READY
+        runtime.universe = [RewardedContract("E", candidate_pool(), candidate_rules(), "2027-01-01T00:00:00Z", NOW.isoformat(), (NOW + timedelta(hours=2)).isoformat())]
+        from gemini_bot.domain import UptimeProgress
+        from gemini_bot.reward_ranking import RankInput, rank_candidate
+        blocked = rank_candidate(
+            RankInput(candidate_pool(), candidate_rules(), book().top(), UptimeProgress(80, 10, 20)),
+            now=NOW,
+        )
+        self.assertEqual(blocked.reasons, ("50% uptime is no longer reachable in the estimated window",))
+        runtime.ranked = [blocked]
+        async def place(leg):
+            intent = runtime.ledger.prepare(leg, OrderPurpose.ENTRY)
+            runtime.ledger.mark_sent(intent.client_order_id)
+            runtime.account.apply({"e": "orderUpdate", "i": leg.outcome.value, "c": intent.client_order_id,
+                                   "s": "X", "S": "BUY", "O": leg.outcome.value,
+                                   "q": "10", "z": "10", "p": str(leg.price), "X": "OPEN"})
+            return intent.client_order_id
+        async def cancel(order_id):
+            runtime.account.apply({"e": "orderUpdate", "i": order_id, "X": "CANCELED", "z": "0", "Z": "0"})
+        async def active():
+            return [{"orderId": order.order_id, "clientOrderId": order.client_order_id, "symbol": order.symbol,
+                     "side": order.side.value, "outcome": order.outcome.value, "price": str(order.price),
+                     "quantity": str(order.original_quantity), "remainingQuantity": str(order.remaining_quantity), "status": "open"}
+                    for order in runtime.account.reducer.orders.values() if order.working]
+        async def history():
+            return [{"orderId": order.order_id, "clientOrderId": order.client_order_id, "status": "cancelled"}
+                    for order in runtime.account.reducer.orders.values() if not order.working]
+        runtime.private = SimpleNamespace(place_maker=AsyncMock(side_effect=place), cancel=AsyncMock(side_effect=cancel), close=AsyncMock())
+        runtime.rest = SimpleNamespace(positions=AsyncMock(return_value=[]), active_orders=active, order_history=history)
+        permit = {"permit_version": 2, "permit_id": "offline-uptime-only", "approved_at": (NOW - timedelta(seconds=1)).isoformat(),
+                  "expires_at": (NOW + timedelta(hours=1)).isoformat(), "maximum_active_pools": 1,
+                  "policy_sha256": policy_digest(DEFAULT_POLICY_PATH), "build_sha256": build_digest(),
+                  "account_fingerprint": hashlib.sha256(b"account-fake").hexdigest(), "symbols": ["X"]}
+        path = Path(self.tmp.name) / "uptime-permit.json"
+        path.write_text(json.dumps(permit), encoding="utf-8")
+        with patch("gemini_bot.activation.datetime") as date:
+            date.now.return_value = NOW
+            from datetime import datetime
+            date.fromisoformat.side_effect = datetime.fromisoformat
+            await runtime.activate(
+                path, commissioning_seconds=2, single_leg=True, ignore_uptime_proxy=True,
+                expected_yes_price=blocked.quote.yes.price,
+            )
+        self.assertEqual(runtime.private.place_maker.await_count, 1)
+        self.assertEqual(runtime.account.reducer.pending_order_count(), 0)
+
+    async def test_uptime_proxy_exception_is_bounded_and_rejects_other_failures(self):
+        runtime = self.runtime
+        runtime._commissioning_ignore_uptime_proxy = True
+        from dataclasses import replace
+        uptime_only = replace(candidate(), eligible_now=False, uptime_feasible=False,
+                              reasons=("50% uptime is no longer reachable in the estimated window",))
+        self.assertTrue(runtime._candidate_actionable(uptime_only))
+        stale_too = replace(uptime_only, reasons=("stale market data", "50% uptime is no longer reachable in the estimated window"))
+        self.assertFalse(runtime._candidate_actionable(stale_too))
+        runtime._commissioning_expected_yes_price = uptime_only.quote.yes.price + D(".01")
+        self.assertFalse(runtime._candidate_actionable(uptime_only))
+
+    async def test_cleanup_does_not_cancel_actionable_mechanics_canary(self):
+        runtime = self.runtime
+        from dataclasses import replace
+        uptime_only = replace(candidate(), eligible_now=False, uptime_feasible=False,
+                              reasons=("50% uptime is no longer reachable in the estimated window",))
+        runtime._commissioning_ignore_uptime_proxy = True
+        runtime._commissioning_expected_yes_price = uptime_only.quote.yes.price
+        runtime.account.reducer.apply_order_update(
+            {"e": "orderUpdate", "i": "working-1", "c": "owned-1", "s": "X",
+             "S": "BUY", "O": "YES", "q": "10", "z": "10",
+             "p": str(uptime_only.quote.yes.price), "X": "OPEN"}
+        )
+        runtime._cancel_symbol_entries = AsyncMock()
+        await runtime._cancel_ineligible_working_entries({"X": uptime_only})
+        runtime._cancel_symbol_entries.assert_not_awaited()
+        stale_too = replace(uptime_only, reasons=("stale market data", uptime_only.reasons[0]))
+        await runtime._cancel_ineligible_working_entries({"X": stale_too})
+        runtime._cancel_symbol_entries.assert_awaited_once_with("X")
 
 
 class RewardAndRateRepairTests(unittest.TestCase):

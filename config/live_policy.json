@@ -21,7 +21,7 @@
     {"remaining_fraction": "0.20", "max_pending_orders": 10},
     {"remaining_fraction": "0.00", "max_pending_orders": 0}
   ],
-  "max_inventory_age_seconds": 900,
+  "max_inventory_age_seconds": 300,
   "force_exit_before_expiry_seconds": 300,
   "monetary_stop_authorities": 1
 }

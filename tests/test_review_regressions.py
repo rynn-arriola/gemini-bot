@@ -25,7 +25,7 @@ from gemini_bot.orchestrator import ProductionOrchestrator
 from gemini_bot.rate_limits import AdmissionGovernor
 from gemini_bot.rest_client import ApiError, GeminiReadRestClient
 from gemini_bot.reward_ranking import RankInput, rank_candidate
-from gemini_bot.storage import SQLiteJournal
+from gemini_bot.storage import SQLiteJournal, WindowsOwnerLock
 from gemini_bot.uptime import sample_and_load_progress
 
 
@@ -48,6 +48,8 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             LiveConfig("account-review-fake", "fake-review-secret", "", True, strategy, risk),
             Path(self.temporary.name),
         )
+        self.runtime.control_directory = Path(self.temporary.name) / "isolated-control"
+        self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")
         self.runtime.account.available_usd = D("100")
         self.runtime.gate.state = EngineState.QUOTING
         for field in ("terms_accepted", "balances_known", "positions_known", "open_orders_known",
@@ -100,6 +102,48 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.private.place_maker = place
         await self.runtime._quote_pair(candidate())
         self.assertEqual(sent, [Outcome.YES])
+
+    async def test_clean_zero_fill_second_leg_moc_cancel_cools_symbol_without_global_failure(self):
+        sent = []
+        async def place(leg):
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.ENTRY)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            sent.append(leg.outcome)
+            order_id = str(len(sent))
+            frame = {
+                "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10",
+                "p": str(leg.price), "z": "10", "Z": "0", "X": "NEW",
+            }
+            self.runtime.account.apply(frame)
+            if leg.outcome is Outcome.NO:
+                self.runtime.account.apply({**frame, "z": "0", "X": "CANCELED"})
+            return intent.client_order_id
+        self.runtime.private.place_maker = AsyncMock(side_effect=place)
+        self.runtime._cancel_symbol_entries = AsyncMock()
+        self.runtime.rest = SimpleNamespace(positions=AsyncMock(return_value=[]))
+        await self.runtime._quote_pair(candidate())
+        self.assertEqual(sent, [Outcome.YES, Outcome.NO])
+        self.runtime._cancel_symbol_entries.assert_awaited_once_with("X")
+        self.assertGreater(self.runtime._quote_cooldown_until["X"], 0)
+
+    async def test_rejected_second_leg_remains_fatal(self):
+        async def place(leg):
+            intent = self.runtime.ledger.prepare(leg, OrderPurpose.ENTRY)
+            self.runtime.ledger.mark_sent(intent.client_order_id)
+            order_id = leg.outcome.value
+            self.runtime.account.apply({
+                "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10",
+                "p": str(leg.price), "z": "10" if leg.outcome is Outcome.YES else "0",
+                "Z": "0", "X": "NEW" if leg.outcome is Outcome.YES else "REJECTED",
+            })
+            return intent.client_order_id
+        self.runtime.private.place_maker = AsyncMock(side_effect=place)
+        self.runtime._cancel_symbol_entries = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, "second maker leg"):
+            await self.runtime._quote_pair(candidate())
+        self.runtime._cancel_symbol_entries.assert_awaited_once_with("X")
 
     async def test_expired_contract_cannot_receive_new_quotes(self):
         self.runtime._expiry["X"] = NOW - timedelta(seconds=1)
@@ -189,6 +233,8 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
     def test_same_account_cannot_acquire_two_directory_locks(self):
         with tempfile.TemporaryDirectory() as other:
             other_runtime = ProductionOrchestrator(self.runtime.config, Path(other))
+            other_runtime.control_directory = self.runtime.control_directory
+            other_runtime.lock = WindowsOwnerLock(other_runtime.control_directory / "mutation-owner.lock")
             try:
                 self.runtime.lock.acquire()
                 with self.assertRaises(RuntimeError):
@@ -200,6 +246,35 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StorageAndTransportReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reward_catalog_restarts_after_transient_page_duplicate(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        responses = [
+            {"events": [{"event_ticker": "A"}, {"event_ticker": "B"}],
+             "pagination": {"total": 3}},
+            {"events": [{"event_ticker": "B"}], "pagination": {"total": 3}},
+            {"events": [{"event_ticker": "A"}, {"event_ticker": "B"}],
+             "pagination": {"total": 2}},
+        ]
+        client.public_get = AsyncMock(side_effect=responses)
+        self.assertEqual(
+            [row["event_ticker"] for row in await client.reward_events()],
+            ["A", "B"],
+        )
+        self.assertEqual(client.public_get.await_count, 3)
+
+    async def test_reward_catalog_fails_after_repeated_unstable_pages(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        responses = []
+        for _ in range(3):
+            responses.extend([
+                {"events": [{"event_ticker": "A"}, {"event_ticker": "B"}],
+                 "pagination": {"total": 3}},
+                {"events": [{"event_ticker": "B"}], "pagination": {"total": 3}},
+            ])
+        client.public_get = AsyncMock(side_effect=responses)
+        with self.assertRaisesRegex(ApiError, "unstable_reward_catalog"):
+            await client.reward_events()
+
     async def test_rest_429_installs_server_cooldown(self):
         client = GeminiReadRestClient(AdmissionGovernor())
         client._open_json = Mock(side_effect=ApiError(429, "RateLimit", retry_after=120))

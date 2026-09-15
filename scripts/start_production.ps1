@@ -3,7 +3,8 @@ param(
     [string]$Mode = "Prepare",
     [string]$EnvironmentFile = ".env",
     [string]$RuntimeDirectory = "data\production",
-    [string]$ActivationPermit = ""
+    [string]$ActivationPermit = "",
+    [switch]$IgnoreUptimeProxy
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,9 @@ if ($Mode -eq "Prepare") {
     $PermitPath = (Resolve-Path (Join-Path $ProjectRoot $ActivationPermit)).Path
     $Arguments += @("run-live", "--env", $EnvironmentPath, "--directory", $RuntimePath,
                     "--activation-permit", $PermitPath)
+    if ($IgnoreUptimeProxy) {
+        $Arguments += "--ignore-uptime-proxy"
+    }
 }
 
 $OutLog = Join-Path $RuntimePath "launcher.stdout.log"

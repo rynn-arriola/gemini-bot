@@ -17,6 +17,13 @@ def canonical_symbol(value: str) -> str:
     return symbol
 
 
+def uptime_progress_key(event_ticker: str, pool_id: str) -> str:
+    """Namespace local uptime by event while retaining shared pool identity."""
+    if not event_ticker or not pool_id:
+        raise ValueError("uptime progress requires event and pool identity")
+    return f"{pool_id}\x1f{event_ticker}"
+
+
 class Outcome(str, Enum):
     YES = "YES"
     NO = "NO"
@@ -132,12 +139,27 @@ class UptimeProgress:
     eligible_snapshots: int = 0
     qualifying_snapshots: int = 0
     remaining_snapshots_estimate: int = 0
+    observed_window_eligible_snapshots: int | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    start_source: str = "unknown"
 
     def __post_init__(self) -> None:
         if min(self.eligible_snapshots, self.qualifying_snapshots, self.remaining_snapshots_estimate) < 0:
             raise ValueError("snapshot counts cannot be negative")
         if self.qualifying_snapshots > self.eligible_snapshots:
             raise ValueError("qualifying snapshots cannot exceed eligible snapshots")
+        if self.observed_window_eligible_snapshots is not None:
+            if self.observed_window_eligible_snapshots < 0:
+                raise ValueError("observed-window snapshots cannot be negative")
+            if self.qualifying_snapshots > self.observed_window_eligible_snapshots:
+                raise ValueError("qualifying snapshots cannot exceed observed-window snapshots")
+        if self.window_start is not None and self.window_start.tzinfo is None:
+            raise ValueError("uptime window start must be timezone-aware")
+        if self.window_end is not None and self.window_end.tzinfo is None:
+            raise ValueError("uptime window end must be timezone-aware")
+        if self.window_start is not None and self.window_end is not None and self.window_end <= self.window_start:
+            raise ValueError("uptime window must have positive duration")
 
     @property
     def observed_ratio(self) -> Decimal | None:
@@ -148,6 +170,15 @@ class UptimeProgress:
     @property
     def best_possible_ratio(self) -> Decimal | None:
         denominator = self.eligible_snapshots + self.remaining_snapshots_estimate
+        if denominator == 0:
+            return None
+        return Decimal(self.qualifying_snapshots + self.remaining_snapshots_estimate) / Decimal(denominator)
+
+    @property
+    def observed_start_best_possible_ratio(self) -> Decimal | None:
+        if self.observed_window_eligible_snapshots is None:
+            return None
+        denominator = self.observed_window_eligible_snapshots + self.remaining_snapshots_estimate
         if denominator == 0:
             return None
         return Decimal(self.qualifying_snapshots + self.remaining_snapshots_estimate) / Decimal(denominator)

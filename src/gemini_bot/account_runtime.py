@@ -54,9 +54,10 @@ class AccountRuntime:
         self.last_position_at: float | None = None
         saved_cash = journal.get_runtime_state("expected_confirmed_usd")
         self.expected_confirmed_usd = None if saved_cash is None else Decimal(saved_cash)
-        self.inventory_age_seconds = 900
+        self.inventory_age_seconds = 300
         self.exit_before_expiry_seconds = 300
         self.expiry: dict[str, datetime] = {}
+        self.hard_exit_cutoff: dict[str, datetime] = {}
         self.blocked_entries: set[str] = set()
         self.changed = asyncio.Event()
         saved_positions = journal.get_runtime_state("expected_positions")
@@ -212,6 +213,8 @@ class AccountRuntime:
                 deadline = opened + timedelta(seconds=self.inventory_age_seconds)
                 if order.symbol in self.expiry:
                     deadline = min(deadline, self.expiry[order.symbol] - timedelta(seconds=self.exit_before_expiry_seconds))
+                if order.symbol in self.hard_exit_cutoff:
+                    deadline = min(deadline, self.hard_exit_cutoff[order.symbol])
                 # Persist before waiting for cancellation or a delayed position report.
                 self.journal.persist_deadline(
                     order.symbol, order.outcome.value, opened, deadline, order.cumulative_filled,

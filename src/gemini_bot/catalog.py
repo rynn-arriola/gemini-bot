@@ -15,6 +15,14 @@ class RewardedContract:
     expiry: str
     reward_starts_at: str = ""
     reward_ends_at: str = ""
+    trade_starts_at: str = ""
+    pool_source: str = "unspecified"
+    pool_event_count: int | None = None
+    recurring_duration_value: int | None = None
+    recurring_duration_unit: str = ""
+    event_starts_at: str = ""
+    event_category: str = ""
+    event_is_live: bool = False
 
 
 def reward_pool_key(row: dict[str, Any]) -> str:
@@ -73,5 +81,19 @@ def join_reward_contracts(
                 expiry=str(contract.get("expiryDate", reward.get("ends_at", ""))),
                 reward_starts_at=str(reward.get("starts_at", "")),
                 reward_ends_at=str(reward.get("ends_at", "")),
+                trade_starts_at=str(
+                    contract.get("effectiveDate")
+                    or event.get("effectiveDate")
+                    or ""
+                ),
+                pool_source=str(reward.get("pool_source", "unspecified")),
+                pool_event_count=int(reward["pool_event_count"])
+                if reward.get("pool_event_count") is not None else None,
+                recurring_duration_value=int(reward["recurring_duration_value"])
+                if reward.get("recurring_duration_value") is not None else None,
+                recurring_duration_unit=str(reward.get("recurring_duration_unit", "")),
+                event_starts_at=str(event.get("startTime", "")),
+                event_category=str(event.get("category", reward.get("category", ""))),
+                event_is_live=bool(event.get("isLive", False)),
             ))
     return result

@@ -71,6 +71,8 @@ class RewardUniverseLoader:
             event = event_response.get("event", event_response)
             if not isinstance(event, dict):
                 continue
+            if str(event.get("category", reward.get("category", ""))).casefold() == "sports" and bool(event.get("isLive")):
+                continue
             contracts = [
                 contract for contract in event.get("contracts", [])
                 if isinstance(contract, dict)

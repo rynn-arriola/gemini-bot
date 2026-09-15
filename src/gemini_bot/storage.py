@@ -97,6 +97,20 @@ CREATE TABLE IF NOT EXISTS reward_uptime (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (pool_id, window_start, window_end)
 );
+CREATE TABLE IF NOT EXISTS reward_uptime_v2 (
+    event_ticker TEXT NOT NULL,
+    pool_id TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    eligible_samples INTEGER NOT NULL,
+    qualifying_samples INTEGER NOT NULL,
+    first_observed_at TEXT NOT NULL,
+    last_sample_bucket TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (event_ticker, pool_id, window_start, window_end)
+);
+CREATE INDEX IF NOT EXISTS idx_reward_uptime_v2_pool
+ON reward_uptime_v2(pool_id, window_start, window_end);
 """
 
 
@@ -381,6 +395,7 @@ class SQLiteJournal:
     def sample_reward_uptime(
         self,
         *,
+        event_ticker: str,
         pool_id: str,
         window_start: datetime,
         window_end: datetime,
@@ -388,47 +403,53 @@ class SQLiteJournal:
         eligible: bool,
         qualifying: bool,
     ) -> None:
-        if not pool_id or any(value.tzinfo is None for value in (window_start, window_end, sample_at)):
+        if not event_ticker or not pool_id or any(value.tzinfo is None for value in (window_start, window_end, sample_at)):
             raise ValueError("uptime sample identity and aware timestamps are required")
         if qualifying and not eligible:
             raise ValueError("a qualifying sample must be eligible")
         bucket = sample_at.replace(second=0, microsecond=0).isoformat()
         with self.transaction():
             row = self.connection.execute(
-                """SELECT eligible_samples,qualifying_samples,last_sample_bucket
-                   FROM reward_uptime WHERE pool_id=? AND window_start=? AND window_end=?""",
-                (pool_id, window_start.isoformat(), window_end.isoformat()),
+                """SELECT eligible_samples,qualifying_samples,first_observed_at,last_sample_bucket
+                   FROM reward_uptime_v2
+                   WHERE event_ticker=? AND pool_id=? AND window_start=? AND window_end=?""",
+                (event_ticker, pool_id, window_start.isoformat(), window_end.isoformat()),
             ).fetchone()
-            if row is not None and str(row[2]) >= bucket:
+            if row is not None and str(row[3]) >= bucket:
                 return
             # Unknown/unobserved minutes never improve this conservative proxy.
             elapsed = max(0, int((min(sample_at, window_end) - window_start).total_seconds() // 60) + 1)
             eligible_count = max(int(row[0]) if row else 0, elapsed)
             qualifying_count = (int(row[1]) if row else 0) + int(qualifying)
+            first_observed_at = str(row[2]) if row else sample_at.isoformat()
             self.connection.execute(
-                """INSERT INTO reward_uptime
-                   (pool_id,window_start,window_end,eligible_samples,qualifying_samples,
-                    last_sample_bucket,updated_at) VALUES(?,?,?,?,?,?,?)
-                   ON CONFLICT(pool_id,window_start,window_end) DO UPDATE SET
+                """INSERT INTO reward_uptime_v2
+                   (event_ticker,pool_id,window_start,window_end,eligible_samples,qualifying_samples,
+                    first_observed_at,last_sample_bucket,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(event_ticker,pool_id,window_start,window_end) DO UPDATE SET
                      eligible_samples=excluded.eligible_samples,
                      qualifying_samples=excluded.qualifying_samples,
                      last_sample_bucket=excluded.last_sample_bucket,
                      updated_at=excluded.updated_at""",
                 (
-                    pool_id, window_start.isoformat(), window_end.isoformat(),
-                    eligible_count, qualifying_count, bucket, sample_at.isoformat(),
+                    event_ticker, pool_id, window_start.isoformat(), window_end.isoformat(),
+                    eligible_count, qualifying_count, first_observed_at,
+                    bucket, sample_at.isoformat(),
                 ),
             )
 
     def load_reward_uptime(
-        self, pool_id: str, window_start: datetime, window_end: datetime
-    ) -> tuple[int, int]:
+        self, event_ticker: str, pool_id: str, window_start: datetime, window_end: datetime
+    ) -> tuple[int, int, datetime | None]:
         row = self.connection.execute(
-            """SELECT eligible_samples,qualifying_samples FROM reward_uptime
-               WHERE pool_id=? AND window_start=? AND window_end=?""",
-            (pool_id, window_start.isoformat(), window_end.isoformat()),
+            """SELECT eligible_samples,qualifying_samples,first_observed_at
+               FROM reward_uptime_v2
+               WHERE event_ticker=? AND pool_id=? AND window_start=? AND window_end=?""",
+            (event_ticker, pool_id, window_start.isoformat(), window_end.isoformat()),
         ).fetchone()
-        return (0, 0) if row is None else (int(row[0]), int(row[1]))
+        return (0, 0, None) if row is None else (
+            int(row[0]), int(row[1]), datetime.fromisoformat(str(row[2])),
+        )
 
     def quick_check(self) -> str:
         return str(self.connection.execute("PRAGMA quick_check").fetchone()[0])

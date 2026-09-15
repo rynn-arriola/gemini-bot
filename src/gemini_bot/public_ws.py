@@ -37,6 +37,7 @@ class PublicMarketSocket:
         self._governor = governor
         self._connection: ClientConnection | None = None
         self._send_lock = asyncio.Lock()
+        self._ping_lock = asyncio.Lock()
         self._request_id = 0
         self.books: dict[str, LocalBook] = {}
         self.dirty = DirtySymbolScheduler(queue_capacity)
@@ -76,6 +77,19 @@ class PublicMarketSocket:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
+
+    async def prove_liveness(self, *, timeout: float = 2.0) -> float:
+        """Use protocol ping/pong to prove a quiet event-driven stream is live."""
+        if timeout <= 0:
+            raise ValueError("ping timeout must be positive")
+        async with self._ping_lock:
+            connection = self._connection
+            if connection is None:
+                raise ConnectionError("public WebSocket is not connected")
+            pong = await connection.ping()
+            latency = await asyncio.wait_for(pong, timeout=timeout)
+            self.note_message()
+            return float(latency)
 
     async def _send(self, method: str, params: object, priority: Priority) -> None:
         if self._connection is None:

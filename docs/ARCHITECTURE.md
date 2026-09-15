@@ -40,7 +40,9 @@ Each candidate constructs two maker-only BUY legs: YES and NO, 10 contracts each
 
 The priority score is unitless. Actual reward dollars require authenticated daily scores and the venue's total qualifying score, which is not public.
 
-Local one-minute uptime samples persist by unique reward pool. When the public reward row lacks a score-day start, the report uses a clearly named UTC-day proxy bounded by the advertised reward end. A sample is locally qualifying only when authenticated account state shows working BUY YES and BUY NO orders of at least 10 contracts. This is operational evidence and a feasibility input, not venue-certified scoring. `rank-report.json` exposes observed and best-possible proxy ratios without converting them to promised dollars.
+Local one-minute uptime samples persist by event ticker plus shared pool ID. `pool_id` deduplicates the advertised budget; event identity prevents one recurring instance from inheriting another instance's timing. The usable window is the intersection of the Eastern payout day, contract `effectiveDate`, published reward end, and the five-minute pre-expiry safety boundary. When the reward feed omits its activation timestamp, the conservative bound begins at the later of Eastern midnight or contract effective time; first observation is reported separately and never weakens admission. Zone-aware boundaries preserve DST days. A sample is locally qualifying when authenticated account state shows at least one working qualifying BUY outcome order of 10 or more contracts; two sides receive the separate multiplier. This is operational evidence and a feasibility input, not venue-certified scoring. The following authenticated daily summary's `total_snapshots` is the venue-authoritative denominator used to calibrate the proxy.
+
+Sports events are not quoted within 20 minutes of play. Their published event `startTime` minus 20 minutes is both an entry cutoff and a hard position deadline, even when Gemini continues to report the contract active/open. Crypto interval markets are not removed merely because `isLive` is true; their contract effective/expiry timestamps define their intended trading interval and retain the five-minute pre-expiry cutoff.
 
 ## Order and position ownership
 
@@ -62,7 +64,7 @@ Each order has a durable client ID and intent state. A send timeout is ambiguous
 
 ## Time-aware inventory exit
 
-The approved maximum inventory age is 900 seconds. Once due:
+The approved maximum inventory age is 300 seconds. Once due:
 
 1. cancel orders that can add in the filled direction;
 2. positively confirm their terminal state;

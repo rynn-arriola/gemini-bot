@@ -1,5 +1,40 @@
 # Gemini findings
 
+## September 15, 2026: reward-day proxy corrected to Eastern
+
+- The owner directed removal of the unsupported midnight-UTC assumption. Local reward feasibility now uses America/New_York calendar dates, consistent with Gemini's authenticated daily-summary API. Day boundaries are zone-aware and tests prove 23-hour spring, 24-hour normal and 25-hour fall days.
+- Rank-report fields are renamed from `local_utc_day_*` to `local_eastern_day_*`; historical reports retain their original fields as evidence of the old behavior.
+- 119 production and 28 script/observer tests pass, plus compilation and native Windows policy/storage validation.
+- An authenticated read-only preparation at 11:26 Eastern tracked 32 markets and ranked 28 pools; 13 candidates were feasible under the corrected 50% gate. Their best possible local ratio was about 52.29%. No order was sent and no process remained.
+- Eastern is better supported than UTC but remains a proxy: Gemini documents daily scoring and Eastern summary dates without publishing the precise eligible-snapshot boundary.
+
+## September 15, 2026: repeat one-leg maker canary — passed
+
+- After the cleanup-loop repair, the owner approved a fresh five-second test of `GEMI-ZEC2609152100-HI1220`, BUY YES 10 @ $0.02. The exact price was asserted at runtime.
+- Exactly one new durable intent and one Gemini history row were created. The order rested from 15:18:49.750Z to 15:18:54.996Z (approximately 5.25 seconds), then terminally canceled with all 10 contracts remaining.
+- There were zero execution fills, positions, active orders or dropped log records. Authenticated drain reached `stopped_flat`; no matching process remains. The one-use repeat permit is consumed.
+- This verifies one-leg maker acknowledgement, stable resting behavior, cancellation and final flat reconciliation. It does not exercise a fill or exact position exit and does not authorize continuous trading.
+
+## September 15, 2026: first one-leg maker canary — flat but failed one-order invariant
+
+- The authorized mechanics canary targeted `GEMI-ZEC2609152100-HI1220`, BUY YES 10 @ $0.02, for five seconds. Gemini authenticated four sequential orders, each canceled with the full quantity remaining. No fills, fees, positions, or active orders remained; the runtime ended `stopped_flat`.
+- The test is not accepted as a commissioning pass because exactly one order was intended. Candidate maintenance allowed the mechanics-only uptime exception, but independent cleanup canceled each reward-ineligible order and maintenance replaced it.
+- Cleanup now uses the same narrow actionable-candidate predicate. Offline regression verification is required, followed by a newly approved one-use live canary. Continuous trading remains blocked.
+
+## September 15, 2026: one-market maker-test preparation
+
+- The owner directed work to advance through the preparation boundary. Production `prepare-live` completed read-only at 10:57:01 Eastern, reconciled a flat account with zero active orders, tracked 32 symbols, ranked 27 unique pools, wrote paused status/rank evidence, and disconnected. No permit exists and no order/cancel was sent.
+- Historical behavior: zero candidates were eligible because only 37.64% of the former local UTC-day proxy remained. This unsupported boundary was subsequently replaced by the Eastern-date proxy.
+- Post-preparation verification passed: 113 production tests, 28 script/observer tests, offline Windows policy/storage checks, compilation, and PowerShell launcher parsing. Configuration still lacks the exact live acknowledgement, so activation fails closed.
+
+## September 15, 2026: repeat five-minute read-only preflight — data health passed, schedule gate held
+
+- Completed 300.447 seconds at 10:51:09 Eastern. All 32 tracked books synchronized and were accepted as current through the shared sequenced WebSocket; 25–27 were two-sided. The original global one-sided-book and quiet-book freshness failures did not recur.
+- Public streaming delivered 615 depth frames with no sequence gaps or dropped work/log records. Private streaming delivered 249 balance and 249 position snapshots; three periodic REST reconciliations matched the account view. CPU averaged 0.411% of one logical core.
+- Zero orders, cancels, blocked mutation attempts, or permit consumption occurred. The account was flat at recorded endpoints, both sockets closed, and no matching process remained.
+- The diagnostic still returned `blocked`: a new local UTC-day proxy store started at 14:46 UTC, when only 38.33% of that historical proxy day remained. This was not a data-health defect; the unsupported UTC boundary was later corrected to Eastern.
+- Full evidence: [repeat preflight report](docs/PREFLIGHT_2026-09-15-POSTFIX.md). Continuous live trading remains unapproved.
+
 ## September 15, 2026: preflight blockers repaired offline
 
 - Startup now requires snapshots for all tracked books but only one usable two-sided market; one-sided markets are isolated from the pair strategy. Quiet books use current shared-WebSocket continuity rather than last-price-change time. A stale shared stream and any per-symbol sequence gap still fail closed.

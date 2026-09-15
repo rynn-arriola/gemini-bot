@@ -12,7 +12,7 @@ from .account_runtime import AccountRuntime
 from .activation import consume_activation_permit, load_activation_permit, policy_digest
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .discovery import RewardUniverseLoader
-from .catalog import reward_pool_key, join_reward_contracts
+from .catalog import join_reward_contracts
 from .domain import EngineState, Outcome
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
@@ -37,6 +37,9 @@ from .risk_windows import RiskWindowPolicy
 from .runtime_files import atomic_write_json, runtime_status
 from .storage import SQLiteJournal, WindowsOwnerLock, shared_control_directory
 from .uptime import sample_and_load_progress
+
+
+_UPTIME_PROXY_REJECTION = "50% uptime is no longer reachable in the estimated window"
 
 
 def _utc_now() -> datetime:
@@ -96,6 +99,8 @@ class ProductionOrchestrator:
         self._closed = False
         self._activated_pool_ids: set[str] = set()
         self._expiry: dict[str, datetime] = {}
+        self._trade_start: dict[str, datetime] = {}
+        self._sports_start: dict[str, datetime] = {}
         self._opening_equity_marked = False
         self._dynamic_pending_cap = config.risk.max_pending_orders
         self._last_snapshot = AccountSnapshot((), ())
@@ -105,6 +110,11 @@ class ProductionOrchestrator:
         self._last_live_mark: tuple[object, ...] | None = None
         self._permit_policy_digest: str | None = None
         self._maker_ack_count = 0
+        self._commissioning_ignore_uptime_proxy = False
+        self._uptime_override_until: datetime | None = None
+        self._commissioning_expected_yes_price: Decimal | None = None
+        self._commissioning_expected_no_price: Decimal | None = None
+        self._quote_cooldown_until: dict[str, float] = {}
         self._logging = configure_logging(
             self.directory / "logs", secrets=(config.api_key, config.api_secret)
         )
@@ -127,15 +137,27 @@ class ProductionOrchestrator:
             ),
         )
 
+    def _handle_contract_status(self, frame: dict[str, Any]) -> None:
+        symbol = str(frame.get("s", "")).upper()
+        if symbol not in self._expiry or str(frame.get("n", "")).lower() == "active":
+            return
+        self.account.blocked_entries.add(symbol)
+        self.journal.audit("contract_lifecycle_block", {"symbol": symbol})
+        if self.account.reducer.positions.get(symbol, Decimal("0")) != 0:
+            raise RuntimeError("tracked contract changed lifecycle with open inventory")
+        if self.account.reducer.risk_adding_order_ids(symbol):
+            if self.gate.state is not EngineState.QUOTING:
+                raise RuntimeError("tracked contract changed lifecycle with working entries")
+            try:
+                self.account.safety_symbols.put_nowait(symbol)
+            except asyncio.QueueFull as exc:
+                raise RuntimeError("contract lifecycle safety queue is full") from exc
+
     async def _public_pump(self) -> None:
         try:
             async for frame in self.public.frames():
                 if frame.get("e") == "contractStatus":
-                    symbol = str(frame.get("s", "")).upper()
-                    if symbol in self._expiry and str(frame.get("n", "")).lower() != "active":
-                        self.account.blocked_entries.add(symbol)
-                        self.gate.halt()
-                        raise RuntimeError("tracked contract lifecycle changed; reconciliation required")
+                    self._handle_contract_status(frame)
                 gap = self.public.apply_frame(frame)
                 self._mark_live_risk()
                 if gap is not None and gap in self.public.resync_required:
@@ -150,6 +172,20 @@ class ProductionOrchestrator:
             self.gate.halt()
             self.log.exception("public_stream_failed", ErrorClass.TRANSPORT, exc)
             self._write_status("halted", False, "public stream lost; approval is required after reconciliation")
+            raise
+
+    async def _public_liveness_pump(self) -> None:
+        """Prove quiet public transport with WebSocket ping/pong once per second."""
+        try:
+            while True:
+                await asyncio.sleep(1)
+                await self.public.prove_liveness(timeout=2)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.gate.halt()
+            self.log.exception("public_liveness_failed", ErrorClass.TRANSPORT, exc)
+            self._write_status("halted", False, "public liveness failed; reconciliation required")
             raise
 
     async def _private_pump(self) -> None:
@@ -259,6 +295,21 @@ class ProductionOrchestrator:
             if not self.universe:
                 raise RuntimeError("no active reward pools passed discovery")
             self._expiry = {item.rules.symbol: _parse_time(item.expiry) for item in self.universe}
+            self._trade_start = {
+                item.rules.symbol: _parse_time(item.trade_starts_at)
+                for item in self.universe if item.trade_starts_at
+            }
+            self._sports_start = {
+                item.rules.symbol: _parse_time(item.event_starts_at)
+                for item in self.universe
+                if item.event_category.casefold() == "sports" and item.event_starts_at
+            }
+            self.account.hard_exit_cutoff = {
+                symbol: starts_at - timedelta(
+                    seconds=self.config.risk.sports_exit_before_start_seconds
+                )
+                for symbol, starts_at in self._sports_start.items()
+            }
             self.account.expiry = self._expiry
             if any(row.symbol not in self._expiry for row in before.positions):
                 raise RuntimeError("existing inventory outside the subscribed universe requires reconciliation")
@@ -276,6 +327,10 @@ class ProductionOrchestrator:
                 asyncio.create_task(self._public_pump(), name="gemini-public-pump"),
                 asyncio.create_task(self._private_pump(), name="gemini-account-pump"),
             ]
+            if hasattr(self.public, "prove_liveness"):
+                self._tasks.append(asyncio.create_task(
+                    self._public_liveness_pump(), name="gemini-public-liveness",
+                ))
             await self.public.subscribe(tuple(item.rules.symbol for item in self.universe))
             await self.private.subscribe_account()
             await self._wait_ready(timeout)
@@ -361,7 +416,21 @@ class ProductionOrchestrator:
 
     def _entry_time_valid(self, symbol: str) -> bool:
         expiry = self._expiry.get(symbol)
-        return expiry is not None and _utc_now() < expiry - timedelta(seconds=self.config.risk.force_exit_before_expiry_seconds)
+        if expiry is None:
+            return False
+        trade_start = self._trade_start.get(symbol)
+        if trade_start is not None and _utc_now() < trade_start:
+            return False
+        cutoff = expiry - timedelta(seconds=self.config.risk.force_exit_before_expiry_seconds)
+        sports_start = self._sports_start.get(symbol)
+        if sports_start is not None:
+            cutoff = min(
+                cutoff,
+                sports_start - timedelta(
+                    seconds=self.config.risk.sports_exit_before_start_seconds
+                ),
+            )
+        return _utc_now() < cutoff
 
     def _validate_send(self, payload: dict[str, Any]) -> None:
         """Last check after rate pacing; no await between this and transport send."""
@@ -416,9 +485,43 @@ class ProductionOrchestrator:
         book = self.public.books.get(symbol)
         return bool(book is not None and book.synchronized and self._public_stream_fresh())
 
+    def _candidate_actionable(self, candidate: Any) -> bool:
+        """Allow only the uptime proxy to be ignored by explicit approval.
+
+        The candidate remains reported as reward-ineligible. This exception is
+        solely for testing maker behavior and measuring live outcomes.
+        """
+        reward_or_proxy_ok = candidate.eligible_now or bool(
+            self._commissioning_ignore_uptime_proxy
+            and candidate.quote is not None
+            and tuple(candidate.reasons) == (_UPTIME_PROXY_REJECTION,)
+        )
+        return bool(
+            reward_or_proxy_ok
+            and (
+                self._commissioning_expected_yes_price is None
+                or (
+                    candidate.quote is not None
+                    and candidate.quote.yes.price == self._commissioning_expected_yes_price
+                )
+            )
+            and (
+                self._commissioning_expected_no_price is None
+                or (
+                    candidate.quote is not None
+                    and candidate.quote.no.price == self._commissioning_expected_no_price
+                )
+            )
+        )
+
     async def _quote_pair_locked(self, candidate: Any) -> None:
-        if not self.gate.may_submit or not candidate.eligible_now or candidate.quote is None:
+        if not self.gate.may_submit or not self._candidate_actionable(candidate) or candidate.quote is None:
             return
+        clock = asyncio.get_running_loop().time()
+        cooldown_until = self._quote_cooldown_until.get(candidate.symbol, 0.0)
+        if clock < cooldown_until:
+            return
+        self._quote_cooldown_until.pop(candidate.symbol, None)
         if not self._entry_time_valid(candidate.symbol) or not self._book_fresh(candidate.symbol):
             return
         if candidate.symbol in self.account.blocked_entries or self.journal.pending_exit(candidate.symbol):
@@ -445,6 +548,9 @@ class ProductionOrchestrator:
         await self.account.wait_for_order_event(first_id)
         first = self.ledger.get(first_id)
         if first is None or first.state is not IntentState.ACKNOWLEDGED:
+            if first is not None and await self._clean_zero_fill_moc_terminal(first, candidate.symbol):
+                self._quote_cooldown_until[candidate.symbol] = asyncio.get_running_loop().time() + 5
+                return
             raise RuntimeError("first maker leg lacked positive working acknowledgment")
         first_order = self.account.reducer.orders.get(first.server_order_id or "")
         if (not self.gate.may_submit or candidate.symbol in self.account.blocked_entries
@@ -460,21 +566,68 @@ class ProductionOrchestrator:
         await self.account.wait_for_order_event(second_id)
         second = self.ledger.get(second_id)
         if second is None or second.state is not IntentState.ACKNOWLEDGED:
+            if second is not None and await self._clean_zero_fill_moc_terminal(second, candidate.symbol):
+                self._quote_cooldown_until[candidate.symbol] = asyncio.get_running_loop().time() + 5
+                return
             await self._cancel_symbol_entries(candidate.symbol)
             raise RuntimeError("second maker leg lacked positive working acknowledgment")
         self._activated_pool_ids.add(candidate.pool_id)
         self._maker_ack_count += 1
 
+    async def _clean_zero_fill_moc_terminal(self, intent: Any, symbol: str) -> bool:
+        """Prove an immediately canceled maker leg left no exposure.
+
+        Gemini can emit NEW and CANCELED back-to-back for MOC. The waiter may
+        therefore observe the durable intent after it has already advanced to
+        TERMINAL. Only a positively identified CANCELED order with zero fills,
+        followed by cancellation of its sibling and REST/WS agreement that the
+        symbol is flat, is recoverable. Every other terminal/ambiguous state
+        remains fatal to activation.
+        """
+        order = (
+            self.account.reducer.orders.get(intent.server_order_id)
+            if intent.server_order_id else None
+        )
+        if (
+            intent.state is not IntentState.TERMINAL
+            or order is None
+            or order.status != "CANCELED"
+            or order.working
+            or order.cumulative_filled != 0
+        ):
+            return False
+        await self._cancel_symbol_entries(symbol)
+        snapshot = build_account_snapshot(await self.rest.positions(), [])
+        assert_position_consistency(snapshot, self.account.reducer.positions)
+        return (
+            snapshot.signed_positions.get(symbol, Decimal("0")) == 0
+            and self.account.reducer.positions.get(symbol, Decimal("0")) == 0
+        )
+
     async def _maintain_candidate(self, candidate: Any) -> None:
         async with self._lifecycle_lock:
             await self._maintain_candidate_locked(candidate)
+
+    async def _cancel_ineligible_working_entries(self, candidates_by_symbol: dict[str, Any]) -> None:
+        for order in tuple(self.account.reducer.orders.values()):
+            candidate = candidates_by_symbol.get(order.symbol)
+            if (
+                order.working
+                and order.side.value == "BUY"
+                and (
+                    candidate is None
+                    or not self._candidate_actionable(candidate)
+                    or not self._entry_time_valid(order.symbol)
+                )
+            ):
+                await self._cancel_symbol_entries(order.symbol)
 
     async def _maintain_candidate_locked(self, candidate: Any) -> None:
         working = [
             order for order in self.account.reducer.orders.values()
             if order.symbol == candidate.symbol and order.working and order.side.value == "BUY"
         ]
-        if (not candidate.eligible_now or candidate.quote is None or not self._entry_time_valid(candidate.symbol)
+        if (not self._candidate_actionable(candidate) or candidate.quote is None or not self._entry_time_valid(candidate.symbol)
                 or candidate.symbol in self.account.blocked_entries):
             if working:
                 await self._cancel_symbol_entries(candidate.symbol)
@@ -605,6 +758,9 @@ class ProductionOrchestrator:
             if self._permit_expires_at is not None and now >= self._permit_expires_at:
                 self.gate.state = EngineState.DRAINING
                 return
+            if self._uptime_override_until is not None and now >= self._uptime_override_until:
+                self.gate.state = EngineState.DRAINING
+                return
             for task in self._tasks:
                 if task.done():
                     self.gate.halt()
@@ -675,29 +831,55 @@ class ProductionOrchestrator:
             return False
         rows = await self.rest.reward_events()
         now = _utc_now()
-        active: set[str] = set()
+        active_rows: dict[str, dict[str, Any]] = {}
         for row in rows:
             if Decimal(str(row.get("daily_pool_usd", "0"))) <= 0:
                 continue
             ends_at = str(row.get("ends_at", ""))
             if ends_at and _parse_time(ends_at) <= now:
                 continue
-            active.add(reward_pool_key(row))
-        if not self._activated_pool_ids <= active:
-            return False
-        by_event = {str(row.get("event_ticker", "")).upper(): row for row in rows}
+            active_rows[str(row.get("event_ticker", "")).upper()] = row
+        usable_permitted_symbol = False
         for item in self.universe:
-            reward = by_event.get(item.event_ticker)
+            reward = active_rows.get(item.event_ticker)
             if reward is None:
-                return False
+                self.account.blocked_entries.add(item.rules.symbol)
+                continue
             current = join_reward_contracts([reward], {item.event_ticker: await self.rest.event(item.event_ticker)})
             chosen = next((row for row in current if row.rules.symbol == item.rules.symbol), None)
-            if (chosen is None or chosen.rules != item.rules or chosen.expiry != item.expiry
-                    or not chosen.pool.active or not chosen.rules.active or chosen.rules.post_only_mode):
-                return False
-        return True
+            invalid = (chosen is None or chosen.rules != item.rules or chosen.expiry != item.expiry
+                    or not chosen.pool.active or not chosen.rules.active or chosen.rules.post_only_mode
+                    or (
+                        chosen.event_category.casefold() == "sports"
+                        and (
+                            chosen.event_is_live
+                            or (
+                                chosen.event_starts_at
+                                and now >= _parse_time(chosen.event_starts_at)
+                            )
+                        )
+                    ))
+            if invalid:
+                self.account.blocked_entries.add(item.rules.symbol)
+                continue
+            if (
+                item.rules.symbol in self._permitted_symbols
+                and item.rules.symbol not in self.account.blocked_entries
+                and self._entry_time_valid(item.rules.symbol)
+            ):
+                usable_permitted_symbol = True
+        return usable_permitted_symbol
 
-    async def activate(self, permit_path: Path, *, commissioning_seconds: int | None = None, single_leg: bool = False) -> None:
+    async def activate(
+        self,
+        permit_path: Path,
+        *,
+        commissioning_seconds: int | None = None,
+        single_leg: bool = False,
+        ignore_uptime_proxy: bool = False,
+        expected_yes_price: Decimal | None = None,
+        expected_no_price: Decimal | None = None,
+    ) -> None:
         """Enter the mutation path only after preparation and one-use approval."""
         if self.read_only:
             raise RuntimeError("read-only orchestrator cannot activate")
@@ -708,7 +890,11 @@ class ProductionOrchestrator:
             permit_path, policy_path=DEFAULT_POLICY_PATH, store=self.journal,
             account_fingerprint=hashlib.sha256(self.config.api_key.encode()).hexdigest(),
         )
-        self._permitted_symbols = set(permit.symbols)
+        self._permitted_symbols = (
+            {item.rules.symbol for item in self.universe}
+            if permit.universe_scope == "reward_catalog"
+            else set(permit.symbols)
+        )
         self._permit_policy_digest = permit.policy_sha256
         if not self._permitted_symbols <= {item.rules.symbol for item in self.universe}:
             raise RuntimeError("approved symbols are not in the reconciled universe")
@@ -716,7 +902,30 @@ class ProductionOrchestrator:
             raise ValueError("commissioning requires 2-30 seconds and a one-pool permit")
         if single_leg and commissioning_seconds is None:
             raise ValueError("one-leg mode is restricted to bounded commissioning")
+        if (
+            ignore_uptime_proxy
+            and commissioning_seconds is None
+            and permit.uptime_override_until is None
+        ):
+            raise ValueError("continuous uptime override requires an expiry-bound approval permit")
+        if expected_yes_price is not None and (
+            commissioning_seconds is None
+            or expected_yes_price <= 0
+            or expected_yes_price >= 1
+        ):
+            raise ValueError("expected YES price is restricted to bounded commissioning")
+        if expected_no_price is not None and (
+            commissioning_seconds is None
+            or single_leg
+            or expected_no_price <= 0
+            or expected_no_price >= 1
+        ):
+            raise ValueError("expected NO price is restricted to bounded two-sided commissioning")
         self._commissioning_single_leg = single_leg
+        self._commissioning_ignore_uptime_proxy = ignore_uptime_proxy
+        self._uptime_override_until = permit.uptime_override_until if ignore_uptime_proxy else None
+        self._commissioning_expected_yes_price = expected_yes_price
+        self._commissioning_expected_no_price = expected_no_price
         # A permit is consumed before the first possible mutation. A failed attempt
         # therefore cannot be replayed without fresh owner approval.
         consume_activation_permit(permit, self.journal)
@@ -731,7 +940,10 @@ class ProductionOrchestrator:
                 await self._exit_due_positions(force=True)
             await self._risk_mark()
             self.gate.activate(True)
-            self._write_status("quoting", True, f"one-use permit {permit.permit_id} consumed")
+            activation_reason = f"one-use permit {permit.permit_id} consumed"
+            if ignore_uptime_proxy:
+                activation_reason += "; uptime proxy exception active; no reward eligibility claim"
+            self._write_status("quoting", True, activation_reason)
             safety = asyncio.create_task(self._safety_loop(), name="gemini-fill-safety")
             safety_clock = asyncio.create_task(self._live_safety_clock(), name="gemini-live-safety-clock")
             next_rank_at = 0.0
@@ -800,22 +1012,31 @@ class ProductionOrchestrator:
                         self._next_report_at = clock + 15
                     while self.public.dirty.pop() is not None:
                         pass
-                    candidates_by_symbol = {item.symbol: item for item in self.ranked}
-                    for order in tuple(self.account.reducer.orders.values()):
-                        candidate = candidates_by_symbol.get(order.symbol)
-                        if (
-                            order.working and order.side.value == "BUY"
-                            and (candidate is None or not candidate.eligible_now)
-                        ):
-                            await self._cancel_symbol_entries(order.symbol)
+                    pool_by_symbol = {item.rules.symbol: item.pool.pool_id for item in self.universe}
+                    locked_pools = {
+                        pool_by_symbol[symbol]
+                        for symbol, quantity in self.account.reducer.positions.items()
+                        if quantity != 0 and symbol in pool_by_symbol
+                    }
+                    desired = []
+                    desired_pools = set(locked_pools)
                     for candidate in self.ranked:
-                        if candidate.symbol not in self._permitted_symbols:
-                            continue
                         if (
-                            candidate.pool_id not in self._activated_pool_ids
-                            and len(self._activated_pool_ids) >= permit.maximum_active_pools
+                            candidate.symbol not in self._permitted_symbols
+                            or not self._candidate_actionable(candidate)
                         ):
                             continue
+                        if (
+                            candidate.pool_id not in desired_pools
+                            and len(desired_pools) >= permit.maximum_active_pools
+                        ):
+                            continue
+                        desired.append(candidate)
+                        desired_pools.add(candidate.pool_id)
+                    candidates_by_symbol = {item.symbol: item for item in desired}
+                    await self._cancel_ineligible_working_entries(candidates_by_symbol)
+                    self._activated_pool_ids = set(locked_pools)
+                    for candidate in desired:
                         await self._maintain_candidate(candidate)
                     next_rank_at = clock + 1
                     next_stale_check_at = clock + 3

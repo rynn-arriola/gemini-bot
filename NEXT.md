@@ -1,13 +1,23 @@
 # Next work
 
-The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification, but the subsequent [five-minute live read-only preflight](docs/PREFLIGHT_2026-09-15.md) exposed startup/data-health blockers. The bot is stopped and live trading remains unapproved.
+The repaired owner-approved September 15 live observation is active under a fresh, one-use, midnight-Eastern permit. Do not start a second mutation process or reuse either consumed permit. Monitor the first real fill and verify immediate sibling cancellation, authenticated signed-position accounting, the exact same-outcome SELL exit, the five-minute or earlier deadline, fees and final flat reconciliation.
+
+For normal operation after today, omit the uptime override. Form a sticky top-ranked cohort for each scoring window, target 75% local qualifying snapshots against Gemini's 50% requirement, and rotate only when a pool ends, becomes unsafe/ineligible, cannot still qualify, or has completed its target. Do not scatter uptime across more pools than the 30-order/15-pool capacity can support.
+
+The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline verification. The repeat preflight and production preparation passed data/account readiness. The [maker canary record](docs/MAKER_CANARY_2026-09-15.md) now includes successful one- and two-sided resting/cancellation tests. The separately authorized September 15 continuous observation is active.
 
 ## Preflight blockers repaired offline
 
 1. Readiness accepts a fully initialized cohort when at least one current, two-sided, pre-expiry market is usable. One-sided contracts remain tracked but cannot enter this two-sided strategy.
 2. Quiet books retain their sequenced state while recent traffic on the one shared public socket proves continuity. A stale connection or sequence gap still blocks entry. One-sided held inventory is marked at its executable side, or zero when no exit bid exists.
 3. `prepare-live` and the diagnostic now use a transport-enforced read-only mode and `cancelOnDisconnect=false`; they cannot create intents, place/cancel orders, or activate.
-4. 113 production and 28 script/observer tests pass. Repeat an authorized five-minute read-only preflight before the maker canary; offline tests do not prove current live behavior.
+4. 113 production and 28 script/observer tests pass. The repeat live read-only preflight synchronized all 32 books, retained 25–27 usable two-sided books, matched account WebSocket state to REST, and shut down cleanly.
+
+## Reward timing proxy
+
+The unsupported UTC boundary is replaced with an event-specific window inside the America/New_York payout day. Contract effective time, reward end and pre-expiry safety bound the window; shared pool budgets and event uptime have separate identities. The active process enforces the 20-minute sports pregame entry/flat cutoff. Quiet-stream liveness is proven with protocol ping/pong, and flat lifecycle transitions isolate one symbol rather than halt every pool. The exact unpublished reward activation time remains a measurement item. Calibrate it against the next authenticated daily summary's `total_snapshots` before treating the proxy as exact.
+
+Add a read-only Gemini Statuspage monitor in a later tested release. Record upcoming/active maintenance and incidents as annotations, but never subtract minutes from the 50% denominator without Gemini's authoritative daily `total_snapshots`. The developer changelog is a separate API-change source.
 
 ## Completed offline
 
@@ -16,13 +26,12 @@ The [September 15 repairs](docs/REPAIR_REPORT_2026-09-15.md) passed offline veri
 3. Maker canaries call production activation/safety/drain; an offline fake canary verifies the integrated path. Real execution is not tested by fake transports.
 4. Read the repair report's limitations: incomplete external cash-flow automation, unsupported collateral-return reduction mode, conservative uptime, and manual reconciliation on unknown execution.
 
-## Later, with explicit owner approval at each mutation boundary
+## Commissioning record and remaining work
 
-1. Re-run offline release validation and review the 113 production plus 28 script/observer test results after any code change.
-2. Obtain approval to run `prepare-live`; reconcile accepted terms, balance, positions, active orders, streams, current reward universe, and `rank-report.json` without submitting orders.
-3. Show the owner the selected unique pool, exact 10-contract price/side, maximum reservation, current six-hour loss/cap mark, available USD, and every preflight result.
-4. Verify standard same-outcome SELL is supported for the selected account/contract, and resolve any legacy journal/cash discrepancies without discarding evidence. Only after new explicit approval, create a one-hour, one-pool version-2 permit bound to current policy/build/account/exact symbol and run the one-leg MOC maker canary. Verify resting acknowledgment, cancellation terminality, and flat account.
-5. With another new permit/approval, run the one-pool two-sided canary. Exercise fill cancellation and exact timed-exit handling if it fills; prove flat/zero orders at drain.
-6. Review actual reward-summary and fee evidence. Only then request approval for a one-pool continuous run. Increase breadth one reviewed step at a time; never jump directly to 15 pools/30 orders.
+1. Re-run offline release validation and review the 127 production plus 28 script/observer test results after any code change.
+2. The repeat one-leg live canary is complete: exactly one five-second MOC order rested for approximately 5.25 seconds and terminally canceled unfilled; final account reconciliation was flat with zero active orders.
+3. The two-sided canary and owner-approved date-bounded reward-catalog activation are complete/active; do not duplicate them.
+4. Observe the first real fill. Verify immediate sibling-order cancellation, exact position accounting, 300-second timed exit, fee classification, and final reconciliation. Any ambiguity must halt rather than be inferred.
+5. Compare authenticated daily-summary snapshot totals against the Eastern proxy after the completed reward day and review actual reward and fee evidence.
 
 An OS-level Task Scheduler restart policy is optional after live commissioning. Automatic restart must return to paused/reconcile and require a fresh permit; it must never automatically reactivate quoting.

@@ -23,6 +23,8 @@ class ActivationPermit:
     account_fingerprint: str
     build_sha256: str
     symbols: tuple[str, ...]
+    uptime_override_until: datetime | None = None
+    universe_scope: str | None = None
 
 
 def policy_digest(policy_path: Path) -> str:
@@ -59,8 +61,18 @@ def load_activation_permit(
         "maximum_active_pools", "policy_sha256",
         "account_fingerprint", "build_sha256", "symbols",
     }
-    if set(raw) != required or raw["permit_version"] != 2:
+    version = raw.get("permit_version")
+    schemas = {
+        2: required,
+        3: required | {"uptime_override_until"},
+        4: (required - {"symbols"}) | {"uptime_override_until", "universe_scope"},
+    }
+    if version not in schemas or set(raw) != schemas[version]:
         raise ValueError("activation permit schema/version mismatch")
+    override = (
+        datetime.fromisoformat(str(raw["uptime_override_until"]))
+        if version in {3, 4} else None
+    )
     permit = ActivationPermit(
         permit_id=str(raw["permit_id"]),
         approved_at=datetime.fromisoformat(str(raw["approved_at"])),
@@ -69,7 +81,9 @@ def load_activation_permit(
         policy_sha256=str(raw["policy_sha256"]),
         account_fingerprint=str(raw["account_fingerprint"]),
         build_sha256=str(raw["build_sha256"]),
-        symbols=tuple(raw["symbols"]) if isinstance(raw["symbols"], list) else (),
+        symbols=tuple(raw["symbols"]) if isinstance(raw.get("symbols"), list) else (),
+        uptime_override_until=override,
+        universe_scope=str(raw["universe_scope"]) if version == 4 else None,
     )
     if not permit.permit_id or permit.approved_at.tzinfo is None or permit.expires_at.tzinfo is None:
         raise ValueError("activation permit identity and timezone-aware timestamps are required")
@@ -77,6 +91,12 @@ def load_activation_permit(
         raise ValueError("activation permit is not currently valid")
     if (permit.expires_at - permit.approved_at).total_seconds() > 24 * 60 * 60:
         raise ValueError("activation permit validity cannot exceed 24 hours")
+    if permit.uptime_override_until is not None and (
+        permit.uptime_override_until.tzinfo is None
+        or permit.uptime_override_until <= current
+        or permit.uptime_override_until > permit.expires_at
+    ):
+        raise ValueError("uptime override must be timezone-aware, active, and within permit validity")
     if not 1 <= permit.maximum_active_pools <= 15:
         raise ValueError("activation permit pool breadth must be between 1 and 15")
     if permit.policy_sha256 != policy_digest(policy_path):
@@ -85,10 +105,13 @@ def load_activation_permit(
         raise ValueError("activation permit does not match the account")
     if permit.build_sha256 != build_digest():
         raise ValueError("activation permit does not match the reviewed build")
-    if (not permit.symbols or len(permit.symbols) != len(set(permit.symbols))
-            or len(permit.symbols) > permit.maximum_active_pools
-            or any(not isinstance(symbol, str) or not symbol or symbol != symbol.upper() for symbol in permit.symbols)):
-        raise ValueError("activation permit requires exact unique uppercase symbols within pool breadth")
+    if permit.universe_scope is None:
+        if (not permit.symbols or len(permit.symbols) != len(set(permit.symbols))
+                or len(permit.symbols) > permit.maximum_active_pools
+                or any(not isinstance(symbol, str) or not symbol or symbol != symbol.upper() for symbol in permit.symbols)):
+            raise ValueError("activation permit requires exact unique uppercase symbols within pool breadth")
+    elif permit.universe_scope != "reward_catalog":
+        raise ValueError("activation permit universe scope is not approved")
     if store.get_runtime_state(f"consumed_permit:{permit.permit_id}") is not None:
         raise ValueError("activation permit has already been consumed")
     return permit

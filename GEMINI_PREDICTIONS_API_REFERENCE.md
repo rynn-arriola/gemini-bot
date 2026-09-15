@@ -4,7 +4,7 @@ Implementation repair check, September 15, 2026: revalidated official streams, a
 
 Working reference for the Gemini liquidity-rewards bot. This document summarizes the official Gemini Prediction Markets REST and WebSocket APIs and links to the canonical specification for every surface.
 
-Last verified: **2026-09-14 (America/New_York)**
+Last verified: **2026-09-15 (America/New_York)**
 
 > Gemini changes markets, reward pools, program rules, schemas, and limits. Treat the official specifications as authoritative and re-check them before deploying trading changes.
 
@@ -265,7 +265,7 @@ Current public event rows include:
 
 Reward-event pagination uses a maximum `limit` of 100. Program endpoints return HTTP 503 when the program is unavailable.
 
-Observed shared-category rows additionally contain `pool_id`, `pool_event_count` and `pool_category_name`. Preserve these fields even when an older generated schema omits them. `last_score_date` is a scoring date, not a precise timestamp proving competition is fresh. Event maker counts are not distinct pool-level account counts.
+Observed shared-category rows additionally contain `pool_id`, `pool_event_count`, `pool_category_name`, `recurring_duration_value`, and `recurring_duration_unit`. Preserve these fields even when an older generated schema omits them. The current response supplies `ends_at` but no reward `starts_at`; do not invent a reward activation timestamp. `last_score_date` is a scoring date, not a precise timestamp proving competition is fresh. Event maker counts are not distinct pool-level account counts.
 
 Official endpoint: [List Liquidity Rewards Events](https://developer.gemini.com/rest-api/prediction-markets/rewards/list-liquidity-rewards-events)
 
@@ -297,12 +297,14 @@ Important behavior:
 - For a one-sided book, the reference is the best price on that side instead of midpoint.
 - The size cap is a scoring cap, not necessarily an order-size cap.
 - The 1.5x multiplier applies to snapshots where the maker has qualifying orders on both sides of the same contract.
-- A maker below the daily uptime threshold receives no reward for that event/day.
+- A maker below the daily uptime threshold receives no reward for that event/day. The denominator is eligible snapshots, not necessarily all 1,440 minutes in an Eastern day.
 - Orders outside the maximum spread, below minimum size, or on post-only-mode contracts score zero.
 - `qualifying_maker_count` is the most recent snapshot-window count, not a guarantee of final daily competition.
 - Sub-$1 daily totals are suppressed rather than carried forward.
 - Reward seeking does not remove fill, inventory, settlement, or adverse-selection risk.
-- Shared-pool aggregation, exact cap aggregation and the eligible-snapshot uptime denominator require confirmation before claiming an exact payout estimator. A six-hour quoting window could fail a full-day 50% uptime requirement.
+- Event metadata supplies contract `effectiveDate`, event `startTime`, and expiry independently. A contract can be tradeable and rewarded days before its real-world resolution; entry is allowed only after `effectiveDate` and while the contract is open and present in the current reward feed.
+- Shared-pool aggregation, exact cap aggregation and the live eligible-snapshot start remain unreported. Track `pool_id` for one budget, event ticker for timing, and reconcile the next authenticated daily summary's `snapshot_count`/`total_snapshots` before claiming an exact payout estimator.
+- Sports markets are excluded at their published game `startTime`, even if in-play trading remains open. This local risk choice is stricter than Gemini's program-wide eligibility rule and does not apply to crypto interval contracts whose intended scoring window is live.
 - The observed public config returns only enablement, maximum spread and minimum payout. The other table values came from the program page, not that API response.
 
 ## Other Predictions incentives and fee overlays

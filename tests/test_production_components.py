@@ -30,14 +30,22 @@ from gemini_bot.reconciliation import (
 )
 from gemini_bot.risk_windows import RiskWindowPolicy
 from gemini_bot.runtime_files import atomic_write_json
-from gemini_bot.storage import SQLiteJournal
-from gemini_bot.uptime import locally_qualifying, sample_and_load_progress
+from gemini_bot.storage import SQLiteJournal, WindowsOwnerLock
+from gemini_bot.uptime import (
+    eastern_day_window,
+    estimated_reward_window,
+    locally_qualifying,
+    sample_and_load_progress,
+)
+from gemini_bot.domain import uptime_progress_key
 from gemini_bot.account_state import AccountReducer
 from gemini_bot.orchestrator import ProductionOrchestrator
 from gemini_bot.market_state import LocalBook
 from gemini_bot.domain import EngineState
 from gemini_bot.domain import BookTop
 from gemini_bot.reward_ranking import RankInput, rank_candidate
+from gemini_bot.public_ws import PublicMarketSocket
+from gemini_bot.rate_limits import AdmissionGovernor
 
 
 NOW = datetime(2026, 9, 15, 16, 0, tzinfo=timezone.utc)
@@ -206,6 +214,60 @@ class ActivationTests(unittest.TestCase):
                 )
             store.close()
 
+    def test_version_three_permit_binds_uptime_override_to_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteJournal(root / "journal.sqlite")
+            path = root / "permit.json"
+            self._write(
+                path,
+                permit_version=3,
+                uptime_override_until=(NOW + timedelta(minutes=30)).isoformat(),
+            )
+            permit = load_activation_permit(
+                path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                now=NOW + timedelta(minutes=1), account_fingerprint="fake-account",
+            )
+            self.assertEqual(permit.uptime_override_until, NOW + timedelta(minutes=30))
+            self._write(
+                path,
+                permit_version=3,
+                uptime_override_until=(NOW + timedelta(hours=2)).isoformat(),
+            )
+            with self.assertRaisesRegex(ValueError, "within permit validity"):
+                load_activation_permit(
+                    path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                    now=NOW + timedelta(minutes=1), account_fingerprint="fake-account",
+                )
+            store.close()
+
+    def test_version_four_permit_authorizes_only_reward_catalog_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteJournal(root / "journal.sqlite")
+            path = root / "permit.json"
+            self._write(path)
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["permit_version"] = 4
+            value.pop("symbols")
+            value["universe_scope"] = "reward_catalog"
+            value["uptime_override_until"] = (NOW + timedelta(minutes=30)).isoformat()
+            path.write_text(json.dumps(value), encoding="utf-8")
+            permit = load_activation_permit(
+                path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                now=NOW + timedelta(minutes=1), account_fingerprint="fake-account",
+            )
+            self.assertEqual(permit.universe_scope, "reward_catalog")
+            self.assertEqual(permit.symbols, ())
+            value["universe_scope"] = "all_markets"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "scope is not approved"):
+                load_activation_permit(
+                    path, policy_path=DEFAULT_POLICY_PATH, store=store,
+                    now=NOW + timedelta(minutes=1), account_fingerprint="fake-account",
+                )
+            store.close()
+
 
 class AccountRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_fill_is_durable_deduplicated_and_requests_cancel(self) -> None:
@@ -275,6 +337,23 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].rules.symbol, "TIGHT")
 
+    async def test_live_sports_event_is_not_discovered(self) -> None:
+        class Rest:
+            async def reward_events(self, *, ceiling: int = 3000):
+                return [{"event_ticker": "GAME", "daily_pool_usd": "100", "category": "Sports"}]
+
+            async def event(self, event_ticker: str):
+                return {"event": {
+                    "status": "active", "category": "Sports", "isLive": True,
+                    "startTime": "2026-09-15T16:00:00Z", "contracts": [{
+                        "instrumentSymbol": "GAME-X", "status": "active", "marketState": "open",
+                        "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                        "expiryDate": "2026-09-15T19:00:00Z",
+                    }],
+                }}
+
+        self.assertEqual(await RewardUniverseLoader(Rest()).load(maximum_pools=32), [])
+
     async def test_discovery_cap_is_unique_pool_cap(self) -> None:
         rows = [
             {"event_ticker": f"E{n}", "pool_id": n, "daily_pool_usd": str(n + 1)}
@@ -284,6 +363,11 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FileAndConfigTests(unittest.TestCase):
+    def test_approved_inventory_exit_is_five_minutes(self) -> None:
+        _, risk = load_policy()
+        self.assertEqual(risk.max_inventory_age_seconds, 300)
+        self.assertEqual(risk.sports_exit_before_start_seconds, 1200)
+
     def test_atomic_status_never_leaves_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "status.json"
@@ -299,7 +383,93 @@ class FileAndConfigTests(unittest.TestCase):
             config.validate()
 
 
+class PublicLivenessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protocol_pong_refreshes_quiet_shared_stream(self) -> None:
+        class Connection:
+            async def ping(self):
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(Decimal(".01"))
+                return future
+
+        socket = PublicMarketSocket(AdmissionGovernor())
+        socket._connection = Connection()
+        latency = await socket.prove_liveness(timeout=1)
+        self.assertEqual(latency, .01)
+        self.assertIsNotNone(socket.last_message_at)
+
+
 class UptimeTests(unittest.TestCase):
+    def test_eastern_reward_day_uses_eastern_midnight(self) -> None:
+        start, end = eastern_day_window(datetime(2026, 9, 15, 16, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 9, 15, 4, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 9, 16, 4, tzinfo=timezone.utc))
+
+    def test_eastern_reward_day_preserves_dst_length(self) -> None:
+        spring_start, spring_end = eastern_day_window(datetime(2026, 3, 8, 16, tzinfo=timezone.utc))
+        fall_start, fall_end = eastern_day_window(datetime(2026, 11, 1, 16, tzinfo=timezone.utc))
+        self.assertEqual(spring_end - spring_start, timedelta(hours=23))
+        self.assertEqual(fall_end - fall_start, timedelta(hours=25))
+
+    def test_missing_venue_start_uses_eastern_day_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "uptime.sqlite")
+            contract = RewardedContract(
+                "E", RewardPool("pool", Decimal("100")),
+                ContractRules("X", Decimal(".01"), Decimal("1"), Decimal("1")),
+                "2026-09-17T00:00:00Z",
+            )
+            progress = sample_and_load_progress(
+                store, [contract], AccountReducer(),
+                now=datetime(2026, 9, 15, 15, tzinfo=timezone.utc),
+            )["pool"]
+            # 11:00 Eastern: 661 minutes elapsed including the current bucket,
+            # with 780 whole minutes remaining in the 24-hour proxy day.
+            self.assertEqual(progress.eligible_snapshots, 661)
+            self.assertEqual(progress.remaining_snapshots_estimate, 780)
+            self.assertGreater(progress.best_possible_ratio, Decimal(".50"))
+            store.close()
+
+    def test_window_uses_trade_start_reward_end_and_preexpiry_guard(self) -> None:
+        contract = RewardedContract(
+            "E", RewardPool("pool", Decimal("100")),
+            ContractRules("X", Decimal(".01"), Decimal("1"), Decimal("1")),
+            "2026-09-15T18:00:00Z",
+            reward_ends_at="2026-09-15T19:00:00Z",
+            trade_starts_at="2026-09-15T15:30:00Z",
+        )
+        start, end, source = estimated_reward_window(contract, NOW)
+        self.assertEqual(start, datetime(2026, 9, 15, 15, 30, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 9, 15, 17, 55, tzinfo=timezone.utc))
+        self.assertEqual(source, "contract_effective_date_conservative_reward_start")
+
+    def test_shared_pool_keeps_event_uptime_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteJournal(Path(directory) / "uptime.sqlite")
+            common = RewardPool("shared:7", Decimal("100"))
+            rules = ContractRules("X", Decimal(".01"), Decimal("1"), Decimal("1"))
+            first = RewardedContract(
+                "EARLY", common, rules, "2026-09-15T18:00:00Z",
+                "2026-09-15T15:00:00Z", "2026-09-15T18:00:00Z",
+            )
+            second = RewardedContract(
+                "LATE", common, rules, "2026-09-15T19:00:00Z",
+                "2026-09-15T16:00:00Z", "2026-09-15T19:00:00Z",
+            )
+            progress = sample_and_load_progress(
+                store, [first, second], AccountReducer(), now=NOW,
+            )
+            early = progress[uptime_progress_key("EARLY", "shared:7")]
+            late = progress[uptime_progress_key("LATE", "shared:7")]
+            self.assertEqual(early.eligible_snapshots, 61)
+            self.assertEqual(late.eligible_snapshots, 1)
+            self.assertEqual(early.observed_window_eligible_snapshots, 1)
+            self.assertEqual(late.observed_window_eligible_snapshots, 1)
+            rows = store.connection.execute(
+                "SELECT event_ticker FROM reward_uptime_v2 ORDER BY event_ticker"
+            ).fetchall()
+            self.assertEqual(rows, [("EARLY",), ("LATE",)])
+            store.close()
+
     def test_uptime_samples_once_per_minute_and_survives_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "uptime.sqlite"
@@ -406,6 +576,7 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
             private = Private()
             runtime.rest = Rest()
             runtime.control_directory = Path(directory) / "isolated-control"
+            runtime.lock = WindowsOwnerLock(runtime.control_directory / "mutation-owner.lock")
             runtime.public = Public()
             runtime.private = private
             try:

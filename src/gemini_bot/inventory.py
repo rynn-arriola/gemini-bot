@@ -37,7 +37,7 @@ class Position:
 
 @dataclass(frozen=True, slots=True)
 class TimedExitPolicy:
-    max_inventory_age_seconds: int = 900
+    max_inventory_age_seconds: int = 300
     force_exit_before_expiry_seconds: int = 300
 
     def __post_init__(self) -> None:

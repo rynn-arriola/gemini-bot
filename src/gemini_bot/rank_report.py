@@ -4,13 +4,11 @@ from datetime import datetime
 from decimal import Decimal
 
 from .catalog import RewardedContract
-from .domain import UptimeProgress
+from .domain import UptimeProgress, uptime_progress_key
 from .market_state import LocalBook
 from .account_state import AccountReducer
 from .domain import Outcome
 from .reward_ranking import RankInput, RankedCandidate, rank_unique_pools
-
-
 def rank_live_universe(
     contracts: list[RewardedContract],
     books: dict[str, LocalBook],
@@ -52,7 +50,15 @@ def rank_live_universe(
             pool=contract.pool,
             rules=contract.rules,
             book=top,
-            uptime=progress.get(contract.pool.pool_id, UptimeProgress()),
+            uptime=progress.get(
+                uptime_progress_key(contract.event_ticker, contract.pool.pool_id),
+                progress.get(contract.pool.pool_id, UptimeProgress()),
+            ),
+            event_ticker=contract.event_ticker,
+            pool_source=contract.pool_source,
+            pool_event_count=contract.pool_event_count,
+            recurring_duration_value=contract.recurring_duration_value,
+            recurring_duration_unit=contract.recurring_duration_unit,
         ))
     return rank_unique_pools(
         inputs,
@@ -66,17 +72,27 @@ def public_rank_rows(candidates: list[RankedCandidate], *, target_uptime: Decima
     return [
         {
             "pool_id": item.pool_id,
+            "event_ticker": item.event_ticker,
             "symbol": item.symbol,
             "eligible_now": item.eligible_now,
             "uptime_feasible": item.uptime_feasible,
             "target_uptime_proxy": str(target_uptime),
             "target_reachable_proxy": None if item.best_possible_uptime is None else item.best_possible_uptime >= target_uptime,
             "priority_score": str(item.priority_score),
+            "potential_priority_score": str(item.potential_priority_score),
             "quality_proxy": str(item.quality_proxy),
             "capital_proxy_usd": str(item.capital_proxy_usd),
             "reasons": list(item.reasons),
-            "local_utc_day_observed_uptime_proxy": str(item.observed_uptime) if item.observed_uptime is not None else None,
-            "local_utc_day_best_possible_uptime_proxy": str(item.best_possible_uptime) if item.best_possible_uptime is not None else None,
+            "local_eastern_day_observed_uptime_proxy": str(item.observed_uptime) if item.observed_uptime is not None else None,
+            "local_eastern_day_best_possible_uptime_proxy": str(item.best_possible_uptime) if item.best_possible_uptime is not None else None,
+            "observed_start_best_possible_uptime_bound": str(item.observed_start_best_possible_uptime) if item.observed_start_best_possible_uptime is not None else None,
+            "uptime_window_start": item.uptime_window_start.isoformat() if item.uptime_window_start else None,
+            "uptime_window_end": item.uptime_window_end.isoformat() if item.uptime_window_end else None,
+            "uptime_start_source": item.uptime_start_source,
+            "pool_source": item.pool_source,
+            "pool_event_count": item.pool_event_count,
+            "recurring_duration_value": item.recurring_duration_value,
+            "recurring_duration_unit": item.recurring_duration_unit,
             "yes_price": str(item.quote.yes.price) if item.quote else None,
             "no_price": str(item.quote.no.price) if item.quote else None,
             "quantity_each": str(item.quote.yes.quantity) if item.quote else None,

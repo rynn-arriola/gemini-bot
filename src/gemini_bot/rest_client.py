@@ -173,28 +173,51 @@ class GeminiReadRestClient:
         return await self.public_get("/v1/prediction-markets/liquidity-rewards/config")
 
     async def reward_events(self, *, ceiling: int = 3000) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for offset in range(0, ceiling, 100):
-            page = await self.public_get(
-                "/v1/prediction-markets/liquidity-rewards/events",
-                {"limit": 100, "offset": offset, "sort": "title_asc"},
-            )
-            events = page.get("events")
-            pagination = page.get("pagination")
-            if not isinstance(events, list) or not isinstance(pagination, dict):
-                raise ApiError(200, "invalid_reward_catalog_shape")
-            for row in events:
-                if not isinstance(row, dict) or not row.get("event_ticker"):
-                    raise ApiError(200, "invalid_reward_event")
-                ticker = str(row["event_ticker"])
-                if ticker in seen:
-                    raise ApiError(200, "duplicate_reward_event")
-                seen.add(ticker)
-                rows.append(row)
-            if offset + len(events) >= int(pagination.get("total", 0)):
-                return rows
-        raise ApiError(200, "reward_catalog_ceiling_exceeded")
+        # Offset pagination is not a snapshot. If Gemini inserts or reorders an
+        # event while pages are being read, the boundary item can appear twice
+        # and another item can be skipped. Restart the bounded read rather than
+        # accepting an incomplete catalog or failing a live safety refresh on a
+        # transient duplicate.
+        for attempt in range(3):
+            rows: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            retry_snapshot = False
+            for offset in range(0, ceiling, 100):
+                page = await self.public_get(
+                    "/v1/prediction-markets/liquidity-rewards/events",
+                    {"limit": 100, "offset": offset, "sort": "title_asc"},
+                )
+                events = page.get("events")
+                pagination = page.get("pagination")
+                if not isinstance(events, list) or not isinstance(pagination, dict):
+                    raise ApiError(200, "invalid_reward_catalog_shape")
+                try:
+                    total = int(pagination.get("total", 0))
+                except (TypeError, ValueError) as exc:
+                    raise ApiError(200, "invalid_reward_catalog_total") from exc
+                if total > ceiling:
+                    raise ApiError(200, "reward_catalog_ceiling_exceeded")
+                for row in events:
+                    if not isinstance(row, dict) or not row.get("event_ticker"):
+                        raise ApiError(200, "invalid_reward_event")
+                    ticker = str(row["event_ticker"])
+                    if ticker in seen:
+                        retry_snapshot = True
+                        break
+                    seen.add(ticker)
+                    rows.append(row)
+                if retry_snapshot:
+                    break
+                if offset + len(events) >= total:
+                    if len(rows) != total:
+                        retry_snapshot = True
+                        break
+                    return rows
+            if not retry_snapshot:
+                raise ApiError(200, "reward_catalog_ceiling_exceeded")
+            if attempt < 2:
+                await asyncio.sleep(0)
+        raise ApiError(200, "unstable_reward_catalog")
 
     async def event(self, event_ticker: str) -> dict[str, Any]:
         safe = urllib.parse.quote(event_ticker, safe="")

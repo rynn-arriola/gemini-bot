@@ -41,8 +41,9 @@ class RiskConfig:
     max_two_sided_quotes: int = 15
     max_tracked_markets: int = 32
     max_pending_orders: int = 30
-    max_inventory_age_seconds: int = 900
+    max_inventory_age_seconds: int = 300
     force_exit_before_expiry_seconds: int = 300
+    sports_exit_before_start_seconds: int = 1200
 
     def validate(self) -> None:
         if self.max_gross_reservation_usd <= 0:
@@ -63,6 +64,8 @@ class RiskConfig:
             raise ConfigurationError("max_inventory_age_seconds must be positive")
         if self.force_exit_before_expiry_seconds <= 0:
             raise ConfigurationError("force_exit_before_expiry_seconds must be positive")
+        if self.sports_exit_before_start_seconds <= 0:
+            raise ConfigurationError("sports_exit_before_start_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +161,7 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         max_pending_orders=int(raw["max_pending_orders"]),
         max_inventory_age_seconds=int(raw["max_inventory_age_seconds"]),
         force_exit_before_expiry_seconds=int(raw["force_exit_before_expiry_seconds"]),
+        sports_exit_before_start_seconds=int(raw.get("sports_exit_before_start_seconds", 1200)),
     )
     strategy.validate()
     risk.validate()

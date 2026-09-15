@@ -18,6 +18,7 @@ from gemini_bot.rank_report import public_rank_rows, rank_live_universe
 from gemini_bot.rate_limits import Priority
 from gemini_bot.reconciliation import assert_position_consistency, assert_stable_account_bracket, build_account_snapshot
 from gemini_bot.runtime_files import atomic_write_json
+from gemini_bot.uptime import sample_and_load_progress
 
 
 class ReadOnlyAccountSocket(LiveWebSocket):
@@ -106,14 +107,22 @@ def sample(runtime):
     }
 
 
-async def run(env: Path, directory: Path, seconds: int) -> int:
-    if not 1 <= seconds <= 300:
-        raise ValueError("preflight duration must be 1-300 seconds")
+async def run(
+    env: Path,
+    directory: Path,
+    seconds: int,
+    *,
+    maximum_seconds: int = 300,
+    observation_mode: str = "preflight",
+) -> int:
+    if not 1 <= seconds <= maximum_seconds:
+        raise ValueError(f"{observation_mode} duration must be 1-{maximum_seconds} seconds")
     config = load_preflight_config(env)
     runtime = ProductionOrchestrator(config, directory, read_only=True)
     runtime.private = ReadOnlyAccountSocket(config.api_key, config.api_secret, runtime.governor, runtime.ledger)
     runtime.public = ObservedPublicSocket(runtime.governor)
-    report = {"read_only": True, "requested_seconds": seconds, "started_at": datetime.now(timezone.utc).isoformat(),
+    report = {"read_only": True, "observation_mode": observation_mode,
+              "requested_seconds": seconds, "started_at": datetime.now(timezone.utc).isoformat(),
               "cancel_on_disconnect": False, "orders_submitted": 0, "cancels_submitted": 0,
               "activation_permit_consumed": False, "samples": [], "result": "running",
               "standard_sell_compatibility": "not_proven_by_read_only_observation"}
@@ -160,6 +169,13 @@ async def run(env: Path, directory: Path, seconds: int) -> int:
                     raise RuntimeError("required stream ended")
             if runtime.gate.state is not EngineState.READY and not startup_blocked:
                 raise RuntimeError("production preparation gate is no longer ready/paused")
+            now = datetime.now(timezone.utc)
+            runtime._uptime = sample_and_load_progress(
+                runtime.journal, runtime.universe, runtime.account.reducer, now=now,
+                books=runtime.public.books,
+                market_data_verified_at=runtime._market_data_verified_at(),
+                exit_before_expiry_seconds=runtime.config.risk.force_exit_before_expiry_seconds,
+            )
             observation = sample(runtime)
             report["samples"].append(observation)
             # Public candidate prices are safe; never serialize raw account frames or amounts.
@@ -219,5 +235,13 @@ if __name__ == "__main__":
     parser.add_argument("--env", type=Path, default=Path(".env"))
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=300)
+    parser.add_argument(
+        "--timing-shadow", action="store_true",
+        help="permit a bounded 30-minute read-only reward-timing observation",
+    )
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(run(args.env, args.directory, args.seconds)))
+    raise SystemExit(asyncio.run(run(
+        args.env, args.directory, args.seconds,
+        maximum_seconds=1800 if args.timing_shadow else 300,
+        observation_mode="reward_timing_shadow" if args.timing_shadow else "preflight",
+    )))

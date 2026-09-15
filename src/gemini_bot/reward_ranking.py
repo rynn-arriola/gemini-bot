@@ -22,21 +22,36 @@ class RankInput:
     uptime: UptimeProgress = UptimeProgress()
     fill_hazard: Decimal = Decimal("0")
     exit_risk: Decimal = Decimal("0")
+    event_ticker: str = ""
+    pool_source: str = "unspecified"
+    pool_event_count: int | None = None
+    recurring_duration_value: int | None = None
+    recurring_duration_unit: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class RankedCandidate:
     pool_id: str
+    event_ticker: str
     symbol: str
     eligible_now: bool
     uptime_feasible: bool
     quote: QuotePair | None
     priority_score: Decimal
+    potential_priority_score: Decimal
     quality_proxy: Decimal
     capital_proxy_usd: Decimal
     reasons: tuple[str, ...]
     observed_uptime: Decimal | None
     best_possible_uptime: Decimal | None
+    observed_start_best_possible_uptime: Decimal | None
+    uptime_window_start: datetime | None
+    uptime_window_end: datetime | None
+    uptime_start_source: str
+    pool_source: str
+    pool_event_count: int | None
+    recurring_duration_value: int | None
+    recurring_duration_unit: str
 
 
 def _floor_to_tick(value: Decimal, tick: Decimal) -> Decimal:
@@ -112,23 +127,30 @@ def rank_candidate(
     makers = Decimal(max(1, item.pool.qualifying_maker_count or 1))
     hazard_factor = max(Decimal("0"), Decimal("1") - item.fill_hazard)
     exit_factor = max(Decimal("0"), Decimal("1") - item.exit_risk)
-    priority = (
-        item.pool.daily_budget_usd * quality * hazard_factor * exit_factor / makers
-        if eligible
-        else Decimal("0")
-    )
+    potential_priority = item.pool.daily_budget_usd * quality * hazard_factor * exit_factor / makers
+    priority = potential_priority if eligible else Decimal("0")
     return RankedCandidate(
         pool_id=item.pool.pool_id,
+        event_ticker=item.event_ticker,
         symbol=item.rules.symbol,
         eligible_now=eligible,
         uptime_feasible=uptime_feasible,
         quote=quote,
         priority_score=priority,
+        potential_priority_score=potential_priority,
         quality_proxy=quality,
         capital_proxy_usd=capital,
         reasons=tuple(reasons),
         observed_uptime=item.uptime.observed_ratio,
         best_possible_uptime=item.uptime.best_possible_ratio,
+        observed_start_best_possible_uptime=item.uptime.observed_start_best_possible_ratio,
+        uptime_window_start=item.uptime.window_start,
+        uptime_window_end=item.uptime.window_end,
+        uptime_start_source=item.uptime.start_source,
+        pool_source=item.pool_source,
+        pool_event_count=item.pool_event_count,
+        recurring_duration_value=item.recurring_duration_value,
+        recurring_duration_unit=item.recurring_duration_unit,
     )
 
 
@@ -144,4 +166,10 @@ def rank_unique_pools(items: list[RankInput], **kwargs: object) -> list[RankedCa
             current.symbol,
         ):
             best[ranked.pool_id] = ranked
-    return sorted(best.values(), key=lambda value: (-value.priority_score, value.pool_id, value.symbol))
+    return sorted(
+        best.values(),
+        key=lambda value: (
+            -value.priority_score, -value.potential_priority_score,
+            value.pool_id, value.symbol,
+        ),
+    )

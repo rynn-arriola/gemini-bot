@@ -520,6 +520,28 @@ class InfrastructureTests(unittest.TestCase):
         joined = join_reward_contracts(rewards, {"E1": event("A"), "E2": event("B")})
         self.assertEqual({item.pool.pool_id for item in joined}, {"shared:7"})
 
+    def test_catalog_preserves_reward_pool_and_contract_timing_metadata(self) -> None:
+        joined = join_reward_contracts(
+            [{
+                "event_ticker": "E", "pool_id": 9, "daily_pool_usd": "50",
+                "ends_at": "2026-09-16T00:00:00Z", "pool_source": "category_default",
+                "pool_event_count": 23, "recurring_duration_value": 5,
+                "recurring_duration_unit": "MINUTES",
+            }],
+            {"E": {"status": "active", "contracts": [{
+                "instrumentSymbol": "X", "status": "active", "marketState": "open",
+                "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                "effectiveDate": "2026-09-15T12:00:00Z",
+                "expiryDate": "2026-09-16T00:00:00Z",
+            }]}},
+        )
+        self.assertEqual(len(joined), 1)
+        item = joined[0]
+        self.assertEqual(item.trade_starts_at, "2026-09-15T12:00:00Z")
+        self.assertEqual(item.pool_source, "category_default")
+        self.assertEqual(item.pool_event_count, 23)
+        self.assertEqual((item.recurring_duration_value, item.recurring_duration_unit), (5, "MINUTES"))
+
 
 if __name__ == "__main__":
     unittest.main()

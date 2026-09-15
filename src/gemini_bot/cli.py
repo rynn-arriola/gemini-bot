@@ -23,12 +23,14 @@ async def _prepare(config_path: Path, directory: Path) -> None:
         await runtime.close()
 
 
-async def _run_live(config_path: Path, directory: Path, permit: Path) -> None:
+async def _run_live(
+    config_path: Path, directory: Path, permit: Path, *, ignore_uptime_proxy: bool
+) -> None:
     config = load_live_config(config_path)
     runtime = ProductionOrchestrator(config, directory)
     try:
         await runtime.prepare()
-        await runtime.activate(permit)
+        await runtime.activate(permit, ignore_uptime_proxy=ignore_uptime_proxy)
     finally:
         await runtime.close()
 
@@ -47,6 +49,10 @@ def main() -> int:
     live.add_argument("--env", type=Path, default=Path(".env"))
     live.add_argument("--directory", type=Path, default=Path("data/production"))
     live.add_argument("--activation-permit", type=Path, required=True)
+    live.add_argument(
+        "--ignore-uptime-proxy", action="store_true",
+        help="requires a permit-bound expiry; does not claim Gemini reward eligibility",
+    )
     args = parser.parse_args()
     if args.command == "validate-config":
         try:
@@ -81,7 +87,10 @@ def main() -> int:
         return 0
     if args.command == "run-live":
         try:
-            asyncio.run(_run_live(args.env, args.directory, args.activation_permit))
+            asyncio.run(_run_live(
+                args.env, args.directory, args.activation_permit,
+                ignore_uptime_proxy=args.ignore_uptime_proxy,
+            ))
         except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
             parser.error(str(exc))
         return 0
