@@ -1,14 +1,15 @@
 # Gemini current status
 
-Updated September 15, 2026 at 17:40 America/New_York.
+Updated September 15, 2026 at 17:45 America/New_York.
 
 ## Operational state
 
-- **Stopped; last authenticated recovery proved flat and order-free.** The supervisor is dismissed and no Gemini runner is active.
-- The attempted restart stopped before placing orders because a paid $0.08 maker rebate changed confirmed cash. It was not a trading loss; current six-hour realized trading P&L remains **-$0.28**.
+- **Live and quoting** in `data/production-20260915-nontrading-v8` under the bounded Windows supervisor. Latest heartbeat: 30 pending orders, zero positions, 32 tracked, 29 ranked, zero dropped logs, and no error/critical records.
+- The prior restart stopped before placing orders because a paid $0.08 maker rebate changed confirmed cash. It was not a trading loss; current six-hour realized trading P&L remains **-$0.28**.
 - The repair separates authenticated deposits, withdrawals, liquidity rewards, and maker rebates from fill-only realized P&L. Exact non-trading activity reconciles cash; unknown activity still blocks.
 - Full validation passes: 214 production tests, 28 observer/script tests, compilation, Windows release validation, PowerShell parsing, and a deliberate regression reversal.
-- Fresh authenticated read-only preparation passed: 32 tracked, 29 ranked, four eligible, zero positions, zero orders, one exact non-trading adjustment, complete -$0.28 fill P&L. No permit or mutation was used.
+- Fresh authenticated read-only preparation passed before activation: 32 tracked, 29 ranked, four eligible, zero positions, zero orders, one exact non-trading adjustment, complete -$0.28 fill P&L.
+- Deployed commit `bcc5e18` with a version-5 permit expiring at midnight Eastern. The supervisor may perform at most two same-session flat recovery restarts.
 
 ## Prior fill-race repair
 
@@ -27,4 +28,4 @@ Updated September 15, 2026 at 17:40 America/New_York.
 
 ## Handoff
 
-Commit/push the reviewed repair, create a new build-bound version-5 permit, and then use the owner's standing restart instruction. Verify `RUNNING`, `quoting`, at most 30 orders, and no unexpected error logs.
+Monitor the live runtime and the next fill. On any handoff, read `supervisor-status.json`, `status.json`, and redacted logs first; never infer health from process existence alone.

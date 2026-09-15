@@ -5,6 +5,7 @@
 - Authenticated payout history identifies one paid $0.08 maker rebate from two SOL maker fills totaling $10.90 of volume. It is separate from liquidity rewards.
 - The rebate is non-trading cash. Current six-hour realized P&L remains -$0.28 because that meter reads only completed matched fills and recorded trading fees.
 - Gemini's authenticated `/v2/transfers` feed can classify bounded USD deposits and withdrawals. The bot uses the documented one-request-per-five-seconds lane and rejects full/ambiguous history.
+- Commit `bcc5e18` passed authenticated preparation and entered supervised live quoting. The verified heartbeat returned to 30 pending orders with zero positions and no error/critical logs.
 
 ## September 15, 2026: 17:00 fill race and fail-safe drain
 
