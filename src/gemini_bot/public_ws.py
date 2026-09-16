@@ -15,6 +15,7 @@ from .domain import canonical_symbol
 from .rate_limits import AdmissionGovernor, Priority
 from .scheduler import DirtySymbolScheduler
 from .ws_limits import observe_response, receive_connection_limits, pace_connection
+from .ws_requests import RequestTracker
 
 
 PRODUCTION_WS = "wss://ws.gemini.com?snapshot=-1"
@@ -52,6 +53,7 @@ class PublicMarketSocket:
         # that the shared sequenced stream is alive; LocalBook.observed_at keeps
         # its separate meaning of "last state change for this symbol".
         self.last_message_at: datetime | None = None
+        self._requests = RequestTracker()
 
     def note_message(self, observed_at: datetime | None = None) -> datetime:
         timestamp = observed_at or datetime.now(timezone.utc)
@@ -83,14 +85,16 @@ class PublicMarketSocket:
             self._initial_frames = await receive_connection_limits(
                 self._connection, self._governor, "public_ws", self._request_id,
             )
+            self._requests.pending.pop(self._request_id, None)
         except BaseException:
             await self.close()
             raise
 
     async def close(self) -> None:
-        if self._connection is not None:
-            await self._connection.close()
-            self._connection = None
+        connection, self._connection = self._connection, None
+        self._requests = RequestTracker()
+        if connection is not None:
+            await connection.close()
 
     async def prove_liveness(self, *, timeout: float = 2.0) -> float:
         """Use protocol ping/pong to prove a quiet event-driven stream is live."""
@@ -106,15 +110,23 @@ class PublicMarketSocket:
             return float(latency)
 
     async def _send(self, method: str, params: object, priority: Priority) -> None:
-        if self._connection is None:
+        async with asyncio.timeout(45):
+            await self._send_bounded(method, params, priority)
+
+    async def _send_bounded(self, method: str, params: object, priority: Priority) -> None:
+        connection = self._connection
+        if connection is None:
             raise ConnectionError("public WebSocket is not connected")
         async with self._send_lock:
             delay = self._governor.admit_websocket("public_ws", priority, method)
             while delay:
                 await asyncio.sleep(delay)
                 delay = self._governor.admit_websocket("public_ws", priority, method)
+            if self._connection is not connection:
+                raise ConnectionError("public WebSocket generation changed before send")
             self._request_id += 1
-            await self._connection.send(json.dumps(
+            self._requests.register(self._request_id, method)
+            await connection.send(json.dumps(
                 {"id": self._request_id, "method": method, "params": params},
                 separators=(",", ":"),
             ))
@@ -194,15 +206,18 @@ class PublicMarketSocket:
         return symbol
 
     async def frames(self) -> AsyncIterator[dict[str, Any]]:
-        if self._connection is None:
+        connection, requests = self._connection, self._requests
+        if connection is None:
             raise ConnectionError("public WebSocket is not connected")
         for frame in self._initial_frames:
+            requests.response(frame)
             yield frame
         self._initial_frames.clear()
-        async for raw in self._connection:
+        async for raw in connection:
             if isinstance(raw, str):
                 value = json.loads(raw)
                 if isinstance(value, dict):
                     observe_response(self._governor, "public_ws", value)
+                    requests.response(value)
                     self.note_message()
                     yield value

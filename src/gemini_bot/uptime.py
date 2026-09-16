@@ -118,6 +118,7 @@ def locally_qualifying(
     *,
     now: datetime | None = None,
     market_data_verified_at: datetime | None = None,
+    minimum_sides: int = 1,
 ) -> bool:
     freshness_at = market_data_verified_at or (book.observed_at if book is not None else None)
     if (book is None or not book.synchronized or book.top() is None or now is None
@@ -134,7 +135,7 @@ def locally_qualifying(
         and order.remaining_quantity >= 10
         and abs((order.price if order.outcome is Outcome.YES else 1 - order.price) - midpoint) <= Decimal(".10")
     }
-    return bool(outcomes)  # Either side can score; two sides are a bonus, not a prerequisite.
+    return len(outcomes) >= minimum_sides  # Either side can score; two sides are a bonus.
 
 
 def sample_and_load_progress(

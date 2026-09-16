@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 15, 2026 — availability and churn review (source only)
+
+Bound cancellation/exit/drain waits end to end and start owned entry cancellation before slow exit joins. Correlate WS replies so known read throttles/service errors recover while mutation/auth/integrity failures remain closed. Separate recoverable lifecycle/reward holds, requiring current metadata and terminal/flat proof before releasing only those reasons. Recheck connection generation and terminal cancels after pacing; never replay attempted sends. Share safe retention criteria, reason-code quote cancellations and measure sub-clock either-/two-sided gaps. **463 tests passed (41 new)** plus three negative controls and offline release checks. No restart/deployment or guarantee of live churn reduction. [Full evidence](docs/AVAILABILITY_AND_CHURN_2026-09-15.md).
+
 ## September 15, 2026 — fill/exit continuity (source only, no restart)
 
 V7 uses independent market exit owners and paced additional rounds only after known-terminal, fresh exact residual proof. Known thin/stale exit books and exhausted rounds no longer inherently drain unrelated markets. Fill cancellation bypasses unrelated lifecycle/exit waits while retaining the existing per-order deduplicated mutation owner. Exact flat proof atomically clears both completed outcome deadlines and only the fill hold, fixing net-flat paired fills and flat-during-cancel. Startup reconstructs those holds from durable deadlines.

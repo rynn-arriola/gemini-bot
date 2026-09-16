@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -35,6 +36,8 @@ from .live_ws import (
     LiveWebSocket,
     MutationNotSentError,
     QuoteChangedBeforeSend,
+    TransportChangedBeforeSend,
+    AdmissionTimeoutBeforeSend,
 )
 from .operational_logging import ErrorClass, OperationalLogger, configure_logging
 from .persistent_risk import PersistentRiskWindow
@@ -46,7 +49,7 @@ from .profitability import (
 from .public_ws import PublicMarketSocket
 from .rank_report import public_rank_rows, rank_live_universe
 from .rate_limits import AdmissionGovernor
-from .reward_ranking import select_sticky_candidates
+from .reward_ranking import select_sticky_candidates, resting_quote_safe
 from .reconciliation import (
     AccountSnapshot,
     assert_position_consistency,
@@ -73,6 +76,9 @@ from .stream_recovery import RecoveryPending, terminal_history_status
 
 _UPTIME_PROXY_REJECTION = "50% uptime is no longer reachable in the estimated window"
 _STREAM_RECOVERY_SECONDS = 60
+_EXIT_WORKER_SECONDS = 45
+_DRAIN_SECONDS = 90
+_DRAIN_JOIN_SECONDS = 50
 
 
 def _utc_now() -> datetime:
@@ -132,6 +138,9 @@ class ProductionOrchestrator:
         self.account.exit_before_expiry_seconds = config.risk.force_exit_before_expiry_seconds
         self.gate = LiveEngineGate()
         self.private.mutation_guard = self._validate_send
+        self.private.cancel_is_terminal = lambda order_id: (
+            order_id in self.account.reducer.orders and not self.account.reducer.orders[order_id].working
+        )
         self.universe = []
         self.ranked = []
         self.profitability = ProfitabilityTracker()
@@ -144,6 +153,8 @@ class ProductionOrchestrator:
         self._expiry: dict[str, datetime] = {}
         self._trade_start: dict[str, datetime] = {}
         self._sports_start: dict[str, datetime] = {}
+        self._market_status_versions: dict[str, int] = {}
+        self._market_status: dict[str, str] = {}
         self._dynamic_pending_cap = config.risk.max_pending_orders
         self._last_snapshot = AccountSnapshot((), ())
         self._uptime = {}
@@ -159,8 +170,11 @@ class ProductionOrchestrator:
         self._continuous_service = False
         self._reward_program_paused = False
         self._resting_observations: dict[str, RestingObservation] = {}
+        self._two_sided_resting_observations: dict[str, RestingObservation] = {}
         self._retained_pairs = 0
         self._replaced_pairs = 0
+        self._quote_cancel_reasons: Counter[str] = Counter()
+        self._retention_reason = "not_evaluated"
         self._recoverable_exit = False
         self._reward_epoch: tuple[str, bool] | None = None
         self._catalog_scope = False
@@ -193,7 +207,7 @@ class ProductionOrchestrator:
             self.directory / "logs", secrets=(config.api_key, config.api_secret)
         )
         self.log = OperationalLogger(self._logging, self.journal)
-        self.account.event_sink = lambda event, fields: self.log.event(logging.INFO, event, **fields)
+        self.account.event_sink = self._account_event
         self._last_logged_status: tuple[str, bool, str] | None = None
         self._last_status_log_at = 0.0
         self.log.event(logging.INFO, "runner_created", read_only=read_only)
@@ -241,15 +255,34 @@ class ProductionOrchestrator:
              "reward_epoch": self._reward_epoch},
         )
 
-    def _observe_resting(self) -> None:
+    def _account_event(self, event: str, fields: dict[str, object]) -> None:
+        self.log.event(logging.INFO, event, **fields)
+        if event == "order_transition":
+            symbol = str(fields["symbol"])
+            # Observe every lifecycle event as well as the clock. Otherwise a
+            # cancel and replacement inside one 250ms tick can hide a gap.
+            self._observe_resting(symbol_filter=symbol)
+            observation = self._resting_observations.get(symbol)
+            if observation is not None and fields.get("side") == "BUY":
+                if fields.get("status") == "NEW":
+                    observation.order_new_events += 1
+                elif fields.get("status") == "CANCELED":
+                    observation.order_cancel_events += 1
+
+    def _observe_resting(self, *, symbol_filter: str | None = None) -> None:
         now, clock = _utc_now(), time.monotonic()
         # Bounded to current owners, with per-run measurements. No historical
         # event/day counters are replaced and no offline time is credited.
         symbols = {c.rules.symbol for c in self.universe}
         self._resting_observations = {s: v for s, v in self._resting_observations.items() if s in symbols}
+        self._two_sided_resting_observations = {
+            s: v for s, v in self._two_sided_resting_observations.items() if s in symbols
+        }
         healthy = (not self._stream_holds and not self._reward_program_paused
                    and self.account.snapshots_fresh and self.account.equity_classification_complete)
         for c in self.universe:
+            if symbol_filter is not None and c.rules.symbol != symbol_filter:
+                continue
             if c.pool.pool_id not in self._sticky_pool_ids and c.rules.symbol not in self._resting_observations:
                 continue
             qualifies = healthy and self._entry_time_valid(c.rules.symbol) and locally_qualifying(
@@ -257,11 +290,22 @@ class ProductionOrchestrator:
                 market_data_verified_at=self._market_data_verified_at(),
             )
             self._resting_observations.setdefault(c.rules.symbol, RestingObservation()).observe(clock, qualifies)
+            both = qualifies and locally_qualifying(
+                c, self.account.reducer, self.public.books.get(c.rules.symbol), now=now,
+                market_data_verified_at=self._market_data_verified_at(), minimum_sides=2,
+            )
+            self._two_sided_resting_observations.setdefault(c.rules.symbol, RestingObservation()).observe(clock, both)
 
     def _continuity_view(self) -> dict[str, Any]:
         return {"source": "local_per_run_observation_not_exchange_snapshots",
                 "retained_pair_checks": self._retained_pairs, "replaced_pairs": self._replaced_pairs,
+                "cancel_decisions_by_reason": dict(self._quote_cancel_reasons),
+                "two_sided_symbols": {s: v.view() for s, v in self._two_sided_resting_observations.items()},
                 "symbols": {s: v.view() for s, v in self._resting_observations.items()}}
+
+    def _record_quote_cancel(self, symbol: str, reason: str) -> None:
+        self._quote_cancel_reasons[reason] += 1
+        self.log.event(logging.INFO, "quote_cancel_decision", symbol=symbol, reason=reason)
 
     def _override_active(self, now: datetime | None = None) -> bool:
         return self._commissioning_ignore_uptime_proxy and (
@@ -607,9 +651,13 @@ class ProductionOrchestrator:
 
     def _handle_contract_status(self, frame: dict[str, Any]) -> None:
         symbol = str(frame.get("s", "")).upper()
-        if symbol not in self._expiry or str(frame.get("n", "")).lower() == "active":
+        if symbol not in self._expiry:
             return
-        self.account.block_entries(symbol)
+        self._market_status_versions[symbol] = self._market_status_versions.get(symbol, 0) + 1
+        self._market_status[symbol] = str(frame.get("n", "")).lower()
+        if self._market_status[symbol] == "active":
+            return  # Metadata and terminal/flat proof, not this event, release it.
+        self.account.block_entries(symbol, reason="lifecycle")
         self.journal.audit("contract_lifecycle_block", {"symbol": symbol})
         if self.account.reducer.positions.get(symbol, Decimal("0")) != 0:
             raise RuntimeError("tracked contract changed lifecycle with open inventory")
@@ -628,6 +676,12 @@ class ProductionOrchestrator:
             while True:
                 try:
                     frame = await anext(frames)
+                except ApiError as exc:
+                    if not transient_failure(exc):
+                        raise
+                    await self._recover_stream("public", exc, generation=generation)
+                    frames, generation = self.public.frames(), self._stream_generation["public"]
+                    continue
                 except (StopAsyncIteration, ConnectionClosed, ConnectionError, TimeoutError, OSError) as exc:
                     await self._recover_stream("public", exc, generation=generation)
                     frames, generation = self.public.frames(), self._stream_generation["public"]
@@ -691,6 +745,12 @@ class ProductionOrchestrator:
             while True:
                 try:
                     frame = await anext(frames)
+                except ApiError as exc:
+                    if not transient_failure(exc):
+                        raise
+                    await self._recover_stream("private", exc, generation=generation)
+                    frames, generation = self.private.messages(), self._stream_generation["private"]
+                    continue
                 except (StopAsyncIteration, ConnectionClosed, ConnectionError, TimeoutError, OSError) as exc:
                     await self._recover_stream("private", exc, generation=generation)
                     frames, generation = self.private.messages(), self._stream_generation["private"]
@@ -1084,6 +1144,15 @@ class ProductionOrchestrator:
                     self._cancel_tasks.pop(order_id, None)
 
     async def _cancel_order_and_confirm_once(self, order_id: str, *, timeout: float = 45) -> None:
+        # Includes admission and socket send, not just the confirmation phase.
+        # A timeout remains latched in _cancel_tasks; it never authorizes replay.
+        async with asyncio.timeout(timeout):
+            await self._cancel_order_and_confirm_bounded(order_id, timeout=timeout)
+
+    async def _cancel_order_and_confirm_bounded(self, order_id: str, *, timeout: float) -> None:
+        current = self.account.reducer.orders.get(order_id)
+        if current is not None and not current.working:
+            return
         terminal_event = self.account.terminal_events.setdefault(order_id, asyncio.Event())
         await self.private.cancel(order_id)
         deadline = asyncio.get_running_loop().time() + timeout
@@ -1305,6 +1374,14 @@ class ProductionOrchestrator:
     async def _quote_pair_locked(self, candidate: Any) -> None:
         try:
             await self._quote_pair_current(candidate)
+        except (TransportChangedBeforeSend, AdmissionTimeoutBeforeSend) as exc:
+            if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
+                raise
+            # The transport terminalized only this definitely-unsent intent.
+            # Recovery owns any earlier acknowledged sibling; do not issue a
+            # second cancel on the disconnected generation or replay the quote.
+            if "private" not in self._stream_holds:
+                await self._recover_stream("private", exc, generation=self._stream_generation["private"])
         except (QuoteChangedBeforeSend, EntryStateChangedBeforeSend) as exc:
             # Definitely unsent. A fill, cutoff, lifecycle block, transient
             # accounting transition, exposure change, or fresh-book change can
@@ -1492,10 +1569,12 @@ class ProductionOrchestrator:
             return False
         target = self._current_quote_target(symbol)
         if target is None:
+            self._record_quote_cancel(symbol, "book_unavailable")
             await self._cancel_symbol_entries(symbol)
             return True
         targets = {Outcome.YES: target.yes.price, Outcome.NO: target.no.price}
         if any(order.price > targets[order.outcome] for order in working):
+            self._record_quote_cancel(symbol, "inside_two_tick_distance")
             await self._cancel_symbol_entries(symbol)
             self.journal.audit("adverse_move_quote_canceled", {
                 "symbol": symbol,
@@ -1572,8 +1651,10 @@ class ProductionOrchestrator:
             return
         if working and (retention_required or len(working) != len(expected) or actual != expected):
             self._replaced_pairs += 1
+            reason = self._retention_reason if retention_required else "legacy_exact_target_change"
+            self._record_quote_cancel(candidate.symbol, reason)
             self.log.event(logging.INFO, "quote_pair_replacement", symbol=candidate.symbol,
-                           reason="target_changed_or_pair_not_retainable")
+                           reason=reason)
             await self._cancel_symbol_entries(candidate.symbol)
             working = []
         if not working:
@@ -1586,19 +1667,21 @@ class ProductionOrchestrator:
         may be farther away, never closer, and BOTH must remain within the
         documented reward distance. Fills/partial quantities never qualify.
         """
-        if (len(working) != 2 or {o.outcome for o in working} != {Outcome.YES, Outcome.NO}
-                or not self.account.snapshots_fresh or not self.account.equity_classification_complete):
+        self._retention_reason = "pair_incomplete"
+        if len(working) != 2 or {o.outcome for o in working} != {Outcome.YES, Outcome.NO}:
+            return False
+        self._retention_reason = "account_unverified"
+        if not self.account.snapshots_fresh or not self.account.equity_classification_complete:
             return False
         target = self._current_quote_target(candidate.symbol)
         book = self.public.books.get(candidate.symbol)
         if target is None or book is None or book.top() is None:
+            self._retention_reason = "book_unavailable"
             return False
-        midpoint = book.top().midpoint
         targets = {Outcome.YES: target.yes, Outcome.NO: target.no}
+        self._retention_reason = "filled_or_wrong_quantity"
         if not all(
             o.cumulative_filled == 0 and o.remaining_quantity == targets[o.outcome].quantity
-            and o.price <= targets[o.outcome].price
-            and abs((o.price if o.outcome is Outcome.YES else 1 - o.price) - midpoint) <= Decimal(".10")
             for o in working
         ):
             return False
@@ -1608,6 +1691,9 @@ class ProductionOrchestrator:
             for outcome in (Outcome.YES, Outcome.NO)
         ))
         contract = next(c for c in self.universe if c.rules.symbol == candidate.symbol)
+        self._retention_reason = "inside_two_tick_distance_or_invalid_price"
+        if not resting_quote_safe(pair, target, contract.rules, self.config.strategy.quote_quantity):
+            return False
         ranked = rank_live_universe(
             [contract], self.public.books, now=_utc_now(),
             quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
@@ -1615,7 +1701,9 @@ class ProductionOrchestrator:
             profitability=self.profitability, target_uptime=self.config.strategy.target_uptime,
             maker_rebate_fractions=self._maker_rebate_fractions, resting_quotes={candidate.symbol: pair},
         )
-        return bool(ranked and self._candidate_actionable(ranked[0]))
+        retained = bool(ranked and self._candidate_actionable(ranked[0]))
+        self._retention_reason = "retained" if retained else "reward_distance_or_economics"
+        return retained
 
     def _websocket_exposure(self) -> ExposureState:
         """Conservative live exposure from authenticated WebSocket truth."""
@@ -1747,12 +1835,13 @@ class ProductionOrchestrator:
     async def _run_exit_worker(self, symbol: str) -> None:
         previous = self._exit_waits.get(symbol)
         try:
-            if not self.account.reducer.positions.get(symbol):
-                await self._cancel_symbol_entries(symbol)
-                if not await self._complete_flat_fill(symbol):
-                    raise ExitDeferred("position_changed_during_flat_proof")
-            else:
-                await self._exit_due_positions_locked(symbol_filter=symbol, scoped=True)
+            async with asyncio.timeout(_EXIT_WORKER_SECONDS):
+                if not self.account.reducer.positions.get(symbol):
+                    await self._cancel_symbol_entries(symbol)
+                    if not await self._complete_flat_fill(symbol):
+                        raise ExitDeferred("position_changed_during_flat_proof")
+                else:
+                    await self._exit_due_positions_locked(symbol_filter=symbol, scoped=True)
         except Exception as exc:
             # Only explicitly no-send/terminal scheduling waits and read errors
             # qualify. Unknown mutation outcomes and integrity failures escape.
@@ -1761,7 +1850,8 @@ class ProductionOrchestrator:
             ):
                 raise
             if (symbol in self._exit_uncertain or self.journal.pending_exit(symbol)
-                    or self.journal.has_nonterminal_intents(symbol)):
+                    or self.journal.has_nonterminal_intents(symbol)
+                    or any(o.working and o.symbol == symbol for o in self.account.reducer.orders.values())):
                 raise
             rounds = 1 if previous is None else previous.rounds + 1
             delay = max(min(5 * 2 ** min(rounds - 1, 4), 60), retry_after_seconds(exc))
@@ -2216,9 +2306,10 @@ class ProductionOrchestrator:
         for item in self.universe:
             reward = active_rows.get(item.event_ticker)
             if reward is None:
-                self.account.block_entries(item.rules.symbol)
+                self.account.block_entries(item.rules.symbol, reason="reward_metadata")
                 refreshed.append(replace(item, pool=replace(item.pool, active=False)))
                 continue
+            status_version = self._market_status_versions.get(item.rules.symbol, 0)
             current = join_reward_contracts([reward], {item.event_ticker: await self.rest.event(item.event_ticker)})
             chosen = next((row for row in current if row.rules.symbol == item.rules.symbol), None)
             invalid = (chosen is None or chosen.rules != item.rules or chosen.expiry != item.expiry
@@ -2236,10 +2327,12 @@ class ProductionOrchestrator:
                         )
                     ))
             if invalid:
-                self.account.block_entries(item.rules.symbol)
+                self.account.block_entries(item.rules.symbol, reason="reward_metadata")
                 refreshed.append(replace(item, pool=replace(item.pool, active=False)))
                 continue
             refreshed.append(chosen)
+            if self._continuous_service:
+                await self._release_recovered_market(item.rules.symbol, status_version)
             # Keep identities/owners fixed, but use current budget, competition
             # and timing metadata for ranking. Never silently rotate live pools.
             if chosen.trade_starts_at:
@@ -2274,6 +2367,33 @@ class ProductionOrchestrator:
         # A v6 catalog session can wait safely for the next discovery interval.
         return usable_permitted_symbol or (self._continue_after_override and self._catalog_scope)
 
+    async def _release_recovered_market(self, symbol: str, status_version: int) -> None:
+        reasons = self.account.entry_hold_reasons.get(symbol, set())
+        if not reasons.intersection({"lifecycle", "reward_metadata"}):
+            return
+        if (self._stream_holds or self._read_recovery_attempts or self._recovery_stop_requested()
+                or self._market_status_versions.get(symbol, 0) != status_version
+                or self._market_status.get(symbol, "active") != "active"
+                or self.account.reducer.positions.get(symbol)
+                or not self._book_fresh(symbol) or not self._entry_time_valid(symbol)):
+            return
+        # Terminal confirmation shares the existing cancellation owner. Do not
+        # clear an independent fill/manual hold or adopt account state.
+        await self._cancel_symbol_entries(symbol)
+        try:
+            async with asyncio.timeout(15):
+                snapshot = await self._exit_account_snapshot(symbol)
+        except (ExitDeferred, TimeoutError):
+            return
+        if (snapshot.signed_positions.get(symbol) or self._stream_holds
+                or self._recovery_stop_requested()
+                or self._market_status_versions.get(symbol, 0) != status_version):
+            return
+        for reason in ("lifecycle", "reward_metadata"):
+            self.account.release_entry_reason(symbol, reason)
+        self.log.event(logging.INFO, "market_entry_hold_recovered", symbol=symbol,
+                       terminal_flat_verified=True)
+
     async def _rollover_flat_markets(self, rewards: list[dict[str, Any]]) -> None:
         """Replace only expired/inactive owners after terminal and flat proof."""
         if self._stream_holds or self._read_recovery_attempts or self._recovery_stop_requested():
@@ -2292,6 +2412,12 @@ class ProductionOrchestrator:
             removable = []
             for contract in retiring:
                 symbol = contract.rules.symbol
+                if (self._continuous_service and self._entry_time_valid(symbol)
+                        and self.account.entry_hold_reasons.get(symbol, set()).intersection(
+                            {"lifecycle", "reward_metadata"})):
+                    # Keep a temporarily unavailable owner discoverable for
+                    # fresh metadata/proof recovery. Expired owners still retire.
+                    continue
                 # Inventory retains its owner and original exit deadline.
                 if self.account.reducer.positions.get(symbol, Decimal("0")):
                     continue
@@ -2322,6 +2448,10 @@ class ProductionOrchestrator:
                 for c in removable:
                     self._sticky_pool_ids.discard(c.pool.pool_id)
                     self._sticky_markets.pop(c.pool.pool_id, None)
+                    self._market_status_versions.pop(c.rules.symbol, None)
+                    self._market_status.pop(c.rules.symbol, None)
+                    for reason in ("lifecycle", "reward_metadata"):
+                        self.account.release_entry_reason(c.rules.symbol, reason)
             if self._stream_holds or self._recovery_stop_requested():
                 return
             pools = {c.pool.pool_id for c in self.universe}
@@ -2631,11 +2761,39 @@ class ProductionOrchestrator:
 
     async def drain(self) -> None:
         self.gate.state = EngineState.DRAINING
-        # Existing owners finish their bounded in-flight round before forced
-        # drain may submit anything. Never cancel an ACK waiter then duplicate
-        # its still-unknown order. No new workers launch in DRAINING.
-        await asyncio.gather(*self._exit_workers.values(), return_exceptions=True)
+        async with asyncio.timeout(_DRAIN_SECONDS):
+            await self._drain_bounded()
+
+    async def _drain_bounded(self) -> None:
+        # Start known-entry cancellation immediately, even if another market's
+        # exit is waiting. All callers still share the same per-order owner.
+        entries = [o for o in tuple(self.account.reducer.orders.values()) if o.working and o.side is Side.BUY]
+        owned = [o for o in entries if self.journal.knows_client_order_id(o.client_order_id)]
+        unknown_entry = len(entries) != len(owned)
+        cancels = [asyncio.create_task(self._cancel_order_and_confirm(o.order_id)) for o in owned]
+        owners = set(self._exit_workers.values()) | set(cancels)
+        try:
+            if owners:
+                deadline = time.monotonic() + _DRAIN_JOIN_SECONDS
+                pending = owners
+                while pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("drain owners did not finish; mutation state retained for attention")
+                    _, pending = await asyncio.wait(pending, timeout=min(5, remaining))
+                    if pending:
+                        self._write_status("draining", False, "waiting for existing mutation owners; no replay")
+                # Do not hide a rejected/ambiguous worker behind a forced retry.
+                for task in owners:
+                    task.result()
+        finally:
+            for task in cancels:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*cancels, return_exceptions=True)
         self._exit_workers.clear()
+        if unknown_entry:
+            raise RuntimeError("drain found an unowned local entry; no mutation of it attempted")
         for order in build_account_snapshot([], await self.rest.active_orders()).active_orders:
             if not order.client_order_id or not self.journal.knows_client_order_id(order.client_order_id):
                 raise RuntimeError("drain found an unowned active order")

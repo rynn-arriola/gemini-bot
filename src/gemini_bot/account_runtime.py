@@ -63,6 +63,7 @@ class AccountRuntime:
         self.hard_exit_cutoff: dict[str, datetime] = {}
         self.fill_blocked_entries: set[str] = journal.deadline_symbols()
         self.other_entry_blocks: set[str] = set()
+        self.entry_hold_reasons: dict[str, set[str]] = {}
         self.blocked_entries: set[str] = set(self.fill_blocked_entries)
         self.changed = asyncio.Event()
         self.fill_version = 0
@@ -80,13 +81,25 @@ class AccountRuntime:
             self.positions_seen,
         )
 
-    def block_entries(self, symbol: str, *, fill: bool = False) -> None:
-        (self.fill_blocked_entries if fill else self.other_entry_blocks).add(symbol)
+    def block_entries(self, symbol: str, *, fill: bool = False, reason: str | None = None) -> None:
+        if reason is not None:
+            self.entry_hold_reasons.setdefault(symbol, set()).add(reason)
+        else:
+            (self.fill_blocked_entries if fill else self.other_entry_blocks).add(symbol)
         self.blocked_entries.add(symbol)
+
+    def release_entry_reason(self, symbol: str, reason: str) -> None:
+        reasons = self.entry_hold_reasons.get(symbol, set())
+        reasons.discard(reason)
+        if not reasons:
+            self.entry_hold_reasons.pop(symbol, None)
+        if (symbol not in self.fill_blocked_entries and symbol not in self.other_entry_blocks
+                and symbol not in self.entry_hold_reasons):
+            self.blocked_entries.discard(symbol)
 
     def release_fill_block(self, symbol: str) -> None:
         self.fill_blocked_entries.discard(symbol)
-        if symbol not in self.other_entry_blocks:
+        if symbol not in self.other_entry_blocks and symbol not in self.entry_hold_reasons:
             self.blocked_entries.discard(symbol)
 
     @property
@@ -155,6 +168,7 @@ class AccountRuntime:
         self.blocked_entries.clear()
         self.fill_blocked_entries.clear()
         self.other_entry_blocks.clear()
+        self.entry_hold_reasons.clear()
 
     def reconcile_authenticated_cash_adjustments(
         self,

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from .rate_limits import AdmissionGovernor
+from .ws_requests import check_response
 
 
 async def pace_connection(governor: AdmissionGovernor) -> None:
@@ -37,7 +38,8 @@ async def receive_connection_limits(connection, governor: AdmissionGovernor, lan
                 raise ValueError("invalid WebSocket handshake response")
             observe_response(governor, lane, frame)
             if frame.get("id") == request_id:
-                if frame.get("status") != 200 or "rateLimits" not in frame:
+                check_response(frame, "conninfo")
+                if "rateLimits" not in frame:
                     raise RuntimeError("conninfo failed to establish WebSocket limits")
                 return buffered
             buffered.append(frame)

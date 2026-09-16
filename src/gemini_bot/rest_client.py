@@ -12,6 +12,7 @@ from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+from functools import wraps
 
 from .rate_limits import AdmissionGovernor, Priority
 
@@ -43,6 +44,18 @@ class ApiError(RuntimeError):
         self.status = status
         self.reason = reason
         self.retry_after = retry_after
+
+
+def bounded_read(method):
+    """Bound lock/admission/retries together; cooldown stays in the governor."""
+    @wraps(method)
+    async def run(self, *args, **kwargs):
+        try:
+            async with asyncio.timeout(self.operation_timeout_seconds):
+                return await method(self, *args, **kwargs)
+        except TimeoutError as exc:
+            raise ApiError(None, "TimeoutError") from exc
+    return run
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -99,6 +112,7 @@ class GeminiReadRestClient:
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.operation_timeout_seconds = 60.0
         self._private_lock = asyncio.Lock()
         self._opener = urllib.request.build_opener(NoRedirect)
 
@@ -133,6 +147,7 @@ class GeminiReadRestClient:
         except (urllib.error.URLError, TimeoutError) as exc:
             raise ApiError(None, type(exc).__name__) from exc
 
+    @bounded_read
     async def public_get(self, path: str, params: dict[str, object] | None = None) -> dict[str, Any]:
         if not self._public_allowed(path):
             raise ValueError("public REST route is not approved")
@@ -176,6 +191,7 @@ class GeminiReadRestClient:
                 await self._pace(lane, priority)
         raise AssertionError("unreachable REST retry state")
 
+    @bounded_read
     async def private_read(
         self,
         path: str,
@@ -209,6 +225,7 @@ class GeminiReadRestClient:
                 raise ApiError(200, "invalid_json_shape")
             return result
 
+    @bounded_read
     async def _private_list_read(
         self, path: str, fields: dict[str, object], *, lane: str,
     ) -> list[Any]:

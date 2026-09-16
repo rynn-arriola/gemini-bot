@@ -1,5 +1,7 @@
 # Next work
 
+- **Availability/churn repairs are source-only:** bounded drain/admission, correlated read-error recovery, recovered-market holds and connection races are repaired offline. Safety/economics-bound retention, reason-coded quote decisions and sub-clock either-/two-sided gap telemetry need a natural long-run measurement after authorized deployment. The earlier 280/280 report is not a measured v7 result. [Repair and limits](docs/AVAILABILITY_AND_CHURN_2026-09-15.md).
+
 - **Fill-flow repairs are source-only, not deployed:** owner approved paced additional exit rounds, independent fill cancellation and exact post-flat cleanup. Verify natural full/partial fills, cancellation timing, terminal-unfilled retry rounds and unaffected-market resting time only after separately authorized deployment. No induced live fills/faults. Unknown/rejected/accounting/ownership and held-inventory contract-lifecycle changes remain fail-closed. [Implementation and limits](docs/FILL_CONTINUITY_2026-09-15.md).
 
 - **Do not restart or deploy:** continuous-service v7 is source-only, awaiting explicit owner authorization. Before a future deployment, verify the committed build, re-check account state and create fresh build-bound authority. The running v6 permit cannot authorize the changed source on an automatic re-launch; do not reuse or edit it to bypass build binding. No new permit has been created. See [continuous-service evidence](docs/CONTINUOUS_SERVICE_2026-09-15.md).

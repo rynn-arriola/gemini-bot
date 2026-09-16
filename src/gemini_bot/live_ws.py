@@ -21,6 +21,7 @@ from .execution import (
 from .domain import QuoteLeg
 from .rate_limits import AdmissionGovernor, Priority
 from .ws_limits import observe_response, receive_connection_limits, pace_connection
+from .ws_requests import RequestTracker
 
 
 PRODUCTION_WS = "wss://ws.gemini.com"
@@ -36,6 +37,14 @@ class QuoteChangedBeforeSend(MutationNotSentError):
 
 class EntryStateChangedBeforeSend(MutationNotSentError):
     """An ordinary live-state change removed permission for an unsent entry."""
+
+
+class TransportChangedBeforeSend(MutationNotSentError, ConnectionError):
+    """Connection changed before any send; the intent can be terminalized."""
+
+
+class AdmissionTimeoutBeforeSend(MutationNotSentError, TimeoutError):
+    """The bounded admission wait ended before any send."""
 
 
 class LiveWebSocket:
@@ -67,6 +76,9 @@ class LiveWebSocket:
         self._send_changed = asyncio.Event()
         self._initial_frames: list[dict[str, Any]] = []
         self.mutation_guard = None
+        self.cancel_is_terminal = None
+        self._requests = RequestTracker()
+        self.send_timeout_seconds = 45.0
 
     async def connect(self) -> None:
         await pace_connection(self._governor)
@@ -88,22 +100,42 @@ class LiveWebSocket:
             self._initial_frames = await receive_connection_limits(
                 self._connection, self._governor, "private_ws", request_id,
             )
+            self._requests.pending.pop(request_id, None)
         except BaseException:
             await self.close()
             raise
 
     async def close(self) -> None:
-        if self._connection is not None:
-            await self._connection.close()
-            self._connection = None
+        connection, self._connection = self._connection, None
+        self._requests = RequestTracker()
+        if connection is not None:
+            await connection.close()
 
     def _next_id(self) -> int:
         self._request_id += 1
         return self._request_id
 
     async def _send(self, payload: dict[str, Any], priority: Priority) -> None:
+        state = {"attempted": False}
+        try:
+            async with asyncio.timeout(self.send_timeout_seconds):
+                await self._send_admitted(payload, priority, state)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            if not state["attempted"]:
+                # Outer worker timeouts may cancel this coroutine while pacing.
+                # Close only a proven-unsent placement; attempted sends stay unknown.
+                params = payload.get("params")
+                client_id = params.get("clientOrderId") if isinstance(params, dict) else None
+                if isinstance(exc, asyncio.CancelledError) and payload.get("method") == "order.place" and client_id:
+                    self._ledger.mark_terminal(client_id)
+                if isinstance(exc, TimeoutError):
+                    raise AdmissionTimeoutBeforeSend("socket admission deadline expired") from exc
+            raise
+
+    async def _send_admitted(self, payload: dict[str, Any], priority: Priority, state: dict) -> None:
+        connection = self._connection
         if self._connection is None:
-            raise ConnectionError("authenticated WebSocket is not connected")
+            raise TransportChangedBeforeSend("authenticated WebSocket is not connected")
         if self._read_only and str(payload.get("method", "")).startswith("order."):
             raise RuntimeError("read-only WebSocket prohibits order mutation")
         waiter = object()
@@ -112,6 +144,11 @@ class LiveWebSocket:
         try:
             while True:
                 async with self._send_lock:
+                    if self._connection is not connection:
+                        raise TransportChangedBeforeSend("authenticated WebSocket generation changed")
+                    if (payload.get("method") == "order.cancel" and self.cancel_is_terminal is not None
+                            and self.cancel_is_terminal(str(payload["params"]["orderId"]))):
+                        return
                     self._send_changed.clear()
                     if priority > min(self._send_waiters.values()):
                         delay = 1.0
@@ -125,7 +162,9 @@ class LiveWebSocket:
                                     raise
                                 except Exception as exc:
                                     raise MutationNotSentError(str(exc)) from exc
-                            await self._connection.send(json.dumps(payload, separators=(",", ":")))
+                            self._requests.register(payload["id"], payload["method"])
+                            state["attempted"] = True
+                            await connection.send(json.dumps(payload, separators=(",", ":")))
                             return
                 # Never hold the socket lock through pacing/cooldown. An urgent
                 # cancel may join and take the next admitted slot before entries.
@@ -222,15 +261,20 @@ class LiveWebSocket:
         )
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
-        if self._connection is None:
+        connection, requests = self._connection, self._requests
+        if connection is None:
             raise ConnectionError("authenticated WebSocket is not connected")
         for frame in self._initial_frames:
+            requests.response(frame)
             yield frame
         self._initial_frames.clear()
-        async for raw in self._connection:
+        async for raw in connection:
             if not isinstance(raw, str):
                 continue
             value = json.loads(raw)
             if isinstance(value, dict):
                 observe_response(self._governor, "private_ws", value)
-                yield value
+                method = requests.response(value)
+                # Only an actual account subscription ACK marks readiness.
+                if "status" not in value or method == "SUBSCRIBE":
+                    yield value

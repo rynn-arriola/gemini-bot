@@ -2,6 +2,15 @@
 
 Violation of an invariant blocks new risk and requires reconciliation or a terminal halt.
 
+## Availability follow-up (source only)
+
+40. Cancellation admission/send/confirmation share a bounded deadline. Exit workers have a 45-second overall budget; three-attempt/30-second reducing-send rounds remain unchanged. Drain begins known-owned entry cancellations before joining existing owners (50 seconds), with a 90-second whole-drain budget. Never mutate an unowned order, hide worker failure, replay an ambiguous mutation or report flat on timeout. Failed cancellation stays latched. Server cooldowns are not bypassed.
+41. Response IDs are correlated to bounded connection-specific request state. Only known read requests may turn 429/500/502/503/504 into recovery. Uncorrelated/authentication/ban/malformed/mutation errors remain fail-closed. Connection identity is rechecked after admission; definitely-unsent intents may close locally, attempted sends may not. Replaced sockets cannot authorize replay. Known-terminal cancellation is rechecked at send.
+42. V7 releases only reason-specific lifecycle/reward holds after valid current metadata and fresh classified terminal/flat proof, unchanged lifecycle version and active lifecycle evidence. Never clear fill/manual/other holds or reset deadlines/loss/uptime. Temporarily paused unexpired owners remain tracked; expired owners retain safe retirement rules. Held-inventory lifecycle transitions still fail closed.
+43. Retention shares ranking's price/size/tick boundary and actual resting economics/distance checks. New quotes use the exact approved target; adverse moves inside two ticks still cancel. Per-event plus clock estimates distinguish either-side qualification from two-sided bonus gaps. Neither is an exchange snapshot count; missing observations are not earned uptime.
+
+## Core invariants
+
 **Continuous-service extension (source only, not deployed):** Invariants 34–39 explicitly extend the bounded v2–v6 rules below for owner-approved v7 only. The live v6 session retains its original expiry/recovery boundaries. The owner prohibited restart/deployment on September 15 during this implementation.
 
 1. Production begins paused. Process startup alone can never submit an order.

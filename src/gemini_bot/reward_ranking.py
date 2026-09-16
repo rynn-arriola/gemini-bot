@@ -107,6 +107,16 @@ def build_two_sided_quote(book: BookTop, rules: ContractRules, quantity: Decimal
     )
 
 
+def resting_quote_safe(quote: QuotePair, target: QuotePair, rules: ContractRules, quantity: Decimal) -> bool:
+    """Shared retention boundary: farther is allowed, closer/off-size is not."""
+    return all(
+        leg.symbol == wanted.symbol and leg.outcome == wanted.outcome and leg.side == wanted.side
+        and leg.quantity == quantity and Decimal("0") < leg.price <= wanted.price
+        and leg.price % rules.tick_size == 0
+        for leg, wanted in ((quote.yes, target.yes), (quote.no, target.no))
+    )
+
+
 def rank_candidate(
     item: RankInput,
     *,
@@ -137,11 +147,8 @@ def rank_candidate(
         if item.resting_quote is not None:
             target = quote
             quote = item.resting_quote
-            for leg, wanted in ((quote.yes, target.yes), (quote.no, target.no)):
-                if (leg.symbol != wanted.symbol or leg.outcome != wanted.outcome or leg.side != wanted.side
-                        or leg.quantity != quantity or not Decimal("0") < leg.price <= wanted.price
-                        or leg.price % item.rules.tick_size != 0):
-                    raise ValueError("resting quote does not meet approved size/price safety")
+            if not resting_quote_safe(quote, target, item.rules, quantity):
+                raise ValueError("resting quote does not meet approved size/price safety")
     except ValueError as exc:
         quote = None
         reasons.append(str(exc))
