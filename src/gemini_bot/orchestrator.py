@@ -1458,14 +1458,81 @@ class ProductionOrchestrator:
         # Includes admission and socket send, not just the confirmation phase.
         # A timeout remains latched in _cancel_tasks; it never authorizes replay.
         async with asyncio.timeout(timeout):
-            await self._cancel_order_and_confirm_bounded(order_id, timeout=timeout)
+            send_cancel = True
+            while True:
+                try:
+                    await self._cancel_order_and_confirm_bounded(
+                        order_id, timeout=timeout, send_cancel=send_cancel,
+                    )
+                    return
+                except (TransportChangedBeforeSend, AdmissionTimeoutBeforeSend) as exc:
+                    # These exceptions prove that no byte of the cancel request
+                    # reached Gemini. They are the only cancel failures that may
+                    # be retried, and only after fresh authenticated REST state
+                    # proves whether the exact owned order is still active.
+                    if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
+                        raise
+                    if isinstance(exc, TransportChangedBeforeSend):
+                        await self._await_private_cancel_replacement(exc)
+                    send_cancel = await self._reconcile_unsent_cancel(order_id)
 
-    async def _cancel_order_and_confirm_bounded(self, order_id: str, *, timeout: float) -> None:
+    async def _await_private_cancel_replacement(self, cause: BaseException) -> None:
+        """Wait for the current private reconnect without awaiting its proof task.
+
+        The proof task can itself join this order's shared cancellation owner, so
+        awaiting the whole proof here would deadlock. If the private pump has not
+        observed the loss yet, this cancellation owner starts the reconnect.
+        """
+        if "private" in self._stream_holds:
+            restart = self._stream_restarts.get("private")
+            if restart is None:
+                raise RuntimeError("private recovery hold has no reconnect owner") from cause
+            await asyncio.shield(restart)
+            return
+        await self._recover_stream(
+            "private", cause, generation=self._stream_generation["private"],
+        )
+
+    async def _reconcile_unsent_cancel(self, order_id: str) -> bool:
+        """Return True only when fresh REST proves the exact order still active."""
+        while True:
+            current = self.account.reducer.orders.get(order_id)
+            if current is not None and not current.working:
+                return False
+            if current is None or not self.journal.knows_client_order_id(current.client_order_id):
+                raise RuntimeError("unsent cancel no longer has exact owned order identity")
+            try:
+                active = build_account_snapshot([], await self.rest.active_orders()).active_orders
+            except ApiError as exc:
+                if not transient_failure(exc):
+                    raise
+                await asyncio.sleep(.5)
+                continue
+            matches = [order for order in active if order.order_id == order_id]
+            if not matches:
+                return False
+            order = matches[0]
+            expected = (
+                current.client_order_id, current.symbol, current.side, current.outcome,
+                current.price, current.original_quantity,
+            )
+            observed = (
+                order.client_order_id, order.symbol, order.side, order.outcome,
+                order.price, order.original_quantity,
+            )
+            if observed != expected:
+                raise RuntimeError("unsent cancel active order identity is not proven")
+            return True
+
+    async def _cancel_order_and_confirm_bounded(
+        self, order_id: str, *, timeout: float, send_cancel: bool = True,
+    ) -> None:
         current = self.account.reducer.orders.get(order_id)
         if current is not None and not current.working:
             return
         terminal_event = self.account.terminal_events.setdefault(order_id, asyncio.Event())
-        await self.private.cancel(order_id)
+        if send_cancel:
+            await self.private.cancel(order_id)
         deadline = asyncio.get_running_loop().time() + timeout
         current = self.account.reducer.orders.get(order_id)
         if current is not None and not current.working:
@@ -1508,9 +1575,15 @@ class ProductionOrchestrator:
                 terminal = next((row for row in history if str(row.get("orderId")) == order_id), None)
                 if terminal is not None and str(terminal.get("status", "")).upper() in {"CANCELLED", "CANCELED", "FILLED", "REJECTED"}:
                     order = self.account.reducer.orders.get(order_id)
+                    status = str(terminal["status"]).upper().replace("CANCELLED", "CANCELED")
+                    if order is not None and not send_cancel:
+                        # No new cancel was sent because disconnect/admission may
+                        # already have terminalized it. Require exact history so
+                        # a missed partial fill can never be erased as a cancel.
+                        status = terminal_history_status(order, terminal)
                     if order is not None:
                         order.remaining_quantity = Decimal("0")
-                        order.status = str(terminal["status"]).upper().replace("CANCELLED", "CANCELED")
+                        order.status = status
                         self.journal.resolve_intent_terminal(order.client_order_id, order_id)
                         intent = self.ledger.get(order.client_order_id)
                         if intent is not None and intent.state in {IntentState.SENT_UNKNOWN, IntentState.ACKNOWLEDGED}:

@@ -6,7 +6,7 @@ from websockets.exceptions import InvalidMessage
 import test_continuous_service as fixtures
 from gemini_bot.recovery_policy import transient_failure
 from gemini_bot.domain import EngineState
-from gemini_bot.live_ws import TransportChangedBeforeSend
+from gemini_bot.live_ws import AdmissionTimeoutBeforeSend, TransportChangedBeforeSend
 from decimal import Decimal as D
 from datetime import datetime, timezone, timedelta
 from gemini_bot.account_state import OwnedOrder
@@ -94,6 +94,65 @@ class MaintenanceFlowTests(unittest.IsolatedAsyncioTestCase):
         await r._restore_drain_streams()
         self.assertNotIn('unsent', r._cancel_tasks)
         self.assertIs(r._cancel_tasks['unknown'], unknown)
+
+    async def test_shared_cancel_survives_private_rotation_when_first_send_was_proven_unsent(self):
+        r = self.r
+        leg = fixtures.recovery.candidate().quote.yes
+        intent = r.ledger.prepare(leg, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.ledger.acknowledge(intent.client_order_id, 'o')
+        frame = {'e':'orderUpdate','i':'o','c':intent.client_order_id,'s':'X','S':'BUY',
+                 'O':'YES','q':'10','p':str(leg.price),'z':'10','Z':'0','X':'OPEN','T':1}
+        r.account.apply(frame)
+        attempts = 0
+        active = [dict(orderId='o',clientOrderId=intent.client_order_id,symbol='X',side='BUY',
+                       outcome='YES',quantity='10',remainingQuantity='10',price=str(leg.price),status='OPEN')]
+        async def active_orders():
+            return active if attempts < 2 else []
+        r.rest.active_orders = AsyncMock(side_effect=active_orders)
+        r.rest.recent_order_history = AsyncMock(return_value=[
+            dict(orderId='o',clientOrderId=intent.client_order_id,symbol='X',side='BUY',outcome='YES',
+                 quantity='10',filledQuantity='0',price=str(leg.price),status='CANCELED'),
+        ])
+        async def cancel(_):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise TransportChangedBeforeSend('rotated before send')
+            r.account.apply({**frame,'z':'0','X':'CANCELED','T':2})
+        r.private.cancel = AsyncMock(side_effect=cancel)
+
+        await asyncio.gather(r._cancel_order_and_confirm('o'), r._cancel_order_and_confirm('o'))
+        await asyncio.wait_for(r._stream_recovery_task, 2)
+
+        self.assertEqual(r.private.cancel.await_count, 2)
+        r.private.connect.assert_awaited_once()
+        self.assertGreaterEqual(r.rest.active_orders.await_count, 2)
+        self.assertFalse(r.account.reducer.orders['o'].working)
+        self.assertNotIn('o', r._cancel_tasks)
+        self.assertFalse(r._stream_holds)
+        self.assertEqual(r.gate.state, EngineState.QUOTING)
+
+    async def test_unsent_cancel_refuses_retry_when_rest_identity_disagrees(self):
+        r = self.r
+        leg = fixtures.recovery.candidate().quote.yes
+        intent = r.ledger.prepare(leg, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.ledger.acknowledge(intent.client_order_id, 'o')
+        r.account.reducer.orders['o'] = OwnedOrder(
+            'o', intent.client_order_id, 'X', Side.BUY, Outcome.YES,
+            leg.price, D(10), D(10), D(0), 'OPEN', 1,
+        )
+        r.private.cancel = AsyncMock(side_effect=AdmissionTimeoutBeforeSend('not sent'))
+        r.rest.active_orders = AsyncMock(return_value=[
+            dict(orderId='o',clientOrderId='wrong',symbol='X',side='BUY',outcome='YES',
+                 quantity='10',remainingQuantity='10',price=str(leg.price),status='OPEN'),
+        ])
+
+        with self.assertRaisesRegex(RuntimeError, 'identity is not proven'):
+            await r._cancel_order_and_confirm('o')
+
+        r.private.cancel.assert_awaited_once_with('o')
 
     async def test_drain_transport_wait_remains_bounded(self):
         r = self.r
