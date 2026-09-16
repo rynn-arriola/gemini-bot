@@ -28,6 +28,7 @@ class OptionalValuationTests(unittest.TestCase):
             exposure = exposure_from_snapshot(snapshot)
             self.assertEqual(exposure.gross_reservation_usd, D('.4646'))
             self.assertEqual(exposure.tracked_markets, 1)
+            self.assertEqual(exposure.pending_orders, 0)
             assert_position_consistency(snapshot, {'X': D('-1.01')})
 
     def test_unavailable_is_not_zero_or_last_trade_price(self):
@@ -125,3 +126,28 @@ class NoBuyerStartupTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, 'changed during authenticated proof'):
             await r._prepare_activation_inventory()
         r.private.exit_position.assert_not_awaited()
+
+    async def test_no_buyer_wait_preserves_thirty_other_orders_and_counts_no_position_slot(self):
+        from dataclasses import replace
+
+        r = self.r
+        r.private.cancel = AsyncMock()
+        for index in range(30):
+            self.fixture.order(replace(flow.candidate().quote.yes, symbol=f'Y{index}'), status='OPEN', filled='0')
+        def active():
+            return [dict(orderId=o.order_id, clientOrderId=o.client_order_id, symbol=o.symbol,
+                         side=o.side.value, outcome=o.outcome.value, price=str(o.price),
+                         quantity=str(o.original_quantity), remainingQuantity=str(o.remaining_quantity),
+                         status=o.status) for o in r.account.reducer.orders.values() if o.working]
+        r.rest.active_orders.side_effect = active
+        deadline = r.journal.get_deadline('X', 'NO')
+        await r._run_exit_worker('X')
+        self.assertEqual(r._exit_waits['X'].reason, 'exit_depth_unavailable')
+        self.assertEqual(r.account.reducer.pending_order_count(), 30)
+        exposure = exposure_from_snapshot(build_account_snapshot([position()], active()))
+        self.assertEqual(exposure.pending_orders, 30)
+        self.assertGreater(exposure.market_exposure_usd['X'], 0)
+        self.assertEqual(r.journal.get_deadline('X', 'NO'), deadline)
+        self.assertTrue(r.gate.may_submit)
+        r.private.exit_position.assert_not_awaited()
+        r.private.cancel.assert_not_awaited()

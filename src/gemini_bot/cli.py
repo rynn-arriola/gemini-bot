@@ -218,6 +218,58 @@ async def _reconcile_executions(config_path: Path, directory: Path) -> None:
         await runtime.close()
 
 
+async def _record_cash_exception(config_path: Path) -> None:
+    from .cash_exception import confirmed_usd, ledger_digest, record_approval
+    from .storage import WindowsOwnerLock, shared_control_directory
+    from .rate_limits import AdmissionGovernor
+    from .rest_client import GeminiReadRestClient
+    from .reconciliation import build_account_snapshot, assert_stable_account_bracket
+    import hashlib
+
+    config = load_preflight_config(config_path)
+    control = shared_control_directory()
+    path = control / 'production.sqlite'
+    if not path.is_file():
+        raise RuntimeError('cash exception requires the existing canonical journal')
+    with WindowsOwnerLock(control / 'mutation-owner.lock'):
+        journal = SQLiteJournal(path)
+        try:
+            digest = ledger_digest(journal)
+            rest = GeminiReadRestClient(AdmissionGovernor(), api_key=config.api_key, api_secret=config.api_secret)
+            before = build_account_snapshot(await rest.positions(), await rest.active_orders())
+            cash_before = confirmed_usd(await rest.account_balances())
+            after = build_account_snapshot(await rest.positions(), await rest.active_orders())
+            cash_after = confirmed_usd(await rest.account_balances())
+            assert_stable_account_bracket(before, after)
+            if cash_before != cash_after or digest != ledger_digest(journal):
+                raise RuntimeError('cash exception evidence changed while recording approval')
+            record_approval(journal, identity=hashlib.sha256(config.api_key.encode()).hexdigest(),
+                            observed_cash=cash_after, positions=after.signed_positions,
+                            now=datetime.now(timezone.utc))
+            print('One immutable incident approval recorded; cash is unchanged, exception not applied. '
+                  f'Active orders={len(after.active_orders)}. No orders submitted or canceled.')
+        finally:
+            journal.close()
+
+
+async def _apply_cash_exception(config_path: Path, directory: Path) -> None:
+    from .cash_exception import apply_with_fresh_proof
+    from .reconciliation_errors import UnclassifiedCash
+
+    runtime = ProductionOrchestrator(load_preflight_config(config_path), directory, read_only=True)
+    try:
+        try:
+            await runtime.prepare()
+        except UnclassifiedCash:
+            await apply_with_fresh_proof(runtime)
+        else:
+            raise RuntimeError('cash exception unnecessary; preparation already reconciled')
+        print('One-time unexplained cash exception applied and consumed; fills, fees, positions, '
+              'deadlines and loss history preserved. No orders or activation. Fresh preparation required.')
+    finally:
+        await runtime.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gemini Predictions live bot operator utility")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -244,6 +296,13 @@ def main() -> int:
     executions.add_argument('--env',type=Path,default=Path('.env'))
     executions.add_argument('--directory',type=Path,default=Path('data/production'))
     executions.add_argument('--acknowledgement',required=True,choices=('I_CONFIRM_EXECUTION_RECOVERY',))
+    for name in ('record-cash-exception', 'apply-cash-exception'):
+        exception = sub.add_parser(name, help='explicit September 16 one-time unexplained cash exception; no trading')
+        exception.add_argument('--env', type=Path, default=Path('.env'))
+        exception.add_argument('--acknowledgement', required=True,
+                               choices=('I_ACCEPT_UNEXPLAINED_CASH_20260916_ONCE',))
+        if name == 'apply-cash-exception':
+            exception.add_argument('--directory', type=Path, default=Path('data/cash-exception-20260916'))
     live = sub.add_parser("run-live", help="reconcile then activate with an owner-approved permit")
     live.add_argument("--env", type=Path, default=Path(".env"))
     live.add_argument("--directory", type=Path, default=Path("data/production"))
@@ -296,6 +355,17 @@ def main() -> int:
             asyncio.run(_reconcile_executions(args.env,args.directory))
         except (ConfigurationError,RuntimeError,ValueError,TimeoutError) as exc:
             parser.error(str(exc))
+        return 0
+    if args.command in {'record-cash-exception', 'apply-cash-exception'}:
+        try:
+            if args.command == 'record-cash-exception':
+                asyncio.run(_record_cash_exception(args.env))
+            else:
+                asyncio.run(_apply_cash_exception(args.env, args.directory))
+        except Exception as exc:
+            # No raw authenticated payloads, balances, or parser values.
+            print(f'Cash exception not completed: {type(exc).__name__}; no activation.', file=sys.stderr)
+            return 2
         return 0
     if args.command == "run-live":
         try:

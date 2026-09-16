@@ -1,15 +1,19 @@
 # Gemini current status
 
-Updated September 16, 2026, 08:26 ET. Current handoff, not a perpetual venue-state guarantee.
+Updated September 16, 2026, 08:39 ET. Current handoff, not a perpetual venue-state guarantee.
 
 ## Operational truth
 
+- **Owner approved one exact, one-time unexplained cash exception.** Immutable approval is now recorded privately against the account and ledger; expected cash is unchanged and the exception is **not applied**. Fresh operator application correctly stopped on `ExternalOrderPresent` (one manual SELL remains). No cancellation, activation or restart. The position need not sell before restart; the manual order needs explicit handoff. [Exception, tests and operator steps](docs/CASH_EXCEPTION_2026-09-16.md).
+- Known no-buyer/terminal exit waits remain automatic and market-scoped. A new offline regression preserves 30 unrelated working orders, retains the position/deadline/exposure, sends no unrelated cancel, and counts the held position as zero pending orders. Actual working SELLs still count as orders; held inventory still occupies exposure and its pool allocation. Unknown account-wide cash cannot be safely attributed to one market without evidence.
 - **The bot is stopped, not restarted.** V11 (`data/production-20260916-churn-v11`, previously source `87fab92`) halted at 02:02:49 ET after both sockets received service-restart closes and a private handshake EOF was treated as fatal. Emergency cancellation could not send over the disconnected socket. The old supervisor and temporary exit helper have exited; no new live permit was issued.
 - The incident's surviving owned entries were canceled earlier. At **07:23:01 ET**, a fresh authenticated read found **one position and one active order**; this supersedes the earlier order-free proof. No order was changed by this final read. The temporary helper had observed no executable NO-side bid and sent no exit; it is no longer monitoring.
 - Exact authenticated trade IDs and fees repaired the missed executions and identified the external close. **Positions match, but a sub-cent cash discrepancy remains unresolved.** Rounding to cents happens to match; that is not authoritative evidence for a rounding rule. Exact cash classification remains blocked. No tolerance, baseline reset, loss reset or activation bypass was introduced.
 - The recovery/sharding source is installed in the local checkout used by the existing editable runtime, **not activated or naturally accepted in live trading**. Verified imports resolve to this workspace. Earlier v11 startup and midnight/churn observations remain historical, not current availability claims. No risk/size/breadth/exit-rule or normal 50% admission relaxation; recovery gaps receive no reward credit.
 
 ## Verified release and limits
+
+- **Cash-exception follow-up: 548 production + 28 script tests = 576 passed.** Eighteen exception cases and the new full-width no-buyer/order-count case pass. Removing history binding in memory caused the expected safety regression to fail. Compilation, offline Windows release checks and whitespace checks passed. Approval recorded, application blocked by the external order; no trading activation.
 
 - **No-buyer follow-up: 529 production + 28 script tests = 557 passed.** Fixed a reproduced startup parser crash when Gemini omits `marketValue` because no sell quote exists. Exact position, exposure and deadline remain; valuation is unavailable, not fabricated. Offline startup → no-depth wait → liquidity return → exact exit passes without restart. Latest read-only check again found one position/one order and no held-outcome bid. No mutation/restart; manual SELL handoff and unexplained cash remain blockers to trading.
 
@@ -24,4 +28,4 @@ Updated September 16, 2026, 08:26 ET. Current handoff, not a perpetual venue-sta
 
 ## Operator route
 
-Latest read-only `prepare-live` in `data/reconciliation-wait-check-20260916` produced the typed **external active order hold**. A fresh history comparison found all three incident trades already matched exactly, and REST still showed one order/one position. The detailed transaction endpoint rejected the current account key; a transaction statement or authoritative ledger evidence is requested. V7 source now supports safe startup standby, but the account is **not trading-ready**. External-order handling and exact cash reconciliation remain necessary. No fresh live permit, restart or trading activation. [NEXT.md](NEXT.md) lists pending work and [DECISIONS.md](DECISIONS.md) retains unchanged strategy/risk authority.
+Latest read-only operator application in `data/cash-exception-20260916` produced the typed **external active order hold**, before applying the exception. Approval is recorded but not consumed; expected cash and loss history remain unchanged, SQLite quick-check passed. No matching live runner/helper was found at 08:39 ET. After operator manual-order handoff, the separate application requires unchanged approved evidence and fresh order-free REST/WS proof, followed by fresh full preparation. The account is **not trading-ready** and no fresh permit/restart occurred. A transaction statement is still useful to explain the discrepancy; approval does not prove its cause. [NEXT.md](NEXT.md) lists pending work.
