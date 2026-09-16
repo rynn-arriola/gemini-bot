@@ -446,7 +446,7 @@ class ChurnTests(unittest.IsolatedAsyncioTestCase):
         await self.fixture.asyncSetUp()
         self.r = self.fixture.r
         self.c = self.fixture.c
-        self.r._sticky_pool_ids = {self.c.pool_id}
+        self.r._sticky_pool_ids = {self.c.owner_key}
 
     async def asyncTearDown(self):
         await self.fixture.asyncTearDown()

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from .domain import ContractRules, RewardPool, canonical_symbol
+from .domain import ContractRules, RewardPool, canonical_symbol, market_owner_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +24,11 @@ class RewardedContract:
     event_category: str = ""
     event_is_live: bool = False
     event_id: str = ""
+    event_contract_count: int = 1
+
+    @property
+    def owner_key(self) -> str:
+        return market_owner_key(self.pool.pool_id, self.rules.symbol)
 
 
 def reward_pool_key(row: dict[str, Any]) -> str:
@@ -97,5 +102,6 @@ def join_reward_contracts(
                 event_category=str(event.get("category", reward.get("category", ""))),
                 event_is_live=bool(event.get("isLive", False)),
                 event_id=str(event.get("id") or ""),
+                event_contract_count=int(event.get("_reward_contract_count", len(event.get("contracts", [])))),
             ))
     return result

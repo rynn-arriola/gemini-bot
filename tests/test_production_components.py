@@ -459,7 +459,7 @@ class AccountRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_shared_pool_is_discovered_once_and_best_open_contract_selected(self) -> None:
+    async def test_shared_pool_budget_kept_once_with_multiple_quotable_markets(self) -> None:
         class Rest:
             async def reward_events(self, *, ceiling: int = 3000):
                 return [
@@ -470,22 +470,22 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
             async def event(self, event_ticker: str):
                 return {"event": {"status": "active", "contracts": [
                     {
-                        "instrumentSymbol": "WIDE", "status": "active", "marketState": "open",
+                        "instrumentSymbol": event_ticker + "-WIDE", "status": "active", "marketState": "open",
                         "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
                         "expiryDate": "2026-09-16T00:00:00Z",
                         "prices": {"bestBid": ".2", "bestAsk": ".8"},
                     },
                     {
-                        "instrumentSymbol": "TIGHT", "status": "active", "marketState": "open",
+                        "instrumentSymbol": event_ticker + "-TIGHT", "status": "active", "marketState": "open",
                         "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
                         "expiryDate": "2026-09-16T00:00:00Z",
-                        "prices": {"bestBid": ".4", "bestAsk": ".6"},
+                        "prices": {"bestBid": ".48", "bestAsk": ".52"},
                     },
                 ]}}
 
         result = await RewardUniverseLoader(Rest()).load(maximum_pools=32)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].rules.symbol, "TIGHT")
+        self.assertEqual([c.rules.symbol for c in result], ["E1-TIGHT", "E2-TIGHT"])
+        self.assertEqual({c.pool.pool_id for c in result}, {"shared:7"})
 
     async def test_live_sports_event_is_not_discovered(self) -> None:
         class Rest:
@@ -694,7 +694,7 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
             exposure = runtime._websocket_exposure()
             self.assertEqual(exposure.pending_orders, 0)
             self.assertEqual(exposure.gross_reservation_usd, Decimal("10"))
-            self.assertEqual(runtime._inventory_locked_pool_ids(), {"pool-held"})
+            self.assertEqual(runtime._inventory_locked_pool_ids(), {"pool-held\x1eY"})
             status = json.loads((runtime.directory / "status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["inventory_catalog_holds"], ["Y"])
 
@@ -709,7 +709,7 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
         def exercise(runtime):
             # Exercise the replacement account created by real prepare(), not
             # the constructor callback or a direct call to _account_event.
-            runtime._sticky_pool_ids = {runtime.universe[0].pool.pool_id}
+            runtime._sticky_pool_ids = {runtime.universe[0].owner_key}
             clock = time.monotonic()
             frames = {}
 

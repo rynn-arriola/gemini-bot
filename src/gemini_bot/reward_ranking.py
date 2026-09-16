@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, ROUND_FLOOR
 
-from .domain import BookTop, ContractRules, Outcome, QuoteLeg, QuotePair, RewardPool, Side, UptimeProgress
+from .domain import BookTop, ContractRules, Outcome, QuoteLeg, QuotePair, RewardPool, Side, UptimeProgress, market_owner_key
 from .profitability import ProfitabilityEvidence
+from .competition import CompetitionEvidence, UNSEEN_CONTRACT_SCORE_PRIOR, distance_weight
 
 
 MINIMUM_REWARD_SIZE = Decimal("10")
@@ -16,7 +17,7 @@ TWO_SIDED_MULTIPLIER = Decimal("1.5")
 UPTIME_THRESHOLD = Decimal("0.50")
 DEFAULT_TARGET_UPTIME = Decimal("0.75")
 MINIMUM_DAILY_PAYOUT = Decimal("1.00")
-RANKING_VERSION = 2
+RANKING_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,10 @@ class RankInput:
     recurring_duration_value: int | None = None
     recurring_duration_unit: str = ""
     resting_quote: QuotePair | None = None
+    competition: CompetitionEvidence | None = None
+    event_contract_count: int = 1
+    pool_competition_score: Decimal | None = None
+    unobserved_competition_units: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +83,18 @@ class RankedCandidate:
     recurring_duration_unit: str
     event_category: str
     quote_cutoff: datetime | None = None
+    own_daily_score_proxy: Decimal = Decimal("0")
+    pool_competition_score_proxy: Decimal = UNSEEN_CONTRACT_SCORE_PRIOR
+    observed_competition_score_proxy: Decimal | None = None
+    unobserved_competition_units: int = 1
+    marginal_reward_usd_proxy: Decimal | None = None
+    other_pool_daily_score_proxy: Decimal = Decimal("0")
+    scoring_yes_price: Decimal | None = None
+    scoring_no_price: Decimal | None = None
+
+    @property
+    def owner_key(self) -> str:
+        return market_owner_key(self.pool_id, self.symbol)
 
 
 def planned_scoring_minutes(
@@ -167,8 +184,7 @@ def rank_candidate(
         if worst_distance > MAX_DISTANCE:
             reasons.append("quote exceeds maximum reward distance")
         # This is an ordering proxy only. Gemini does not publish its exact curve.
-        denominator = MAX_DISTANCE + item.rules.tick_size
-        spread_proxy = max(Decimal("0"), Decimal("1") - worst_distance / denominator) ** 2
+        spread_proxy = distance_weight(worst_distance, item.rules.tick_size)
         scored_size = min(quantity, SIZE_CAP)
         quality = spread_proxy * scored_size * TWO_SIDED_MULTIPLIER
         capital = quote.total_reservation_proxy_usd
@@ -180,22 +196,23 @@ def rank_candidate(
     if not uptime_feasible:
         reasons.append("50% uptime is no longer reachable in the estimated window")
 
-    makers = Decimal(max(1, item.pool.qualifying_maker_count or 1))
     planned_minutes = planned_scoring_minutes(item.uptime, target_uptime)
-    # Gemini does not publish competing scores.  Use a conservative cold-start
-    # prior that every reported maker earns the maximum score available to our
-    # approved 10-contract size for a full scoring window.  This bounds the
-    # reward estimate by the pool instead of presenting an unbounded score as USD.
-    maximum_same_size_quality = min(quantity, SIZE_CAP) * TWO_SIDED_MULTIPLIER
-    # A 75% target is not a promise when only a smaller fraction is reachable.
-    # Infeasible candidates retain a counterfactual potential for the existing
-    # separately approved test override, but remain ineligible normally.
-    effective_target = (
-        min(target_uptime, best_possible)
-        if best_possible is not None and uptime_feasible else target_uptime
-    )
-    own_daily_score = quality * effective_target
-    competing_daily_score = makers * maximum_same_size_quality
+    # Local reachability is reporting-only, not a measured scoring horizon.
+    # Competitor quantity must never scale when we change our own size.
+    own_daily_score = quality * target_uptime
+    if item.pool_source == "category_default" and (item.pool_event_count or 1) > 1:
+        # Recurring/shared members do not each own a full daily pool. The local
+        # window remains a labeled time-exposure proxy, never a 50% veto.
+        own_daily_score *= min(
+            Decimal("1"), planned_minutes / (Decimal("1440") * target_uptime),
+        )
+    competing_daily_score = item.pool_competition_score
+    if competing_daily_score is None:
+        competing_daily_score = (
+            item.competition.weighted_depth if item.competition is not None else Decimal("0")
+        ) + UNSEEN_CONTRACT_SCORE_PRIOR
+    if not competing_daily_score.is_finite() or competing_daily_score <= 0:
+        raise ValueError("competition score must be finite and positive")
     denominator = own_daily_score + competing_daily_score
     estimated_share = Decimal("0") if denominator <= 0 else own_daily_score / denominator
     expected_reward = item.pool.daily_budget_usd * estimated_share
@@ -205,8 +222,8 @@ def rank_candidate(
         Decimal("0.01"), capital * planned_minutes / Decimal("60"),
     )
     potential_profitability = expected_net / capital_hours
-    if expected_reward < MINIMUM_DAILY_PAYOUT:
-        reasons.append("estimated daily reward is below Gemini's payout minimum")
+    # Gemini applies its payout floor to the account daily total, not each
+    # contract. It remains a reporting threshold, never a per-market veto.
     if expected_net <= 0:
         reasons.append("non-positive conservative net-profit estimate")
     eligible = not reasons
@@ -252,7 +269,146 @@ def rank_candidate(
         recurring_duration_unit=item.recurring_duration_unit,
         event_category=item.event_category,
         quote_cutoff=item.uptime.quote_cutoff,
+        own_daily_score_proxy=own_daily_score,
+        pool_competition_score_proxy=competing_daily_score,
+        observed_competition_score_proxy=(
+            item.competition.weighted_depth if item.competition is not None else None
+        ),
+        unobserved_competition_units=item.unobserved_competition_units,
+        scoring_yes_price=quote.yes.price if quote is not None else None,
+        scoring_no_price=quote.no.price if quote is not None else None,
     )
+
+
+def _maker_tiebreak(candidate: RankedCandidate) -> tuple[bool, int]:
+    count = candidate.qualifying_maker_count
+    return count is None, count if count is not None else 0
+
+
+def rank_market_candidates(items: list[RankInput], **kwargs: object) -> list[RankedCandidate]:
+    """Keep market owners separate and share one competition model per pool.
+
+Unwatched contracts/events receive an explicit fixed prior, not zero competition
+or an invented sum of account counts. The estimate is not a payout lower bound.
+"""
+    groups: dict[str, list[RankInput]] = {}
+    symbols: set[str] = set()
+    for item in items:
+        if item.rules.symbol in symbols:
+            raise ValueError("duplicate ranked market identity")
+        symbols.add(item.rules.symbol)
+        groups.setdefault(item.pool.pool_id, []).append(item)
+    ranked = []
+    for group in groups.values():
+        if len({i.pool.daily_budget_usd for i in group}) != 1:
+            raise ValueError("shared pool advertises conflicting budgets")
+        events: dict[str, list[RankInput]] = {}
+        for item in group:
+            events.setdefault(item.event_ticker or item.rules.symbol, []).append(item)
+        event_count = max(len(events), max((i.pool_event_count or 1) for i in group))
+        unseen = max(0, event_count - len(events))
+        for event in events.values():
+            unseen += max(0, max(i.event_contract_count for i in event) - len(event))
+            unseen += sum(i.competition is None for i in event)
+        # One additional uncertainty reserve even when the watched scope is full:
+        # aggregate L2 cannot establish historical participation/qualification.
+        unseen += 1
+        pressure = sum(
+            (i.competition.weighted_depth for i in group if i.competition is not None),
+            Decimal("0"),
+        ) + UNSEEN_CONTRACT_SCORE_PRIOR * unseen
+        ranked.extend(rank_candidate(replace(
+            i, pool_competition_score=pressure, unobserved_competition_units=unseen,
+        ), **kwargs) for i in group)
+    return sorted(ranked, key=lambda c: (
+        -c.priority_score, -c.potential_priority_score,
+        _maker_tiebreak(c), c.pool_id, c.symbol,
+    ))
+
+
+def pool_reward_proxy(candidate: RankedCandidate, own_score: Decimal) -> Decimal:
+    return candidate.daily_pool_usd * own_score / (
+        candidate.pool_competition_score_proxy + own_score
+    )
+
+
+def marginal_reward_proxy(candidate: RankedCandidate, other_score: Decimal) -> Decimal:
+    return (
+        pool_reward_proxy(candidate, other_score + candidate.own_daily_score_proxy)
+        - pool_reward_proxy(candidate, other_score)
+    )
+
+
+def select_sticky_markets(
+    candidates: list[RankedCandidate], *, sticky_pool_ids: set[str],
+    locked_pool_ids: set[str], permitted_symbols: set[str], maximum_active_pools: int,
+    actionable: Callable[[RankedCandidate], bool], entry_time_valid: Callable[[str], bool],
+) -> tuple[list[RankedCandidate], set[str]]:
+    """Legacy argument names, but all owner sets contain pool+symbol keys.
+
+Reserve held/recovering owners individually, retain healthy incumbents, then
+greedily allocate vacant pair slots by marginal net per reserved capital-hour.
+No independence/hedging discount is applied to correlated execution costs.
+"""
+    if not 1 <= maximum_active_pools <= 15:
+        raise ValueError("active market breadth must be between 1 and 15")
+    if len(locked_pool_ids) > maximum_active_pools:
+        raise ValueError("locked market owners exceed authorized breadth")
+    usable = [c for c in candidates if c.symbol in permitted_symbols
+              and actionable(c) and entry_time_valid(c.symbol)]
+    if len({c.owner_key for c in usable}) != len(usable):
+        raise ValueError("duplicate market owner")
+    selected = [c for c in usable if c.owner_key in sticky_pool_ids]
+    owners = locked_pool_ids | {c.owner_key for c in selected}
+    if len(owners) > maximum_active_pools:
+        raise ValueError("persisted market owners exceed authorized breadth")
+
+    def scores() -> dict[str, Decimal]:
+        result: dict[str, Decimal] = {}
+        for c in selected:
+            result[c.pool_id] = result.get(c.pool_id, Decimal("0")) + c.own_daily_score_proxy
+        return result
+
+    # Remove only failed marginal economics, not a challenger with a better rank.
+    while selected:
+        totals = scores()
+        failing = [c for c in selected if marginal_reward_proxy(
+            c, totals[c.pool_id] - c.own_daily_score_proxy,
+        ) <= c.expected_execution_cost_usd]
+        if not failing:
+            break
+        worst = min(failing, key=lambda c: (
+            marginal_reward_proxy(c, totals[c.pool_id] - c.own_daily_score_proxy)
+            - c.expected_execution_cost_usd, c.symbol,
+        ))
+        selected.remove(worst)
+        if worst.owner_key not in locked_pool_ids:
+            owners.remove(worst.owner_key)
+    remaining = [c for c in usable if c.owner_key not in owners]
+    while len(owners) < maximum_active_pools and remaining:
+        totals = scores()
+        def key(c: RankedCandidate) -> tuple:
+            reward = marginal_reward_proxy(c, totals.get(c.pool_id, Decimal("0")))
+            hours = max(Decimal(".01"), c.capital_proxy_usd * c.planned_scoring_minutes / 60)
+            return (-(reward - c.expected_execution_cost_usd) / hours,
+                    _maker_tiebreak(c), c.pool_id, c.symbol)
+        chosen = min(remaining, key=key)
+        remaining.remove(chosen)
+        gain = marginal_reward_proxy(chosen, totals.get(chosen.pool_id, Decimal("0")))
+        if gain <= chosen.expected_execution_cost_usd:
+            continue
+        # Adding a member cannot make an already retained member uneconomic.
+        if any(c.pool_id == chosen.pool_id and marginal_reward_proxy(
+            c, totals[c.pool_id] - c.own_daily_score_proxy + chosen.own_daily_score_proxy,
+        ) <= c.expected_execution_cost_usd for c in selected):
+            continue
+        selected.append(chosen)
+        owners.add(chosen.owner_key)
+    totals = scores()
+    return [replace(c, other_pool_daily_score_proxy=totals[c.pool_id] - c.own_daily_score_proxy,
+                    marginal_reward_usd_proxy=marginal_reward_proxy(
+        c, totals[c.pool_id] - c.own_daily_score_proxy,
+    )) for c in selected], owners
 
 
 def rank_unique_pools(

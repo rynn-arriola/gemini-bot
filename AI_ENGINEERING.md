@@ -8,6 +8,7 @@
 - Maintain one shared rate authority across all adapters. Emergency cancellation has scheduling priority but never bypasses an explicit server cooldown.
 - Do not silently turn a WebSocket outage into high-frequency REST polling. Mark state stale, cancel/suspend risk safely, and use bounded REST reconciliation.
 - Reward budgets are keyed by unique pool identity. Multiple contracts sharing a pool never multiply its advertised budget.
+- Strategy v3 execution ownership is separately keyed by pool plus symbol. Never use the owner key as a budget key or collapse two held symbols into one reservation. Pool forecasts are computed from combined score once; standalone candidate forecasts are explicitly non-additive.
 
 ## CPU and memory
 
@@ -25,6 +26,7 @@
 - “Eligible” means the locally known published requirements pass; it is not proof Gemini awarded a snapshot.
 - Ranking v2's `priority_score` is a conservative net-profit-per-capital-hour proxy, not expected or guaranteed dollars. Its component reward/share/cost values must retain `_proxy` labels because Gemini does not publish the exact quadratic spread curve or final competitor scores.
 - Public qualifying-maker count is a coarse competition signal, not a pool-level unique-account denominator.
+- V3 book-pressure and unseen-contract-prior estimates are scenarios, not guaranteed conservative lower bounds. Maker count breaks economic ties; aggregate L2 cannot recover account identity, individual caps, two-sided status or full-day qualification. Report missing scope, sensitivity and actual exchange rewards separately. Neither inferred 5pm windows nor account payout minimum reporting can stop trading.
 - Paper trade touches are possible fills, not actual fills.
 - Missing profitability telemetry is never treated as zero risk: reserve one potential fill through the 30-minute cold start, assume zero maker rebate if the rate endpoint is unavailable, and ignore duplicate/non-monotonic public trade IDs.
 - Daily reward summaries, order/fill events, settlement, fees, and account equity are authoritative only when authenticated and reconciled.

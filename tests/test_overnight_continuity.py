@@ -166,7 +166,7 @@ class MidnightRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.r._sticky_markets = {}
         self.r._sticky_pool_ids.clear()
         self.r._load_sticky_markets()
-        self.assertEqual(self.r._sticky_markets, {c.pool_id: (c.event_ticker, c.symbol)})
+        self.assertEqual(self.r._sticky_markets, {c.owner_key: (c.event_ticker, c.symbol)})
 
     async def test_malformed_cohort_fails_closed(self):
         self.r.journal.set_runtime_state("sticky_markets_v1", '{"p": [1, 2]}', updated_at=MIDNIGHT)
@@ -231,7 +231,8 @@ class DiscoveryContinuityTests(unittest.IsolatedAsyncioTestCase):
         old["contracts"].append({**self.event("Y")["contracts"][0], "prices": {"bestBid": ".49", "bestAsk": ".50"}})
         rest.event.side_effect = lambda ticker: old if ticker == "OLD" else self.event("Z")
         items = await RewardUniverseLoader(rest).load(preferred={"shared:1": ("OLD", "X")}, now=MIDNIGHT)
-        self.assertEqual([(c.event_ticker, c.rules.symbol) for c in items], [("OLD", "X")])
+        self.assertEqual([(c.event_ticker, c.rules.symbol) for c in items],
+                         [("OLD", "X"), ("OLD", "Y"), ("NEW", "Z")])
 
     async def test_expired_incumbent_replaced_by_current_recurring_event(self):
         rest = AsyncMock()
@@ -288,7 +289,7 @@ class RolloverOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.r.account.reducer.positions["X"] = D("10")
         self.r.journal.persist_deadline("X", "YES", fixtures.NOW, fixtures.NOW + timedelta(minutes=2), D("10"))
         await self.r._rollover_flat_markets([])
-        self.assertEqual([c.rules.symbol for c in self.r.universe], ["X"])
+        self.assertEqual([c.rules.symbol for c in self.r.universe], ["X", "Y"])
         self.r.public.unsubscribe.assert_not_awaited()
         self.assertIsNotNone(self.r.journal.get_deadline("X", "YES"))
 
@@ -297,7 +298,7 @@ class RolloverOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.r.ledger.mark_sent(intent.client_order_id)
         await self.r._rollover_flat_markets([])
         self.r.public.unsubscribe.assert_not_awaited()
-        self.assertEqual([c.rules.symbol for c in self.r.universe], ["X"])
+        self.assertEqual([c.rules.symbol for c in self.r.universe], ["X", "Y"])
 
     async def test_fill_during_cancel_keeps_original_owner(self):
         async def fill(_):
@@ -305,7 +306,7 @@ class RolloverOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.r._cancel_symbol_entries = AsyncMock(side_effect=fill)
         await self.r._rollover_flat_markets([])
         self.r.public.unsubscribe.assert_not_awaited()
-        self.assertEqual([c.rules.symbol for c in self.r.universe], ["X"])
+        self.assertEqual([c.rules.symbol for c in self.r.universe], ["X", "Y"])
 
     async def test_recovery_hold_prevents_catalog_changes(self):
         self.r._stream_holds.add("public")
@@ -314,7 +315,7 @@ class RolloverOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.r.public.unsubscribe.assert_not_awaited()
 
     async def test_catalog_omitted_inventory_recovers_without_rotating_healthy_markets(self):
-        pool_id = self.fresh.pool.pool_id
+        pool_id = self.fresh.owner_key
         self.r.universe = []
         self.r._inventory_catalog_holds = {"Y"}
         self.r._sticky_markets = {pool_id: ("NEW", "Y")}

@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 16, 2026 — competition and shared-pool strategy v3 (source only)
+
+The old reward denominator scaled assumed competitor size with our own quantity, so increasing our size could leave estimated share unchanged. It also used event maker headcount as a score denominator and imposed Gemini's account-daily $1 threshold per candidate. V3 uses fresh own-adjusted L2 pressure plus an explicit fixed unseen-contract scenario; maker count breaks economic ties, own size no longer resizes competitors, and the payout floor is reported only at account level.
+
+Discovery now checks alternate quotable contracts and bounded same-pool events. Active/held owners are exact pool-plus-symbol identities rather than one dictionary entry per pool. Marginal allocation counts the budget once, scores actual incumbent prices, preserves healthy owners and excludes additions that would make retained members uneconomic. Event uptime observes any qualifying tracked contract once per minute. Fee estimates respect the current promotion's unambiguous interior and reward reporting distinguishes earned/below-threshold/pending/paid amounts without fabricated contract attribution or net profit.
+
+This strategy change is not deployed and creates no current resting gap. Future deployment requires fresh authorization; revised economics can reject an old incumbent, and the competition/score/window models remain uncertain proxies. Risk limits, exact recovery, HARD and the active checkout are unchanged.
+
 ## September 16, 2026 — priced BUY reservation and eighth-market churn
 
 Doubling entry size to 20 exposed inconsistent accounting: whole-pair admission used price times quantity, but existing live orders and final sends reserved a blanket $1 per contract. Seven pairs consumed 280 under the latter calculation. An eighth first leg could pass pair admission, then the second leg failed at 320 and the sibling was canceled repeatedly. The owner explicitly rejected reducing size or this blanket order reserve.

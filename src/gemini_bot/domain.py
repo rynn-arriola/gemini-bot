@@ -17,6 +17,13 @@ def canonical_symbol(value: str) -> str:
     return symbol
 
 
+def market_owner_key(pool_id: str, symbol: str) -> str:
+    """Distinct execution owner; never use this key as a reward budget."""
+    if not pool_id or "\x1e" in pool_id or "\x1e" in symbol:
+        raise ValueError("invalid market owner identity")
+    return pool_id + "\x1e" + canonical_symbol(symbol)
+
+
 def uptime_progress_key(event_ticker: str, pool_id: str) -> str:
     """Namespace local uptime by event while retaining shared pool identity."""
     if not event_ticker or not pool_id:

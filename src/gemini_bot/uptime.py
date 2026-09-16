@@ -154,33 +154,44 @@ def sample_and_load_progress(
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
     progress: dict[str, UptimeProgress] = {}
+    grouped: dict[str, list[RewardedContract]] = {}
+    for item in contracts:
+        grouped.setdefault(uptime_progress_key(item.event_ticker, item.pool.pool_id), []).append(item)
     seen: set[str] = set()
     for contract in contracts:
         key = uptime_progress_key(contract.event_ticker, contract.pool.pool_id)
         if key in seen:
             continue
         seen.add(key)
-        start, end, start_source = estimated_reward_window(
-            contract, now, exit_before_expiry_seconds=exit_before_expiry_seconds,
-        )
+        peers = grouped[key]
+        windows = [(c, estimated_reward_window(c, now, exit_before_expiry_seconds=exit_before_expiry_seconds))
+                   for c in peers]
+        valid = [(c, w) for c, w in windows if w[1] > w[0]]
+        if valid:
+            start = min(w[0] for _, w in valid)
+            end = max(w[1] for _, w in valid)
+            start_source = valid[0][1][2] if len(peers) == 1 else "multi_contract_event_window_envelope_proxy"
+        else:
+            start, end, start_source = windows[0][1]
         if end <= start:
             value = UptimeProgress(start_source=start_source, window_valid=False)
             progress[key] = value
             progress.setdefault(contract.pool.pool_id, value)
             continue
-        cutoff = quote_cutoff(
-            contract, end, exit_before_expiry_seconds=exit_before_expiry_seconds,
+        cutoffs = {c.rules.symbol: quote_cutoff(
+            c, w[1], exit_before_expiry_seconds=exit_before_expiry_seconds,
             sports_exit_before_start_seconds=sports_exit_before_start_seconds,
-        )
+        ) for c, w in valid}
+        cutoff = max(cutoffs.values())
         if start <= now < end:
             store.sample_reward_uptime(
                 event_ticker=contract.event_ticker,
                 pool_id=contract.pool.pool_id, window_start=start, window_end=end,
-                sample_at=now, eligible=contract.pool.active and contract.rules.active,
-                qualifying=now < cutoff and locally_qualifying(
-                    contract, account, (books or {}).get(contract.rules.symbol),
+                sample_at=now, eligible=any(c.pool.active and c.rules.active and w[0] <= now < w[1] for c, w in valid),
+                qualifying=any(w[0] <= now < cutoffs[c.rules.symbol] and locally_qualifying(
+                    c, account, (books or {}).get(c.rules.symbol),
                     now=now, market_data_verified_at=market_data_verified_at,
-                ),
+                ) for c, w in valid),
             )
         eligible, qualifying, first_observed_at = store.load_reward_uptime(
             contract.event_ticker, contract.pool.pool_id, start, end,

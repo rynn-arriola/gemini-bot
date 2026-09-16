@@ -205,7 +205,7 @@ class RestingRetentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.r._retain_resting_pair(self.c, working))
 
     async def test_telemetry_marks_transport_gap_without_reward_credit(self):
-        self.r._sticky_pool_ids = {self.r.universe[0].pool.pool_id}
+        self.r._sticky_pool_ids = {self.r.universe[0].owner_key}
         with patch('gemini_bot.orchestrator.time.monotonic', return_value=10):
             self.r._observe_resting()
         self.r._stream_holds.add('public')

@@ -20,6 +20,23 @@ CENT = Decimal("0.01")
 FIVE_MINUTE_SCALE = Decimal("2.2360679775")
 
 
+def maker_fee_rate_at(now: datetime | None) -> Decimal:
+    """Dated estimate only; authenticated execution fees remain authoritative.
+
+Use the unambiguous interior of the published Sep 2–Dec 31 promotion. The
+boundary days retain standard fees because the page gives no precise timezone.
+Recheck the promotion before deployment; Gemini can amend it early.
+"""
+    if now is None:
+        return MAKER_FEE_RATE
+    if now.tzinfo is None:
+        raise ValueError("fee estimate time must be timezone-aware")
+    utc = now.astimezone(timezone.utc)
+    if datetime(2026, 9, 3, tzinfo=timezone.utc) <= utc < datetime(2026, 12, 31, tzinfo=timezone.utc):
+        return Decimal("0")
+    return MAKER_FEE_RATE
+
+
 def active_maker_rebate_fractions(
     rows: list[dict[str, Any]], *, now: datetime,
 ) -> dict[str, Decimal]:
@@ -93,12 +110,13 @@ def estimated_round_trip_fees(
     entry_price: Decimal,
     exit_price: Decimal,
     maker_rebate_fraction: Decimal = MAKER_REBATE_FRACTION,
+    now: datetime | None = None,
 ) -> Decimal:
     """Maker entry fee less rebate plus a conservative taker exit fee."""
     if not Decimal("0") <= maker_rebate_fraction <= Decimal("1"):
         raise ValueError("maker rebate fraction must be between zero and one")
     return (
-        _fee(MAKER_FEE_RATE, quantity, entry_price)
+        _fee(maker_fee_rate_at(now), quantity, entry_price)
         - _maker_rebate(quantity, entry_price, maker_rebate_fraction)
         + _fee(TAKER_FEE_RATE, quantity, exit_price)
     )
@@ -288,6 +306,7 @@ class ProfitabilityTracker:
             return quote.yes.quantity * adverse_move + estimated_round_trip_fees(
                 quantity=quote.yes.quantity, entry_price=entry, exit_price=exit_price,
                 maker_rebate_fraction=maker_rebate_fraction,
+                now=now,
             )
 
         yes_loss = loss_for(quote.yes.price)

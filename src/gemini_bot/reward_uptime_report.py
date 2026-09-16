@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import json
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -48,7 +49,7 @@ def parse_summaries(rows: Any, start: date, end: date) -> dict[tuple[str, str], 
             raise ValueError("invalid event summaries")
         status = row.get("payout_status")
         # Status is informational, never evidence that a scoring window is final.
-        safe_status = status if status in ("PAID", "PENDING", "ZERO_AMOUNT") else "UNKNOWN"
+        safe_status = status if status in ("PAID", "PENDING", "ZERO_AMOUNT", "BELOW_THRESHOLD") else "UNKNOWN"
         for event in events:
             if not isinstance(event, dict):
                 raise ValueError("invalid event summary")
@@ -79,6 +80,52 @@ def parse_summaries(rows: Any, start: date, end: date) -> dict[tuple[str, str], 
     return result
 
 
+def parse_reward_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Account totals and per-event attribution; optional fields stay unavailable.
+
+Input has already passed parse_summaries. Do not divide an event's reward between
+our contracts, equate normalized_score with shared-pool share, or sum rounded
+event amounts to overwrite the authenticated account total.
+"""
+    def amount(value: object, maximum: Decimal | None = None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise ValueError("invalid reward amount")
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or parsed < 0 or (maximum is not None and parsed > maximum):
+            raise ValueError("invalid reward amount")
+        return str(parsed)
+    result = []
+    for row in rows:
+        total = amount(row.get("total_reward_usd"))
+        paid_at = row.get("paid_at")
+        if paid_at is not None:
+            paid = datetime.fromisoformat(str(paid_at).replace("Z", "+00:00"))
+            if paid.tzinfo is None:
+                raise ValueError("invalid paid timestamp")
+            paid_at = paid.isoformat()
+        status = row.get("payout_status")
+        status = status if status in ("PAID", "PENDING", "ZERO_AMOUNT", "BELOW_THRESHOLD") else "UNKNOWN"
+        result.append({
+            "payout_date": row["payout_date"], "payout_status": status,
+            "reported_total_reward_usd": total, "paid_at": paid_at,
+            "paid_reward_usd": total if status == "PAID" and paid_at is not None else None,
+            "reported_below_daily_minimum": None if total is None else Decimal(total) < 1,
+            "exact_scoring_window_known": False,
+            "net_profit_after_trading_usd": None,
+            "net_profit_unavailable_reason": "reward_window_and_trading_cost_attribution_not_proven",
+            "events": [{
+                "event_id": event_identity(e["event_id"]),
+                "snapshot_count": e["snapshot_count"], "total_snapshots": e["total_snapshots"],
+                "normalized_score": amount(e.get("normalized_score"), Decimal("1")),
+                "event_reward_usd": amount(e.get("event_reward_usd")),
+                "contract_reward_attribution_available": False,
+            } for e in row["events"]],
+        })
+    return result
+
+
 class ExchangeRewardUptime:
     """Bounded two-date cache with one paced background fetch for all events."""
 
@@ -87,8 +134,42 @@ class ExchangeRewardUptime:
         self.fetched_at: datetime | None = None
         self.attempted_at: datetime | None = None
         self.error: str | None = None
+        self.reward_results: list[dict[str, Any]] = []
+        self.history_incomplete = True
         self._next_attempt = 0.0
         self._lock = asyncio.Lock()
+
+    def restore_reward_history(self, payload: str | None, *, now: datetime) -> None:
+        """Restore bounded reporting evidence only, never account/risk state."""
+        if payload is None:
+            return
+        try:
+            rows = json.loads(payload)
+            if not isinstance(rows, list) or len(rows) > 14:
+                raise ValueError("invalid reward history")
+            restored = []
+            seen = set()
+            for row in rows:
+                day = date.fromisoformat(row["payout_date"])
+                if day > now.astimezone(EASTERN).date() or day in seen:
+                    raise ValueError("invalid reward history date")
+                seen.add(day)
+                raw = {
+                    "payout_date": row["payout_date"], "payout_status": row["payout_status"],
+                    "paid_at": row["paid_at"], "total_reward_usd": row["reported_total_reward_usd"],
+                    "events": row["events"],
+                }
+                parse_summaries([raw], day, day)
+                restored.extend(parse_reward_results([raw]))
+            self.reward_results = sorted(restored, key=lambda r: r["payout_date"])
+        except (ValueError, TypeError, KeyError, ArithmeticError):
+            self.reward_results = []
+            self.history_incomplete = True
+            return
+        self.history_incomplete = False
+
+    def reward_history_payload(self) -> str:
+        return json.dumps(self.reward_results, sort_keys=True)
 
     async def refresh(self, rest: Any, *, now: datetime, clock: float | None = None) -> bool:
         if now.tzinfo is None:
@@ -107,6 +188,7 @@ class ExchangeRewardUptime:
                     date_from=yesterday.isoformat(), date_to=today.isoformat(),
                 )
                 parsed = parse_summaries(rows, yesterday, today)
+                results = parse_reward_results(rows)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -114,6 +196,9 @@ class ExchangeRewardUptime:
                 self.error = "request_or_response_failed"
                 return False
             self.rows = parsed
+            history = {r["payout_date"]: r for r in self.reward_results}
+            history.update({r["payout_date"]: r for r in results})
+            self.reward_results = [history[key] for key in sorted(history)[-14:]]
             self.fetched_at = now + timedelta(seconds=max(0, time.monotonic() - request_started))
             self.error = None
             return True
