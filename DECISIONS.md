@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026 telemetry follow-up: owner approved repairing the production order-event telemetry callback and explicitly prohibited restart. Implement and verify in an isolated worktree, publish the reviewed branch, and preserve the active checkout's source/build binding, running processes, permit and journal. Activation of this repair remains pending a later authorized deployment. This reporting repair changes no trading or reward-admission policy.
+
 - September 15, 2026 deployment follow-up: owner approved restarting after the current review/readiness work. This supersedes the earlier no-restart restriction for one controlled deployment of the verified continuous-service v7, fill/exit and availability/churn repairs. Gracefully drain the old runner, prove it flat, preserve the shared journal and sticky identities, repeat authenticated preparation, and issue fresh build/account/policy-bound v7 authority. The existing uptime exception still ends at midnight Eastern September 16; all risk, size, breadth and exit limits remain unchanged. No induced fills/faults or host changes are authorized.
 
 - September 15, 2026 overall-review follow-up: owner approved priority repairs for bounded shutdown/cancellation waits, typed request-correlated WebSocket recovery, reason-specific recovered-market holds, and disconnect/send races. Also investigate quote churn and improve retention/continuity measurement within the existing two-tick safety, size, profitability and 50% rules. Preserve unknown-mutation/rejection/integrity/HARD stops. Source changes, offline validation and verified GitHub publication only; the no-restart/no-deployment instruction remains active.

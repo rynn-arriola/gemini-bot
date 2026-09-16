@@ -976,7 +976,8 @@ class ProductionOrchestrator:
         self.ledger = IntentLedger(canonical)
         self.private._ledger = self.ledger
         self.account = AccountRuntime(self.ledger, canonical)
-        self.account.event_sink = lambda event, fields: self.log.event(logging.INFO, event, **fields)
+        # Preserve event-level continuity when startup replaces the account.
+        self.account.event_sink = self._account_event
         self.account.inventory_age_seconds = self.config.risk.max_inventory_age_seconds
         self.account.exit_before_expiry_seconds = self.config.risk.force_exit_before_expiry_seconds
         self.log = OperationalLogger(self._logging, canonical)

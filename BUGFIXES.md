@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 15, 2026 — account callback survives preparation (source only)
+
+Shared-journal startup constructed a new account and assigned a logging-only sink, bypassing constructor-installed `_account_event`. Restore that callback so logged order transitions also update NEW/CANCELED counters and sub-clock either-/two-sided continuity. A new offline integration regression runs real preparation with fake transports and an isolated journal, then drives the account reducer through a 120ms quote/cancel/replacement cycle. It failed on the prior code and passes with the fix, preserving raw logs, order reduction and paused/no-activation behavior. Reporting only: no quote, size, risk, admission or 50%-denominator changes, and no unquoted interval is introduced by source preparation. The repair is isolated on `codex/telemetry-callback`; no process, permit or live source change/restart.
+
 ## September 15, 2026 — availability and churn review (source only)
 
 Bound cancellation/exit/drain waits end to end and start owned entry cancellation before slow exit joins. Correlate WS replies so known read throttles/service errors recover while mutation/auth/integrity failures remain closed. Separate recoverable lifecycle/reward holds, requiring current metadata and terminal/flat proof before releasing only those reasons. Recheck connection generation and terminal cancels after pacing; never replay attempted sends. Share safe retention criteria, reason-code quote cancellations and measure sub-clock either-/two-sided gaps. **463 tests passed (41 new)** plus three negative controls and offline release checks. No restart/deployment or guarantee of live churn reduction. [Full evidence](docs/AVAILABILITY_AND_CHURN_2026-09-15.md).

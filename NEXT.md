@@ -1,6 +1,6 @@
 # Next work
 
-- **P2 telemetry wiring:** shared-journal setup replaces `AccountRuntime.event_sink` with a logging-only callback instead of `_account_event`. Live NEW/CANCELED counters stay zero, and sub-clock gap updates are absent despite raw order logs. Reconnect the production callback and cover shared-journal preparation in an integration regression before the next authorized deployment. Clock-based continuity and quote-retention decisions currently work; use structured logs for exact transition timing. Preserve the current long run for this reporting-only issue.
+- **P2 telemetry deployment pending:** branch `codex/telemetry-callback` restores `_account_event` after shared-journal preparation, with a regression through real preparation and the account reducer. Merge/apply only with the next authorized deployment and fresh build-bound authority. Owner explicitly prohibited restart for this fix; active v10 remains on its matching source. Until deployment, use structured logs for exact transition timing; its per-event counters remain zero and continuity uses the clock.
 
 - **V7 availability/churn repairs are deployed:** bounded drain/admission, correlated read-error recovery, recovered-market holds and connection races passed offline verification. Measure safety/economics-bound retention, reason-coded quote decisions and sub-clock either-/two-sided gaps during the natural long run. The earlier 280/280 report is not a measured v7 result. [Repair and limits](docs/AVAILABILITY_AND_CHURN_2026-09-15.md).
 
