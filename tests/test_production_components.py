@@ -680,7 +680,59 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_flat_preparation_reaches_repair_with_old_expected_state(self) -> None:
         await self._prepare_fixture(manual_flat_repair=True)
 
-    async def _prepare_fixture(self, *, manual_flat_repair: bool) -> None:
+    async def test_prepared_account_events_record_subclock_gaps_and_counters(self) -> None:
+        def exercise(runtime):
+            # Exercise the replacement account created by real prepare(), not
+            # the constructor callback or a direct call to _account_event.
+            runtime._sticky_pool_ids = {runtime.universe[0].pool.pool_id}
+            clock = time.monotonic()
+            frames = {}
+
+            def opened(order_id, outcome):
+                intent = runtime.ledger.prepare(
+                    QuoteLeg("X", outcome, Side.BUY, Decimal(".46"), Decimal("10")),
+                    OrderPurpose.ENTRY,
+                )
+                runtime.ledger.mark_sent(intent.client_order_id)
+                frame = {"e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
+                         "s": "X", "S": "BUY", "O": outcome.value, "p": ".46",
+                         "q": "10", "z": "10", "X": "NEW"}
+                frames[order_id] = frame
+                runtime.account.apply(frame)
+
+            with patch.object(runtime.log, "event", wraps=runtime.log.event) as logged:
+                with patch("gemini_bot.orchestrator.time.monotonic", return_value=clock):
+                    opened("yes-1", Outcome.YES)
+                    opened("no-1", Outcome.NO)
+                with patch("gemini_bot.orchestrator.time.monotonic", return_value=clock + .05):
+                    runtime.account.apply({**frames["yes-1"], "X": "CANCELED"})
+                with patch("gemini_bot.orchestrator.time.monotonic", return_value=clock + .07):
+                    runtime.account.apply({**frames["no-1"], "X": "CANCELED"})
+                with patch("gemini_bot.orchestrator.time.monotonic", return_value=clock + .10):
+                    opened("yes-2", Outcome.YES)
+                with patch("gemini_bot.orchestrator.time.monotonic", return_value=clock + .12):
+                    opened("no-2", Outcome.NO)
+                self.assertEqual(sum(c.args[1] == "order_transition" for c in logged.call_args_list), 6)
+
+            view = runtime._continuity_view()
+            self.assertIn("X", view["symbols"])
+            events = view["symbols"]["X"]
+            self.assertEqual(events["order_new_events"], 4)
+            self.assertEqual(events["order_cancel_events"], 2)
+            for group in ("symbols", "two_sided_symbols"):
+                observation = view[group]["X"]
+                self.assertEqual(observation["gap_count"], 1)
+                self.assertGreater(observation["last_gap_seconds"], 0)
+                self.assertLess(observation["last_gap_seconds"], .25)
+                self.assertTrue(observation["qualifying_at_last_observation"])
+            self.assertEqual(runtime.account.reducer.pending_order_count(), 2)
+            self.assertEqual(runtime.account.fill_version, 0)
+            self.assertEqual(runtime.gate.state, EngineState.READY)
+            self.assertFalse(runtime._activation_consumed)
+
+        await self._prepare_fixture(manual_flat_repair=False, after_prepare=exercise)
+
+    async def _prepare_fixture(self, *, manual_flat_repair: bool, after_prepare=None) -> None:
         class Rest:
             async def terms_status(self): return {"hasAcceptedLatest": True}
             async def reward_config(self): return {"enabled": True}
@@ -767,6 +819,9 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
                 status = json.loads((Path(directory) / "status.json").read_text(encoding="utf-8"))
                 self.assertEqual(status["phase"], "ready_paused")
                 self.assertFalse(status["activated"])
+                if after_prepare is not None:
+                    after_prepare(runtime)
+                    self.assertEqual(private.mutations, 0)
             finally:
                 await runtime.close()
 

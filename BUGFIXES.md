@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 16, 2026 — second maker leg admission and telemetry
+
+Confirmed offline: YES could cancel during NO's transport wait, then NO still sent and was canceled as `pair_incomplete`. Final admission now checks the exact first order/client identity, acknowledged intent, unchanged price/full unfilled quantity and public/private generations. Invalidated second intents remain definitely unsent and terminal; existing symbol cleanup continues. Attempted-send failures retain unknown state and are not replayed. The guard is removed after send/failure without leaking into later pairs.
+
+Adverse-guard diagnostics now distinguish missing contract/book, unsynchronized/stale/one-sided public book, empty external side after own-order subtraction and invalid two-sided target. Cancellation decisions are unchanged. Included the prepared shared-journal account callback repair and its real-preparation regression.
+
+Verification: 454 production + 28 script tests passed, including 18 new guard/diagnostic tests and the telemetry regression. Compilation, whitespace, PowerShell parsing and offline Windows policy/storage checks passed. Source verified; deployment status is in STATUS.md. Snapshot impact: avoids some orphan orders/cancel traffic; genuine safety cancels remain, no reward guarantee or policy change. Controlled deployment incurs an unquoted interval.
+
 ## September 15, 2026 — account callback survives preparation (source only)
 
 Shared-journal startup constructed a new account and assigned a logging-only sink, bypassing constructor-installed `_account_event`. Restore that callback so logged order transitions also update NEW/CANCELED counters and sub-clock either-/two-sided continuity. A new offline integration regression runs real preparation with fake transports and an isolated journal, then drives the account reducer through a 120ms quote/cancel/replacement cycle. It failed on the prior code and passes with the fix, preserving raw logs, order reduction and paused/no-activation behavior. Reporting only: no quote, size, risk, admission or 50%-denominator changes, and no unquoted interval is introduced by source preparation. The repair is isolated on `codex/telemetry-callback`; no process, permit or live source change/restart.

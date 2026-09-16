@@ -100,6 +100,16 @@ class PreparedState:
     symbols: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MakerPairGuard:
+    first_client_id: str
+    first_server_id: str
+    first_leg: QuoteLeg
+    second_leg: QuoteLeg
+    public_generation: int
+    private_generation: int
+
+
 class ProductionOrchestrator:
     """Single Windows process that owns state, rate admission, and mutations.
 
@@ -184,6 +194,7 @@ class ProductionOrchestrator:
         self._cancel_tasks: dict[str, asyncio.Task[None]] = {}
         self._adverse_tasks: dict[str, asyncio.Task[bool]] = {}
         self._entry_cancel_symbols: dict[str, int] = {}
+        self._maker_pair_guards: dict[str, MakerPairGuard] = {}
         self._cash_reconciliation_task: asyncio.Task[int] | None = None
         self._read_recovery_attempts: dict[str, int] = {}
         self._risk_read_verified = False
@@ -976,7 +987,8 @@ class ProductionOrchestrator:
         self.ledger = IntentLedger(canonical)
         self.private._ledger = self.ledger
         self.account = AccountRuntime(self.ledger, canonical)
-        self.account.event_sink = lambda event, fields: self.log.event(logging.INFO, event, **fields)
+        # Preserve event-level continuity when startup replaces the account.
+        self.account.event_sink = self._account_event
         self.account.inventory_age_seconds = self.config.risk.max_inventory_age_seconds
         self.account.exit_before_expiry_seconds = self.config.risk.force_exit_before_expiry_seconds
         self.log = OperationalLogger(self._logging, canonical)
@@ -1268,6 +1280,27 @@ class ProductionOrchestrator:
             if self._read_recovery_attempts or self._stream_holds or self._reward_program_paused:
                 raise EntryStateChangedBeforeSend("read recovery pauses new entries")
             if params.get("timeInForce") == "MOC":
+                pair = self._maker_pair_guards.get(symbol)
+                if pair is not None:
+                    first = self.account.reducer.orders.get(pair.first_server_id)
+                    intent = self.ledger.get(pair.first_client_id)
+                    if (
+                        first is None or not first.working or first.cumulative_filled != 0
+                        or first.client_order_id != pair.first_client_id
+                        or first.symbol != symbol or first.side is not Side.BUY
+                        or first.outcome is not pair.first_leg.outcome
+                        or first.price != pair.first_leg.price
+                        or first.original_quantity != pair.first_leg.quantity
+                        or first.remaining_quantity != pair.first_leg.quantity
+                        or intent is None or intent.state is not IntentState.ACKNOWLEDGED
+                        or intent.server_order_id != pair.first_server_id
+                        or self._stream_generation["public"] != pair.public_generation
+                        or self._stream_generation["private"] != pair.private_generation
+                        or params["eventOutcome"] != pair.second_leg.outcome.value
+                        or Decimal(str(params["price"])) != pair.second_leg.price
+                        or Decimal(str(params["quantity"])) != pair.second_leg.quantity
+                    ):
+                        raise EntryStateChangedBeforeSend("maker pair first leg changed before second send")
                 target = self._current_quote_target(symbol)
                 leg = None if target is None else (
                     target.yes if params["eventOutcome"] == "YES" else target.no
@@ -1438,6 +1471,7 @@ class ProductionOrchestrator:
         available = self.account.available_usd
         if not admission.allowed or available is None or candidate.quote.total_reservation_proxy_usd > available:
             return
+        pair_generations = dict(self._stream_generation)
         first_id = await self.private.place_maker(candidate.quote.yes)
         await self.account.wait_for_order_event(first_id)
         first = self.ledger.get(first_id)
@@ -1469,7 +1503,18 @@ class ProductionOrchestrator:
             self._maker_ack_count += 1
             self._activated_pool_ids.add(candidate.pool_id)
             return
-        second_id = await self.private.place_maker(candidate.quote.no)
+        # The first leg can terminate while the second waits for admission.
+        # Keep its exact identity/geometry bound through the final send guard.
+        pair_guard = MakerPairGuard(
+            first_id, first.server_order_id, candidate.quote.yes, candidate.quote.no,
+            pair_generations["public"], pair_generations["private"],
+        )
+        self._maker_pair_guards[candidate.symbol] = pair_guard
+        try:
+            second_id = await self.private.place_maker(candidate.quote.no)
+        finally:
+            if self._maker_pair_guards.get(candidate.symbol) is pair_guard:
+                self._maker_pair_guards.pop(candidate.symbol)
         await self.account.wait_for_order_event(second_id)
         second = self.ledger.get(second_id)
         second_order = (
@@ -1539,11 +1584,23 @@ class ProductionOrchestrator:
                 await self._cancel_symbol_entries(order.symbol)
 
     def _current_quote_target(self, symbol: str) -> Any | None:
+        return self._quote_target_state(symbol)[0]
+
+    def _quote_target_state(self, symbol: str) -> tuple[Any | None, str]:
         contract = next(
             (item for item in self.universe if item.rules.symbol == symbol), None,
         )
-        if contract is None or not self._book_fresh(symbol):
-            return None
+        if contract is None:
+            return None, "missing_contract"
+        book = self.public.books.get(symbol)
+        if book is None:
+            return None, "book_missing"
+        if not book.synchronized:
+            return None, "book_unsynchronized"
+        if not self._public_stream_fresh():
+            return None, "market_stream_stale"
+        if book.top() is None:
+            return None, "public_book_one_sided"
         candidates = rank_live_universe(
             [contract], self.public.books, now=_utc_now(),
             quantity=self.config.strategy.quote_quantity,
@@ -1552,7 +1609,11 @@ class ProductionOrchestrator:
             market_data_verified_at=self._market_data_verified_at(),
             target_uptime=self.config.strategy.target_uptime,
         )
-        return candidates[0].quote if candidates else None
+        if not candidates:
+            return None, "external_book_one_sided"
+        if candidates[0].quote is None:
+            return None, "invalid_quote_target"
+        return candidates[0].quote, "available"
 
     async def _cancel_too_aggressive_quote(self, symbol: str) -> bool:
         """Cancel when a book move leaves our entry closer than two ticks.
@@ -1567,9 +1628,9 @@ class ProductionOrchestrator:
         ]
         if not working:
             return False
-        target = self._current_quote_target(symbol)
+        target, target_reason = self._quote_target_state(symbol)
         if target is None:
-            self._record_quote_cancel(symbol, "book_unavailable")
+            self._record_quote_cancel(symbol, target_reason)
             await self._cancel_symbol_entries(symbol)
             return True
         targets = {Outcome.YES: target.yes.price, Outcome.NO: target.no.price}
