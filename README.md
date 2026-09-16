@@ -62,15 +62,16 @@ The following commands are documented for a later approved commissioning session
   --activation-permit data\production\activation-permit.json
 ```
 
-A date-bounded owner-approved test may add `--ignore-uptime-proxy`. Continuous
-use requires a permit whose `uptime_override_until` is active and no later than
-permit expiry. Version 4 may set `universe_scope` to `reward_catalog`, allowing
-automatic capped rotation across the reconciled rewarded universe. This affects only the local feasibility filter; it
-does not assert that Gemini's 50% reward threshold will be met.
+The local 50% reachability estimate is reporting-only because Gemini's exact
+snapshot phase/denominator is unavailable. `--ignore-uptime-proxy` remains only
+for legacy/bounded permit compatibility and is not required by the current
+continuous sticky-market policy. `universe_scope=reward_catalog` allows capped
+replacement of a concretely unusable incumbent from the reconciled reward
+catalog. None of these settings asserts that Gemini's 50% threshold was met.
 
 The Windows launcher is `scripts\start_production.ps1`; `-Mode Prepare` remains non-ordering and `-Mode Live` requires the permit. Live mode registers and starts one project-scoped, on-demand Scheduled Task with no boot/logon trigger and unlimited execution time; Task Scheduler then owns `scripts\supervise_production.ps1` instead of the calling terminal. The launcher refuses an existing running task/supervisor and requires a fresh process-backed supervisor heartbeat before reporting success. A version-5 bounded session may restart its runner at most twice, with backoff, only after the runner durably proves flat; otherwise the supervisor performs one read-only reconciliation and enters `ATTENTION_REQUIRED`. `scripts\stop_production.ps1` disables supervisor recovery and writes a graceful drain request. Confirm `status.json` reaches `stopped_flat`; do not kill the process first.
 
-Version 6 keeps those supervision bounds and the 24-hour permit maximum, while allowing an uptime exception to end before session expiry. At midnight the runner refreshes day-specific eligibility and continues without the exception; session expiry still drains. Persisted market identities and flat-only recurring rollover preserve continuity. See [overnight continuity](docs/OVERNIGHT_CONTINUITY_2026-09-15.md).
+Version 6 keeps those supervision bounds and the 24-hour permit maximum. At midnight the runner refreshes day-specific reporting without clearing healthy sticky identities; session expiry still drains. Persisted market identities and flat-only recurring rollover preserve continuity. See [overnight continuity](docs/OVERNIGHT_CONTINUITY_2026-09-15.md).
 
 After the owner manually closes all bot inventory, adopt the new baseline only with fresh authenticated proof:
 

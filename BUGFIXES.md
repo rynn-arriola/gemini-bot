@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — sticky markets no longer stop on an uncertain local uptime bound
+
+The live cohort had been resting since shortly after midnight, but reconstructed local uptime rows began at 11:27 and made the bot report that 50% was unreachable. Order history proved earlier resting presence, while Gemini's authenticated daily summary still contained no usable snapshot rows. The local calculation therefore could not safely establish either qualification or disqualification.
+
+The local 50% rejection is now reporting-only. Every other rejection remains blocking. Exact healthy incumbents stay pinned across midnight/restarts and ahead of higher-ranked reserves; completed/expired/unsafe markets request an immediate reward-catalog refresh and only their slots rotate. The release passed 559 production and 28 script tests plus compilation, PowerShell parsing, whitespace and offline release validation. Live acceptance restored the same 12-market cohort with 24 canonically owned orders, no uptime override, no stream holds and no post-start ERROR/CRITICAL event.
+
 ## September 16, 2026 — verified journal recovery and live market isolation
 
 Deployment uncovered a physically malformed canonical SQLite file after the controlled stop. The bot was not started against it. A fail-closed reconstruction combined the last verified backup, 13 exact rows recovered from the damaged file, authenticated per-symbol terminal order history, stable REST/private-stream positions and cash, and the already-consumed one-time cash incident boundary. Independent checks proved one position, zero active orders, one deadline, no nonterminal intents, complete current risk classification and SQLite `quick_check=ok`; the damaged original remains preserved.
