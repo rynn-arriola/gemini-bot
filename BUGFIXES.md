@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 16, 2026 — one-time exception binds both cash surfaces
+
+After the manual SELL cancellation, stable order-free proof reached the approved exception but refused because REST `amount` and WebSocket `c` exposed different precision. Applying the REST value would leave runtime reconciliation broken because the engine compares against exact WS `c`. The operator-only incident path now binds stable REST and WS values separately, requires each to remain inside the same approved sub-cent incident, and adopts exact WS cash once. No general rounding/tolerance or automatic future exception was added.
+
 ## September 16, 2026 — absent valuation on an untradeable position
 
 Gemini documents that a position can omit `marketValue` when no sell quote exists, but REST reconciliation indexed that field unconditionally. Offline no-buyer startup reproduced `KeyError` before the existing scoped exit wait. Parsing now retains the exact position and exposure basis with an unavailable valuation; saved snapshot text explicitly says `unavailable`, never zero or last-trade price. Nonfinite/malformed amounts still fail closed. Integration covers startup, no-buyer wait, original deadline preservation, liquidity return and exact flatten, plus unchanged cash/external-order checks. No live order or restart.

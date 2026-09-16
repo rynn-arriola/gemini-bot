@@ -105,6 +105,19 @@ class CashExceptionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(changes=changes), self.assertRaises(RuntimeError): self.apply(**changes)
         self.assertEqual(self.journal.get_runtime_state('expected_confirmed_usd'), '100.123')
 
+    def test_exact_distinct_rest_and_ws_surfaces_are_bound_once(self):
+        self.approve()
+        self.apply(ws_cash=D('100.121'))
+        self.assertEqual(self.journal.get_runtime_state('expected_confirmed_usd'), '100.121')
+        evidence = json.loads(self.journal.get_runtime_state('one_time_cash_exception_20260916_surfaces'))
+        self.assertEqual(evidence['rest_confirmed'], '100.12')
+        self.assertEqual(evidence['ws_confirmed'], '100.121')
+        with self.assertRaises(RuntimeError): self.apply(ws_cash=D('100.122'))
+
+    def test_surface_difference_must_remain_subcent(self):
+        self.approve()
+        with self.assertRaises(RuntimeError): self.apply(ws_cash=D('100.14'))
+
     def test_changed_history_cannot_be_forgiven(self):
         self.approve()
         self.journal.connection.execute("UPDATE realized_risk_window_state SET loss_high_water='32'")
@@ -179,7 +192,7 @@ class CashExceptionTests(unittest.IsolatedAsyncioTestCase):
             if fault == 'unowned': runtime.account.unowned_order_seen = True
             if fault == 'missing_fill': runtime.account.missing_execution_orders.add('unknown')
             if fault == 'position': runtime.account.expected_positions = {'TEST': D(1)}
-            if fault == 'cash': runtime.account.confirmed_usd = D('100.121')
+            if fault == 'cash': runtime.account.confirmed_usd = D('100.14')
             if fault == 'live': runtime.read_only = False
             if fault == 'lock': runtime.lock._file = None
             with self.subTest(fault=fault), self.assertRaises(RuntimeError):

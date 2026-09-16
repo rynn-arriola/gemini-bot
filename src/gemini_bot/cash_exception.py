@@ -17,6 +17,7 @@ INCIDENT = "owner-approved-unexplained-cash-20260916"
 EXPIRES = datetime(2026, 9, 17, 4, tzinfo=timezone.utc)
 _KEY = "one_time_cash_exception_20260916"
 _APPLIED = _KEY + "_applied"
+_SURFACES = _KEY + "_surfaces"
 
 
 def _check_time(now: datetime) -> None:
@@ -87,7 +88,7 @@ def record_approval(journal: SQLiteJournal, *, identity: str, observed_cash: Dec
 
 
 def apply_approval(journal: SQLiteJournal, *, identity: str, observed_cash: Decimal,
-                   now: datetime) -> None:
+                   now: datetime, ws_cash: Decimal | None = None) -> None:
     """Atomic local commit. Caller must own lock and prove fresh order-free account."""
     _check_time(now)
     with journal.transaction():
@@ -101,17 +102,27 @@ def apply_approval(journal: SQLiteJournal, *, identity: str, observed_cash: Deci
                 or journal.get_runtime_state("credential_identity") != identity
                 or record.get("ledger_digest") != ledger_digest(journal)):
             raise RuntimeError("cash exception account or ledger evidence changed")
-        expected, actual = _cash(record.get("expected")), _cash(record.get("observed"))
-        if (actual != _cash(observed_cash)
+        expected, rest_actual = _cash(record.get("expected")), _cash(record.get("observed"))
+        ws_actual = _cash(observed_cash if ws_cash is None else ws_cash)
+        if (rest_actual != _cash(observed_cash)
                 or expected != _cash(journal.get_runtime_state("expected_confirmed_usd"))
-                or not Decimal("0") < abs(actual - expected) < Decimal("0.01")
-                or str(actual - expected) != record.get("delta")):
+                or not Decimal("0") < abs(rest_actual - expected) < Decimal("0.01")
+                or str(rest_actual - expected) != record.get("delta")
+                or not Decimal("0") < abs(ws_actual - expected) < Decimal("0.01")
+                or abs(ws_actual - rest_actual) >= Decimal("0.01")):
             raise RuntimeError("cash exception no longer matches its exact approved discrepancy")
         if journal.connection.execute("SELECT 1 FROM order_intent WHERE state != 'terminal' LIMIT 1").fetchone():
             raise RuntimeError("cash exception requires terminal durable intents")
         # Preserve watermark: the unexplained delta is NOT authenticated history
         # and cannot silently mark earlier deposits/rewards as already reconciled.
-        journal.set_runtime_state("expected_confirmed_usd", str(actual), updated_at=now)
+        # REST and WS are separately bound because the incident surfaces expose
+        # different stable precisions. Runtime accounting follows exact WS `c`;
+        # this is a one-time evidence record, not a general rounding/tolerance.
+        journal.set_runtime_state(_SURFACES, json.dumps({
+            "incident": INCIDENT, "rest_confirmed": str(rest_actual),
+            "ws_confirmed": str(ws_actual), "expected_before": str(expected),
+        }, sort_keys=True), updated_at=now)
+        journal.set_runtime_state("expected_confirmed_usd", str(ws_actual), updated_at=now)
         journal.set_runtime_state(_APPLIED, INCIDENT, updated_at=now)
         journal.audit("one_time_unexplained_cash_exception_applied", {"incident": INCIDENT})
 
@@ -124,22 +135,24 @@ async def apply_with_fresh_proof(runtime) -> None:
         raise RuntimeError("cash exception requires an owned nonactivated read-only runtime")
     account = runtime.account
     version = account.fill_version
+    ws_before = account.confirmed_usd
     before = build_account_snapshot(await runtime.rest.positions(), await runtime.rest.active_orders())
     cash_before = confirmed_usd(await runtime.rest.account_balances())
     after = build_account_snapshot(await runtime.rest.positions(), await runtime.rest.active_orders())
     cash_after = confirmed_usd(await runtime.rest.account_balances())
     assert_stable_account_bracket(before, after)
+    ws_after = account.confirmed_usd
     if (before.active_orders or after.active_orders or account.reducer.pending_order_count()
             or not account.readiness.complete or not account.snapshots_fresh
             or account.unowned_order_seen or account.missing_execution_orders
             or version != account.fill_version
             or after.signed_positions != account.reducer.positions
             or account.expected_positions != account.reducer.positions
-            or cash_before != cash_after or cash_after != account.confirmed_usd):
+            or cash_before != cash_after or ws_before is None or ws_before != ws_after):
         raise RuntimeError("cash exception requires fresh stable order-free REST/WS agreement")
     for task in runtime._tasks:
         if task.done():
             raise RuntimeError("cash exception account observation task stopped")
     apply_approval(runtime.journal, identity=hashlib.sha256(runtime.config.api_key.encode()).hexdigest(),
-                   observed_cash=cash_after, now=datetime.now(timezone.utc))
-    account.expected_confirmed_usd = cash_after
+                   observed_cash=cash_after, ws_cash=ws_after, now=datetime.now(timezone.utc))
+    account.expected_confirmed_usd = ws_after
