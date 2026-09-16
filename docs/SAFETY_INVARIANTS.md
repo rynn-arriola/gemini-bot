@@ -2,7 +2,7 @@
 
 Violation of an invariant blocks new risk and requires reconciliation or a terminal halt.
 
-## Availability follow-up (source only)
+## Availability follow-up (v7)
 
 40. Cancellation admission/send/confirmation share a bounded deadline. Exit workers have a 45-second overall budget; three-attempt/30-second reducing-send rounds remain unchanged. Drain begins known-owned entry cancellations before joining existing owners (50 seconds), with a 90-second whole-drain budget. Never mutate an unowned order, hide worker failure, replay an ambiguous mutation or report flat on timeout. Failed cancellation stays latched. Server cooldowns are not bypassed.
 41. Response IDs are correlated to bounded connection-specific request state. Only known read requests may turn 429/500/502/503/504 into recovery. Uncorrelated/authentication/ban/malformed/mutation errors remain fail-closed. Connection identity is rechecked after admission; definitely-unsent intents may close locally, attempted sends may not. Replaced sockets cannot authorize replay. Known-terminal cancellation is rechecked at send.
@@ -11,7 +11,7 @@ Violation of an invariant blocks new risk and requires reconciliation or a termi
 
 ## Core invariants
 
-**Continuous-service extension (source only, not deployed):** Invariants 34–39 explicitly extend the bounded v2–v6 rules below for owner-approved v7 only. The live v6 session retains its original expiry/recovery boundaries. The owner prohibited restart/deployment on September 15 during this implementation.
+**Continuous-service extension:** Invariants 34–39 explicitly extend the bounded v2–v6 rules below for owner-approved v7 only. The owner later authorized one controlled deployment on September 15; v7 is now active with fresh authority. Historical v6 permits retain their original expiry/recovery boundaries and cannot authorize this build.
 
 1. Production begins paused. Process startup alone can never submit an order.
 2. Live activation requires accepted terms, fresh balances/positions/open orders, live public and private streams, a synchronized book, complete risk configuration, exact live acknowledgement, and an unexpired one-use version-2 owner permit bound to policy, Python build, account fingerprint and exact symbols. Run expiry ends quoting.
