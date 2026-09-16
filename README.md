@@ -79,6 +79,16 @@ After the owner manually closes all bot inventory, adopt the new baseline only w
 
 This command is venue-read-only. It refuses any position, active order, nonterminal bot intent, stale account snapshot, or unknown order ownership, and it never resets the six-hour loss window.
 
+## Check status and logs
+
+Local status/log check, without API calls or restart:
+
+```powershell
+.\scripts\check_runtime.ps1 -RuntimeDirectory data\production-20260915-nontrading-v8 -Logs
+```
+
+Use the applicable run directory. Stale RUNNING files and recovery holds are identified; the reader tails rotated runner/supervisor logs but cannot prove venue flatness. [Logging/recovery boundaries](docs/RUNTIME_HARDENING_2026-09-15.md).
+
 ## Run a bounded observation
 
 Use the isolated `.venv` with `requirements.txt`. Example paths are relative to this folder:

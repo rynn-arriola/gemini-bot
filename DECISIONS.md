@@ -4,6 +4,12 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026 restart-readiness follow-up: owner asked to fix the remaining recovery issue so a restart can follow. Implement bounded in-process stream recovery and run non-ordering readiness checks; no restart, new permit or policy override is authorized by this repair turn.
+
+- September 15, 2026 follow-up: implement recommended conservative reward-window treatment; investigate the stopped bot, add redacted operational logs and improve scoped recovery with Polymarket as reference. Preserve strategy/risk/exit rules. This implementation request does not authorize restart.
+
+- September 15, 2026: use authenticated exchange `snapshot_count / total_snapshots` as the primary reported uptime percentage when available, matched by event ID and Eastern scoring date. Display local estimates separately; missing/stale counts remain unavailable and partial counts never guarantee final eligibility. This is reporting-only, not permission to change the admission/50% feasibility policy. Owner explicitly directed continued implementation without restarting the bot.
+
 - September 15, 2026: deposits, withdrawals, liquidity rewards, and maker rebates are non-trading cash and must never enter realized trading P&L or the $30 six-hour stop. Reconcile them only from exact authenticated history; an unknown or non-exact cash movement pauses new risk. This follows the Polymarket accounting boundary while using Gemini's own payout and transfer APIs.
 
 - September 15, 2026: owner approved the follow-up review fixes and WebSocket improvements: 100 ms differential depth, connection-reported `conninfo` rate control, and authenticated order-stream cancellation confirmation before bounded REST fallback. Trading remains stopped until the owner explicitly requests restart. Rate and price corrections do not change the 30-slot/$30 six-hour/10-contract business policy.

@@ -462,6 +462,7 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         async def frames():
             yield {"e": "depthUpdate", "s": "X", "U": 5, "u": 5, "b": [], "a": []}
         self.runtime.public.frames = frames
+        self.runtime._recover_stream = AsyncMock(side_effect=RuntimeError("recovery unavailable"))
         with self.assertRaises(RuntimeError):
             await self.runtime._public_pump()
         self.assertFalse(self.runtime.gate.may_submit)

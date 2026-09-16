@@ -17,6 +17,23 @@ $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $SupervisorStatus = Join-Path $RuntimePath "supervisor-status.json"
 $SupervisorStop = Join-Path $RuntimePath "SUPERVISOR_STOP"
 $RunnerResult = Join-Path $RuntimePath "runner-result.json"
+$SupervisorLog = Join-Path $RuntimePath "supervisor.jsonl"
+$LastLoggedState = ""
+$LastLoggedAt = [DateTimeOffset]::MinValue
+
+function Write-SupervisorLog($Payload) {
+    # Bounded, structured lifecycle history; never log environment/permit data.
+    if ((Test-Path -LiteralPath $SupervisorLog) -and (Get-Item -LiteralPath $SupervisorLog).Length -ge 2097152) {
+        for ($Index = 2; $Index -ge 1; $Index--) {
+            $Source = "$SupervisorLog.$Index"
+            if (Test-Path -LiteralPath $Source) {
+                Move-Item -LiteralPath $Source -Destination "$SupervisorLog.$($Index + 1)" -Force
+            }
+        }
+        Move-Item -LiteralPath $SupervisorLog -Destination "$SupervisorLog.1" -Force
+    }
+    $Payload | ConvertTo-Json -Compress | Add-Content -LiteralPath $SupervisorLog -Encoding utf8
+}
 
 function Write-SupervisorStatus([string]$State, [string]$Reason, [int]$RunnerExitCode) {
     $Payload = [ordered]@{
@@ -25,11 +42,28 @@ function Write-SupervisorStatus([string]$State, [string]$Reason, [int]$RunnerExi
         reason = $Reason
         runner_exit_code = $RunnerExitCode
         restart_count = $RestartCount
-        automatic_live_restart = $true
+        automatic_live_restart = $State -in @("STARTING", "RUNNING", "BACKOFF")
+        supervisor_pid = $PID
+        runner_pid = if ($null -eq $Runner) { $null } else { $Runner.Id }
+        session_id = $SessionId
+        heartbeat_ttl_seconds = 45
     }
     $Temporary = "$SupervisorStatus.tmp.$PID"
     $Payload | ConvertTo-Json -Compress | Set-Content -LiteralPath $Temporary -Encoding utf8
     Move-Item -LiteralPath $Temporary -Destination $SupervisorStatus -Force
+    if ($State -ne $script:LastLoggedState -or ([DateTimeOffset]::UtcNow - $script:LastLoggedAt).TotalSeconds -ge 60) {
+        Write-SupervisorLog $Payload
+        $script:LastLoggedState = $State
+        $script:LastLoggedAt = [DateTimeOffset]::UtcNow
+    }
+}
+
+trap {
+    # Do not guess flatness or restart after an unexpected supervisor failure.
+    try {
+        Write-SupervisorStatus "ATTENTION_REQUIRED" ("supervisor exception: " + $_.Exception.GetType().Name + "; runner/account state must be checked") 4
+    } catch { Write-Error "Supervisor diagnostics failed; inspect runner and venue independently." -ErrorAction Continue }
+    exit 4
 }
 
 function Join-QuotedArguments([string[]]$Values) {
@@ -76,7 +110,9 @@ while ($true) {
         -RedirectStandardOutput $RunnerOut -RedirectStandardError $RunnerErr -PassThru
     Set-Content -LiteralPath (Join-Path $RuntimePath "runner.id") -Value $Runner.Id -Encoding ascii
     Write-SupervisorStatus "RUNNING" "approved runner is active" -1
-    $Runner.WaitForExit()
+    while (-not $Runner.WaitForExit(10000)) {
+        Write-SupervisorStatus "RUNNING" "runner process exists; check runner heartbeat separately" -1
+    }
     $Runner.Refresh()
     # Copy immediately into a dedicated scalar. Do not reuse a generic
     # ExitCode variable across the later recovery child process.
@@ -140,6 +176,7 @@ while ($true) {
 # Non-recoverable, non-flat, unknown, exhausted, or repeated-fast failures do
 # not relaunch. One read-only check records whether the venue is currently safe.
 $RecoveryDirectory = Join-Path $RuntimePath "supervisor-recovery"
+Write-SupervisorStatus "RECONCILING" "runner stopped without reusable flat proof; read-only check only" $LastRunnerExitCode
 New-Item -ItemType Directory -Path $RecoveryDirectory -Force | Out-Null
 $RecoveryArguments = @(
     "-m", "gemini_bot", "prepare-live", "--env", $EnvironmentPath,
@@ -155,5 +192,8 @@ $Reason = if ($Recovery.ExitCode -eq 0) {
     "automatic restart blocked; read-only reconciliation failed; manual account review required"
 }
 Write-SupervisorStatus "ATTENTION_REQUIRED" $Reason $LastRunnerExitCode
-while (-not (Test-Path -LiteralPath $SupervisorStop)) { Start-Sleep -Seconds 10 }
+while (-not (Test-Path -LiteralPath $SupervisorStop)) {
+    Start-Sleep -Seconds 10
+    Write-SupervisorStatus "ATTENTION_REQUIRED" $Reason $LastRunnerExitCode
+}
 Write-SupervisorStatus "STOPPED" "operator dismissed supervisor attention" $LastRunnerExitCode

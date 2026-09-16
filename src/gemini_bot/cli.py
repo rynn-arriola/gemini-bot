@@ -82,7 +82,7 @@ async def _reconcile_manual_flat(config_path: Path, directory: Path) -> None:
     config = load_preflight_config(config_path)
     runtime = ProductionOrchestrator(config, directory, read_only=True)
     try:
-        await runtime.prepare()
+        await runtime.prepare(manual_flat_repair=True)
         imported = await runtime.reconcile_verified_manual_flat()
         print(
             "Authenticated Gemini state is flat and order-free; the manual close was "
@@ -182,6 +182,15 @@ def main() -> int:
                 exit_code=2, outcome="startup_or_unclassified_failure",
             )
             parser.error(str(exc))
+        except Exception as exc:
+            # Unknown failures must never authorize a supervised live restart.
+            # No raw exception payload (potential HTTP/auth data) in stderr.
+            _write_live_runner_result(
+                args.directory, session_id=args.supervisor_session_id,
+                exit_code=3, outcome="startup_or_unclassified_failure",
+            )
+            print(f"unclassified live runner failure: {type(exc).__name__}; inspect redacted logs", file=sys.stderr)
+            return 3
         _write_live_runner_result(
             args.directory, session_id=args.supervisor_session_id,
             exit_code=0, outcome="closed",

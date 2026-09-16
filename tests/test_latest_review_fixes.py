@@ -260,8 +260,8 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.rest.past_transfers = AsyncMock(return_value=[])
         self.runtime.rest.positions = AsyncMock(return_value=[])
         self.runtime.rest.active_orders = AsyncMock(return_value=[])
-        with self.assertRaisesRegex(RuntimeError, "cannot be classified"):
-            await self.runtime._risk_mark()
+        self.assertEqual(await self.runtime._risk_mark(), 30)
+        self.assertFalse(self.runtime.account.equity_classification_complete)
         with patch(
             "gemini_bot.orchestrator._utc_now",
             return_value=NOW + timedelta(minutes=2),

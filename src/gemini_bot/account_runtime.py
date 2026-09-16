@@ -7,8 +7,10 @@ from decimal import Decimal
 from typing import Any
 import time
 import json
+from copy import deepcopy
+from collections.abc import Callable
 
-from .account_state import AccountReducer
+from .account_state import AccountReducer, OrderTransition, OwnedOrder
 from .execution import IntentLedger, IntentState
 from .storage import AuthenticatedCashAdjustment, SQLiteJournal
 
@@ -62,6 +64,7 @@ class AccountRuntime:
         self.blocked_entries: set[str] = set()
         self.changed = asyncio.Event()
         self.fill_version = 0
+        self.event_sink: Callable[[str, dict[str, object]], None] | None = None
         saved_positions = journal.get_runtime_state("expected_positions")
         self.expected_positions = None if saved_positions is None else {
             key: Decimal(value) for key, value in json.loads(saved_positions).items()
@@ -218,6 +221,7 @@ class AccountRuntime:
         if event_type != "orderUpdate":
             return
 
+        previous_order = deepcopy(self.reducer.orders.get(str(frame.get("i", ""))))
         transition = self.reducer.apply_order_update(frame)
         order = self.reducer.orders[transition.order_id]
         intent = self.ledger.get(order.client_order_id)
@@ -229,52 +233,18 @@ class AccountRuntime:
             self.ledger.acknowledge(order.client_order_id, order.order_id)
 
         if transition.newly_filled > 0:
-            self._known_account_activity()
-            trade_id = str(frame.get("t", ""))
-            if trade_id:
-                recorded = self.journal.record_fill(
-                    trade_id=trade_id,
-                    order_id=order.order_id,
-                    client_order_id=order.client_order_id,
-                    symbol=order.symbol,
-                    side=order.side.value,
-                    outcome=order.outcome.value,
-                    quantity=transition.newly_filled,
-                    price=Decimal(str(frame.get("L", frame.get("p", "0")))),
-                    fee=Decimal(str(frame.get("n", "0"))),
-                    event_at=_event_time(frame),
-                )
-                if recorded:
-                    self.fill_version += 1
-                if recorded and self.expected_confirmed_usd is not None:
-                    price = Decimal(str(frame.get("L", frame.get("p", "0"))))
-                    if not Decimal("0") < price < Decimal("1"):
-                        raise RuntimeError("fill cash cannot be classified without execution price")
-                    cash = transition.newly_filled * price
-                    self.expected_confirmed_usd += (
-                        -cash if order.side.value == "BUY" else cash
-                    ) - Decimal(str(frame.get("n", "0")))
-                    self._persist_expected_cash()
-                if recorded and self.expected_positions is not None:
-                    change = transition.newly_filled * (1 if order.outcome.value == "YES" else -1) * (1 if order.side.value == "BUY" else -1)
-                    self.expected_positions[order.symbol] = self.expected_positions.get(order.symbol, Decimal("0")) + change
-                    if self.expected_positions[order.symbol] == 0:
-                        self.expected_positions.pop(order.symbol)
-                    self._persist_expected_positions()
-            else:
-                raise RuntimeError("fill without durable trade identity requires reconciliation")
-            if transition.cancel_other_entry_orders:
+            try:
+                recorded = self._commit_fill(frame, order, transition)
+            except BaseException:
+                # A rolled-back write must not consume the reducer's trade ID;
+                # replay can then persist the same fill exactly once.
+                if previous_order is None:
+                    self.reducer.orders.pop(order.order_id, None)
+                else:
+                    self.reducer.orders[order.order_id] = previous_order
+                raise
+            if recorded and transition.cancel_other_entry_orders:
                 self.blocked_entries.add(order.symbol)
-                opened = min(_event_time(frame), datetime.now(timezone.utc))
-                deadline = opened + timedelta(seconds=self.inventory_age_seconds)
-                if order.symbol in self.expiry:
-                    deadline = min(deadline, self.expiry[order.symbol] - timedelta(seconds=self.exit_before_expiry_seconds))
-                if order.symbol in self.hard_exit_cutoff:
-                    deadline = min(deadline, self.hard_exit_cutoff[order.symbol])
-                # Persist before waiting for cancellation or a delayed position report.
-                self.journal.persist_deadline(
-                    order.symbol, order.outcome.value, opened, deadline, order.cumulative_filled,
-                )
                 try:
                     self.safety_symbols.put_nowait(order.symbol)
                 except asyncio.QueueFull as exc:
@@ -295,4 +265,60 @@ class AccountRuntime:
             "client_order_id": order.client_order_id, "order_id": order.order_id,
             "symbol": order.symbol, "status": order.status,
         })
+        if self.event_sink is not None:
+            self.event_sink("order_transition", {
+                "symbol": order.symbol, "order_id": order.order_id,
+                "client_order_id": order.client_order_id,
+                "side": order.side.value, "outcome": order.outcome.value,
+                "status": order.status, "has_new_fill": transition.newly_filled > 0,
+            })
         self._signal(order.client_order_id)
+
+    def _commit_fill(self, frame: dict[str, Any], order: OwnedOrder, transition: OrderTransition) -> bool:
+        """One durable unit: fill identity, cash, position and safety deadline."""
+        trade_id = str(frame.get("t") or "")
+        if not trade_id:
+            raise RuntimeError("fill without durable trade identity requires reconciliation")
+        price = Decimal(str(frame.get("L", frame.get("p", "0"))))
+        fee = Decimal(str(frame.get("n", "0")))
+        if not price.is_finite() or not Decimal("0") < price < Decimal("1") or not fee.is_finite():
+            raise RuntimeError("fill cash cannot be classified without execution price")
+        quantity = transition.newly_filled
+        expected_cash = self.expected_confirmed_usd
+        if expected_cash is not None:
+            cash = quantity * price
+            expected_cash += (-cash if order.side.value == "BUY" else cash) - fee
+        expected_positions = None if self.expected_positions is None else dict(self.expected_positions)
+        if expected_positions is not None:
+            change = quantity * (1 if order.outcome.value == "YES" else -1) * (1 if order.side.value == "BUY" else -1)
+            expected_positions[order.symbol] = expected_positions.get(order.symbol, Decimal("0")) + change
+            if expected_positions[order.symbol] == 0:
+                expected_positions.pop(order.symbol)
+        now = datetime.now(timezone.utc)
+        with self.journal.transaction():
+            recorded = self.journal.record_fill(
+                trade_id=trade_id, order_id=order.order_id, client_order_id=order.client_order_id,
+                symbol=order.symbol, side=order.side.value, outcome=order.outcome.value,
+                quantity=quantity, price=price, fee=fee, event_at=_event_time(frame),
+            )
+            if not recorded:
+                return False
+            if expected_cash is not None:
+                self.journal.set_runtime_state("expected_confirmed_usd", str(expected_cash), updated_at=now)
+            if expected_positions is not None:
+                self.journal.set_runtime_state(
+                    "expected_positions", json.dumps({k: str(v) for k, v in expected_positions.items()}), updated_at=now,
+                )
+            if transition.cancel_other_entry_orders:
+                opened = min(_event_time(frame), now)
+                deadline = opened + timedelta(seconds=self.inventory_age_seconds)
+                if order.symbol in self.expiry:
+                    deadline = min(deadline, self.expiry[order.symbol] - timedelta(seconds=self.exit_before_expiry_seconds))
+                if order.symbol in self.hard_exit_cutoff:
+                    deadline = min(deadline, self.hard_exit_cutoff[order.symbol])
+                self.journal.persist_deadline(order.symbol, order.outcome.value, opened, deadline, order.cumulative_filled)
+        self.expected_confirmed_usd = expected_cash
+        self.expected_positions = expected_positions
+        self.fill_version += 1
+        self._known_account_activity()
+        return True

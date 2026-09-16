@@ -76,6 +76,7 @@ class RankedCandidate:
     recurring_duration_value: int | None
     recurring_duration_unit: str
     event_category: str
+    quote_cutoff: datetime | None = None
 
 
 def planned_scoring_minutes(
@@ -157,6 +158,8 @@ def rank_candidate(
 
     best_possible = item.uptime.best_possible_ratio
     uptime_feasible = best_possible is None or best_possible >= UPTIME_THRESHOLD
+    if not item.uptime.window_valid:
+        reasons.append("invalid estimated reward window")
     if not uptime_feasible:
         reasons.append("50% uptime is no longer reachable in the estimated window")
 
@@ -167,7 +170,14 @@ def rank_candidate(
     # approved 10-contract size for a full scoring window.  This bounds the
     # reward estimate by the pool instead of presenting an unbounded score as USD.
     maximum_same_size_quality = min(quantity, SIZE_CAP) * TWO_SIDED_MULTIPLIER
-    own_daily_score = quality * target_uptime
+    # A 75% target is not a promise when only a smaller fraction is reachable.
+    # Infeasible candidates retain a counterfactual potential for the existing
+    # separately approved test override, but remain ineligible normally.
+    effective_target = (
+        min(target_uptime, best_possible)
+        if best_possible is not None and uptime_feasible else target_uptime
+    )
+    own_daily_score = quality * effective_target
     competing_daily_score = makers * maximum_same_size_quality
     denominator = own_daily_score + competing_daily_score
     estimated_share = Decimal("0") if denominator <= 0 else own_daily_score / denominator
@@ -224,6 +234,7 @@ def rank_candidate(
         recurring_duration_value=item.recurring_duration_value,
         recurring_duration_unit=item.recurring_duration_unit,
         event_category=item.event_category,
+        quote_cutoff=item.uptime.quote_cutoff,
     )
 
 

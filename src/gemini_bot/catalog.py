@@ -23,6 +23,7 @@ class RewardedContract:
     event_starts_at: str = ""
     event_category: str = ""
     event_is_live: bool = False
+    event_id: str = ""
 
 
 def reward_pool_key(row: dict[str, Any]) -> str:
@@ -78,9 +79,9 @@ def join_reward_contracts(
                 event_ticker=ticker,
                 pool=pool,
                 rules=rules,
-                expiry=str(contract.get("expiryDate", reward.get("ends_at", ""))),
-                reward_starts_at=str(reward.get("starts_at", "")),
-                reward_ends_at=str(reward.get("ends_at", "")),
+                expiry=str(contract.get("expiryDate") or reward.get("ends_at") or ""),
+                reward_starts_at=str(reward.get("starts_at") or ""),
+                reward_ends_at=str(reward.get("ends_at") or ""),
                 trade_starts_at=str(
                     contract.get("effectiveDate")
                     or event.get("effectiveDate")
@@ -92,8 +93,9 @@ def join_reward_contracts(
                 recurring_duration_value=int(reward["recurring_duration_value"])
                 if reward.get("recurring_duration_value") is not None else None,
                 recurring_duration_unit=str(reward.get("recurring_duration_unit", "")),
-                event_starts_at=str(event.get("startTime", "")),
+                event_starts_at=str(event.get("startTime") or ""),
                 event_category=str(event.get("category", reward.get("category", ""))),
                 event_is_live=bool(event.get("isLive", False)),
+                event_id=str(event.get("id") or ""),
             ))
     return result

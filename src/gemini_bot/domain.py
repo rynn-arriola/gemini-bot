@@ -143,12 +143,20 @@ class UptimeProgress:
     window_start: datetime | None = None
     window_end: datetime | None = None
     start_source: str = "unknown"
+    remaining_venue_snapshots_estimate: int | None = None
+    quote_cutoff: datetime | None = None
+    window_valid: bool = True
 
     def __post_init__(self) -> None:
         if min(self.eligible_snapshots, self.qualifying_snapshots, self.remaining_snapshots_estimate) < 0:
             raise ValueError("snapshot counts cannot be negative")
         if self.qualifying_snapshots > self.eligible_snapshots:
             raise ValueError("qualifying snapshots cannot exceed eligible snapshots")
+        if self.remaining_venue_snapshots_estimate is not None:
+            if self.remaining_venue_snapshots_estimate < self.remaining_snapshots_estimate:
+                raise ValueError("quote opportunities cannot exceed venue opportunities")
+        if self.quote_cutoff is not None and self.quote_cutoff.tzinfo is None:
+            raise ValueError("quote cutoff must be timezone-aware")
         if self.observed_window_eligible_snapshots is not None:
             if self.observed_window_eligible_snapshots < 0:
                 raise ValueError("observed-window snapshots cannot be negative")
@@ -169,7 +177,12 @@ class UptimeProgress:
 
     @property
     def best_possible_ratio(self) -> Decimal | None:
-        denominator = self.eligible_snapshots + self.remaining_snapshots_estimate
+        if not self.window_valid:
+            return Decimal("0")
+        venue_remaining = self.remaining_venue_snapshots_estimate
+        denominator = self.eligible_snapshots + (
+            self.remaining_snapshots_estimate if venue_remaining is None else venue_remaining
+        )
         if denominator == 0:
             return None
         return Decimal(self.qualifying_snapshots + self.remaining_snapshots_estimate) / Decimal(denominator)
@@ -178,7 +191,10 @@ class UptimeProgress:
     def observed_start_best_possible_ratio(self) -> Decimal | None:
         if self.observed_window_eligible_snapshots is None:
             return None
-        denominator = self.observed_window_eligible_snapshots + self.remaining_snapshots_estimate
+        venue_remaining = self.remaining_venue_snapshots_estimate
+        denominator = self.observed_window_eligible_snapshots + (
+            self.remaining_snapshots_estimate if venue_remaining is None else venue_remaining
+        )
         if denominator == 0:
             return None
         return Decimal(self.qualifying_snapshots + self.remaining_snapshots_estimate) / Decimal(denominator)

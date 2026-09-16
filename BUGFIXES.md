@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 15, 2026 — bounded WebSocket recovery, not yet activated
+
+Transport EOF/errors, depth sequence gaps and stale account snapshots now initiate bounded reconnect/reconciliation instead of an unconditional process stop. Added generation deduplication, no-replay guards, exact terminal-history checks and cancel-on-disconnect handling without duplicate cancellation. Storage/protocol/ownership/unknown-fill failures remain fatal. Original deadlines and 50%-uptime history survive; lost quoting time is not forgiven. Offline fault tests passed; natural live recovery remains unverified. [Boundaries and evidence](docs/RUNTIME_HARDENING_2026-09-15.md).
+
+## September 15, 2026 — unreleased runtime hardening
+
+Separate venue denominator/local cutoff; handle second-leg fills without unrelated drain; avoid periodic cash-race stops; atomically persist fill/expected state/deadline; unblock explicit manual-flat preparation; refresh current-owner reward metadata. Added typed periodic-read hold/backoff/resume and rotated lifecycle/order/heartbeat logs with stale-supervisor checks. **Not deployed; unexplained process disappearance is not claimed fixed.** [Tests and uptime effects](docs/RUNTIME_HARDENING_2026-09-15.md).
+
 ## September 15, 2026 — non-trading cash no longer trips realized-loss accounting
 
 - Symptom: Gemini paid an $0.08 maker rebate after the SOL maker fills. Confirmed cash correctly rose, but the durable expected-cash ledger knew only fills, so the next launch stopped before quoting.

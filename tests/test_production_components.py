@@ -586,13 +586,13 @@ class UptimeTests(unittest.TestCase):
                 now=datetime(2026, 9, 15, 15, tzinfo=timezone.utc),
             )["pool"]
             # 11:00 Eastern: 661 minutes elapsed including the current bucket,
-            # with 780 whole minutes remaining in the 24-hour proxy day.
+            # with 779 remaining buckets (never double count the current bucket).
             self.assertEqual(progress.eligible_snapshots, 661)
-            self.assertEqual(progress.remaining_snapshots_estimate, 780)
+            self.assertEqual(progress.remaining_snapshots_estimate, 779)
             self.assertGreater(progress.best_possible_ratio, Decimal(".50"))
             store.close()
 
-    def test_window_uses_trade_start_reward_end_and_preexpiry_guard(self) -> None:
+    def test_venue_window_does_not_subtract_local_preexpiry_guard(self) -> None:
         contract = RewardedContract(
             "E", RewardPool("pool", Decimal("100")),
             ContractRules("X", Decimal(".01"), Decimal("1"), Decimal("1")),
@@ -602,7 +602,7 @@ class UptimeTests(unittest.TestCase):
         )
         start, end, source = estimated_reward_window(contract, NOW)
         self.assertEqual(start, datetime(2026, 9, 15, 15, 30, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 9, 15, 17, 55, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 9, 15, 18, 0, tzinfo=timezone.utc))
         self.assertEqual(source, "contract_effective_date_conservative_reward_start")
 
     def test_shared_pool_keeps_event_uptime_separate(self) -> None:
@@ -675,6 +675,12 @@ class UptimeTests(unittest.TestCase):
 
 class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_reconciles_and_ranks_without_mutation(self) -> None:
+        await self._prepare_fixture(manual_flat_repair=False)
+
+    async def test_manual_flat_preparation_reaches_repair_with_old_expected_state(self) -> None:
+        await self._prepare_fixture(manual_flat_repair=True)
+
+    async def _prepare_fixture(self, *, manual_flat_repair: bool) -> None:
         class Rest:
             async def terms_status(self): return {"hasAcceptedLatest": True}
             async def reward_config(self): return {"enabled": True}
@@ -734,7 +740,7 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
             strategy, risk = load_policy()
             runtime = ProductionOrchestrator(
                 LiveConfig("account-example", "secret", "", True, strategy, risk),
-                Path(directory),
+                Path(directory), read_only=manual_flat_repair,
             )
             private = Private()
             runtime.rest = Rest()
@@ -743,7 +749,18 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
             runtime.public = Public()
             runtime.private = private
             try:
-                result = await runtime.prepare(timeout=2)
+                if manual_flat_repair:
+                    prior = SQLiteJournal(runtime.control_directory / "production.sqlite")
+                    try:
+                        prior.set_runtime_state("expected_confirmed_usd", "96", updated_at=NOW)
+                        prior.set_runtime_state("expected_positions", '{"X":"10"}', updated_at=NOW)
+                    finally:
+                        prior.close()
+                result = await runtime.prepare(timeout=2, manual_flat_repair=manual_flat_repair)
+                if manual_flat_repair:
+                    self.assertFalse(runtime.account.equity_classification_complete)
+                    self.assertFalse(runtime._last_snapshot.positions)
+                    self.assertFalse(runtime._last_snapshot.active_orders)
                 self.assertEqual(runtime.gate.state, EngineState.READY)
                 self.assertEqual(result.ranked_count, 1)
                 self.assertEqual(private.mutations, 0)

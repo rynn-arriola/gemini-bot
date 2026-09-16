@@ -1,5 +1,35 @@
 # Gemini findings
 
+- September 15 restart-readiness follow-up: 19:59:45–20:04:45 ET read-only preflight passed. Authenticated account flat at start/finish; all 29 books fresh in 17 samples, matched cash/positions, two eligible candidates, verified public/private WS quotas, no mutations/gaps/dropped work. Observer CPU averaged 0.38% of one core, not a live-trading CPU benchmark. Final source: 277 production/28 script tests. Recovery faults remain synthetic; process disappearance remains unproven. [Report](data/preflight-20260915-stream-recovery/preflight-report.json).
+
+- September 15 runtime follow-up: both old processes are absent, the saved 18:29 ET heartbeat is stale and no durable result/log explains termination. New conservative windows, scoped recovery and logging are prepared, not deployed. [Evidence and remaining uncertainty](docs/RUNTIME_HARDENING_2026-09-15.md).
+
+## September 15, 2026: complete Events REST reference scan
+
+- Followed all seven official Events links, the generated `Event`, `Contract`, `Strike`, `EventsResponse`, sports-taxonomy and pagination schemas, core concepts, and the raw OpenAPI paths. The stable details are consolidated in [the API reference](GEMINI_PREDICTIONS_API_REFERENCE.md).
+- The API supports complete paginated listing, exact event lookup, strike lookup, flat category discovery, and 24-hour newly-listed/recently-settled plus approved-upcoming feeds. General/specialized lists cap `limit` at 500; sports filters OR repeated values within a field and AND across fields.
+- Published timing fields do not reveal reward activation. `createdAt`, `effectiveDate`, `expiryDate`, `resolvedAt`, strike `availableAt`, and reward `ends_at` have distinct meanings. Live event responses currently add `startTime`/`isLive`, but those are absent from the published `Event` OpenAPI schema and still are not reward-start fields.
+- A live MLB sample made the separation concrete: event/contract `effectiveDate` was September 14, `startTime` was the September 15 game time, and `expiryDate` was September 16. Therefore neither effective time nor expiry is a safe substitute for sports start, and sports entry/exit logic must use a validated `startTime` with a conservative missing-field fallback.
+- Read-only public endpoint validation at 19:12 EDT exercised every collection endpoint, exact-event lookup and a 5-minute BTC reference-strike lookup. Live responses contained additional undocumented event/contract metadata. No authenticated request, order, cancellation, process restart or runtime behavior change occurred.
+- Snapshot impact: documentation only. Event discovery remains REST metadata transport; WebSocket remains the live book/status path. No ranking, pool rotation, quote, stop, or 50%-uptime rule changed.
+
+## September 15, 2026: exchange uptime reporting implemented, not deployed
+
+- New `ExchangeRewardUptime` reports authenticated qualifying/total snapshots, percentage, scoring date and fetch time. It matches numeric event IDs from event discovery, never titles or pool IDs. It does not replace local future-feasibility estimates or affect ranking/admission/stop decisions.
+- Continuous activation starts one background today/yesterday REST refresh every five minutes. It shares the existing rate governor, uses a separate short-timeout read lock to avoid holding the safety REST lock, respects server cooldowns, bounds its cache, and cancels on shutdown. Prepare-only and short commissioning runs do not start this polling.
+- Empty rows, missing/ambiguous IDs, zero denominators, fetch failures and stale data show unavailable. Yesterday's report remains dated historical evidence, never today's percentage. Gemini supplies no scoring-through timestamp: per-minute cadence does not justify inventing one from fetch time or total count.
+- Verified 17 dedicated tests plus full 231 production/28 script suite, compilation and diff checks. Authenticated read-only smoke at 18:41 EDT succeeded with no summary rows. No live-count calibration is claimed.
+- Snapshot impact: reporting only; no intended quote churn, pool rotation, risk-policy change or new unquoted interval. REST adds one scheduled query per five minutes plus bounded existing retries, under shared limits. Working source changed but the live process was not restarted; its old build-bound permit cannot authorize this new build.
+
+## September 15, 2026: reward timing verification remains incomplete
+
+- Checked official prose, raw OpenAPI, changelog, live public reward/event responses, authenticated daily summaries and general web searches. [Evidence and unsent support questions](docs/REWARD_TIMING_VERIFICATION_2026-09-15.md).
+- SOL 18:00 EDT sampled contract has effective time 17:00 EDT, while the event listing/effective timestamp is earlier. Neither proves the reward-activation timestamp; assuming midnight eligibility for this contract is unsupported.
+- Live hourly/15-minute/5-minute SOL rows share pool 55. Shared budget identity does not establish shared 50% uptime aggregation. Published schema omits the live pool/recurrence fields.
+- September 13–15 authenticated daily summaries were empty: no exchange snapshot denominator available. Sub-$1 rows can be suppressed, so missing rows are not proof of zero participation. Payment schedules are 17:00 ET maker rebates and 17:30 ET liquidity rewards, not proven scoring resets.
+- No bot logic, policy, order or process changes. Exact scoring boundaries/aggregation still need Gemini confirmation or authoritative snapshot evidence.
+- Representative follow-up at 18:06–18:07 EDT inspected 24 reward events/276 contracts across five categories. Every sampled contract had effective/expiry timestamps; no reward row supplied a reward-start timestamp. SOL and BTC both showed 5/15/60-minute windows, while other contracts spanned days/months. When available, matched exchange `snapshot_count / total_snapshots` supersedes time-derived observed-uptime estimates; missing rows remain unknown and partial counts do not prove final eligibility.
+
 ## September 15, 2026: $0.08 maker rebate and cash classification
 
 - Authenticated payout history identifies one paid $0.08 maker rebate from two SOL maker fills totaling $10.90 of volume. It is separate from liquidity rewards.

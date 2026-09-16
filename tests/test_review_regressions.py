@@ -87,8 +87,11 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
                    "b": [[".48", "100"]], "a": [[".52", "100"]]}
         self.runtime.public.frames = frames
         self.runtime.public.resync = AsyncMock()
-        await self.runtime._public_pump()
+        self.runtime._recover_stream = AsyncMock(side_effect=RuntimeError("synthetic EOF"))
+        with self.assertRaisesRegex(RuntimeError, "synthetic EOF"):
+            await self.runtime._public_pump()
         self.runtime.public.resync.assert_not_awaited()
+        self.assertIsInstance(self.runtime._recover_stream.call_args.args[1], StopAsyncIteration)
         telemetry = json.loads(self.runtime.profitability.dumps(now=NOW))
         self.assertEqual(len(telemetry["books"]["X"]), 1)
 
@@ -97,7 +100,9 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             if False:
                 yield {}
         self.runtime.private.messages = messages
-        await self.runtime._private_pump()
+        self.runtime._recover_stream = AsyncMock(side_effect=RuntimeError("recovery unavailable"))
+        with self.assertRaisesRegex(RuntimeError, "recovery unavailable"):
+            await self.runtime._private_pump()
         self.assertFalse(self.runtime.gate.may_submit)
 
     async def test_partial_first_fill_prevents_second_entry_leg(self):

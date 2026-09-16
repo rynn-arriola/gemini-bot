@@ -1,6 +1,6 @@
 # Gemini Predictions API Reference
 
-Implementation repair check, September 15, 2026: revalidated official streams, active-order pagination, rate limits, liquidity rewards and collateral-return restrictions. See [repair evidence](docs/REPAIR_REPORT_2026-09-15.md) for implemented behavior and unsupported account-program boundaries. This check used public documentation, not authenticated account access.
+Implementation repair check, September 15, 2026: revalidated official streams, active-order pagination, rate limits, liquidity rewards, the complete Events REST surface and collateral-return restrictions. See [repair evidence](docs/REPAIR_REPORT_2026-09-15.md) for implemented behavior and unsupported account-program boundaries. The Events/Rewards reference scan used public documentation, the published OpenAPI schema and read-only public endpoint responses; it made no account mutation.
 
 Working reference for the Gemini liquidity-rewards bot. This document summarizes the official Gemini Prediction Markets REST and WebSocket APIs and links to the canonical specification for every surface.
 
@@ -11,6 +11,9 @@ Last verified: **2026-09-15 (America/New_York)**
 ## Canonical sources
 
 - [Prediction Markets API overview](https://developer.gemini.com/prediction-markets-spec)
+- [Events REST API](https://developer.gemini.com/rest-api/prediction-markets/events)
+- [Prediction-market core concepts](https://developer.gemini.com/prediction-markets/core-concepts)
+- [Generated schema catalog](https://developer.gemini.com/prediction-markets-spec/~schemas)
 - [OpenAPI specification](https://developer.gemini.com/specs/openapi/prediction-markets.yaml)
 - [WebSocket AsyncAPI specification](https://developer.gemini.com/specs/asyncapi/websocket.yaml)
 - [Trading quickstart](https://developer.gemini.com/prediction-markets/trading-quickstart)
@@ -138,17 +141,43 @@ All endpoints in this section are public.
 | GET | `/v1/prediction-markets/events` | Paginated event discovery | `status`, `category`, sports filters, search, `limit`, `offset` |
 | GET | `/v1/prediction-markets/events/{eventTicker}` | Retrieve an event and its contracts | Exact event ticker |
 | GET | `/v1/prediction-markets/events/{eventTicker}/strike` | Retrieve a strike/reference value | Exact event ticker |
-| GET | `/v1/prediction-markets/events/newly-listed` | Find new events | Filters and pagination |
-| GET | `/v1/prediction-markets/events/recently-settled` | Find recently resolved events | Filters and pagination |
-| GET | `/v1/prediction-markets/events/upcoming` | Find upcoming events | Filters and pagination |
-| GET | `/v1/prediction-markets/categories` | Retrieve the category tree | Optional category filters |
+| GET | `/v1/prediction-markets/events/newly-listed` | Events created in the last 24 hours, newest first | Category/sports filters; `limit`, `offset` |
+| GET | `/v1/prediction-markets/events/recently-settled` | Events settled in the last 24 hours, most recently resolved first | Category/sports filters; `limit`, `offset` |
+| GET | `/v1/prediction-markets/events/upcoming` | Approved, not-yet-active events, soonest start first | Category/sports filters; `limit`, `offset` |
+| GET | `/v1/prediction-markets/categories` | Flat list of available event categories | Optional repeated `status` filter |
+
+`List Events` accepts repeated `status` and `category` parameters, free-text `search`, and independent sports taxonomy filters: `sport`, `sports_market_type`, `sports_market_subject`, `sports_market_scope`, and `sports_market_metric`. Repeated values within one filter are ORed; different sports filters compose with AND. Invalid sports enum values return HTTP 400. The general and specialized event lists default to 50 rows, allow at most 500, and return `data` plus `pagination.limit`, `pagination.offset`, and `pagination.total`.
+
+Published event status values are `approved`, `active`, `closed`, `under_review`, `settled`, and `invalid`. Published contract `marketState` values are `open` and `closed`. Do not infer tradability from only one field: production entry requires an active event, active contract and open contract market state, plus all local time/reward/risk gates.
 
 The bot should persist at least:
 
-- Event: `ticker`, `title`, `status`, `category`, `subcategory`, `effectiveDate`, `expiryDate`, `startTime`, `sourceDetails`, and terms URL.
-- Contract: `instrumentSymbol`, `ticker`, `label`, `status`, `marketState`, `quantityMinimum`, `quantityIncrement`, `priceMinimum`, `priceIncrement`, `expiryDate`, and current prices.
+- Event: stable `id`, `ticker`, `title`, `type`, `status`, `category`, `subcategory`, `sportsMarket`, `createdAt`, `effectiveDate`, `expiryDate`, `resolvedAt`, `sourceDetails`, settlement metadata and contract membership.
+- Contract: stable `id`, exact `instrumentSymbol`, `ticker`, YES-space `label`, `status`, `marketState`, `quantityMinimum`, `quantityIncrement`, `priceMinimum`, `priceIncrement`, `quoteAssetPrecision`, `effectiveDate`, `expiryDate`, `resolvedAt`, `resolutionSide`, `strike`, terms URL and current discovery prices.
 
-Official section: [Events API](https://developer.gemini.com/rest-api/prediction-markets/events)
+Timing fields are not interchangeable:
+
+- `createdAt` is when the record was created.
+- `effectiveDate` is published event/contract metadata, but Gemini does not document it as the liquidity-reward activation time.
+- `expiryDate` is the event/contract expiry, not necessarily a sports game's scheduled start.
+- `resolvedAt` is populated after resolution.
+- Live event responses currently also expose `startTime` and `isLive`, but those fields are absent from the published `Event` OpenAPI schema. Preserve them when present, validate them, and keep a conservative fallback; do not treat an undocumented field as a reward clock.
+- The rewards feed independently exposes `ends_at`, which explicitly means the event stops scoring. It still exposes no reward `starts_at`.
+
+Contract quantity and price grids are instrument-specific. Validate each proposed order against the returned increment/minimum fields instead of assuming one-cent prices or whole-contract quantities. `source` is deprecated; prefer event-level `sourceDetails`. REST `prices` are useful discovery snapshots, not a substitute for the sequenced WebSocket book used for live quoting.
+
+The strike endpoint returns `value`, `type`, and `availableAt`. Valid types are `reference`, `above`, `spread`, `over`, `over_or_equal`, `under`, and `under_or_equal`. A `reference` strike may remain `null` until `availableAt`; Gemini says 5-minute crypto Up/Down strikes are typically captured about five minutes before expiry. Strike availability is not reward eligibility.
+
+Specialized discovery endpoints support efficient, low-rate lifecycle work:
+
+- `newly-listed` can incrementally discover events created during the last 24 hours, but it does not replace complete paginated startup discovery.
+- `upcoming` can pre-warm metadata for approved events; never quote one merely because it appears there.
+- `recently-settled` can assist reporting and settlement discovery, but authenticated positions/order state remain authoritative for account reconciliation.
+- `categories` returns category names, not the nested `subcategory` objects carried by events.
+
+Live-observed schema additions on September 15 included event `startTime`, `isLive`, participants, 24-hour volume fields, image/terms fields and sports/game identifiers, plus contract sports-side/team/combo fields. These are useful optional metadata but are not all present in the published `Event`/`Contract` schemas. Store unknown fields losslessly where practical and do not make a safety-critical assumption from an undocumented field without a fallback.
+
+Official pages: [Events API](https://developer.gemini.com/rest-api/prediction-markets/events), [List Events](https://developer.gemini.com/rest-api/prediction-markets/events/list-events), [Get Event](https://developer.gemini.com/rest-api/prediction-markets/events/get-event), [Get Strike](https://developer.gemini.com/rest-api/prediction-markets/events/get-event-strike), [Categories](https://developer.gemini.com/rest-api/prediction-markets/events/list-event-categories), [Newly Listed](https://developer.gemini.com/rest-api/prediction-markets/events/list-newly-listed-events), [Recently Settled](https://developer.gemini.com/rest-api/prediction-markets/events/list-recently-settled-events), and [Upcoming](https://developer.gemini.com/rest-api/prediction-markets/events/list-upcoming-events).
 
 ### Public volume
 
@@ -277,7 +306,11 @@ Reward-event pagination uses a maximum `limit` of 100. Program endpoints return 
 
 Observed shared-category rows additionally contain `pool_id`, `pool_event_count`, `pool_category_name`, `recurring_duration_value`, and `recurring_duration_unit`. Preserve these fields even when an older generated schema omits them. The current response supplies `ends_at` but no reward `starts_at`; do not invent a reward activation timestamp. `last_score_date` is a scoring date, not a precise timestamp proving competition is fresh. Event maker counts are not distinct pool-level account counts.
 
-Official endpoint: [List Liquidity Rewards Events](https://developer.gemini.com/rest-api/prediction-markets/rewards/list-liquidity-rewards-events)
+The authenticated daily summary is a payout/score-history endpoint, not a documented live-progress stream. Each returned event score contains stable numeric `event_id`, `normalized_score`, account-specific `snapshot_count`, event/date `total_snapshots`, and `event_reward_usd`. A daily row contains Eastern `payout_date`, `total_reward_usd`, `payout_status`, nullable `paid_at`, and its per-event breakdown. The schema has no `as_of`, `updated_at`, `scored_through_at`, planned final denominator, reward start, or remaining-snapshot field. Polling it every five minutes does not imply five-minute data freshness.
+
+The program config explicitly says sub-threshold accounts receive no row at all. Therefore an empty daily-summary response may mean unpublished, suppressed or absent data; it is not proof of zero qualifying snapshots. When a row exists, `snapshot_count / total_snapshots` is authoritative for that returned scoring date, but partial counts cannot establish the final 50% result without an authoritative remaining denominator/timestamp. The documented WebSocket API exposes none of these reward counters.
+
+Official pages: [Rewards API](https://developer.gemini.com/prediction-markets-spec/rewards), [List Liquidity Rewards Events](https://developer.gemini.com/rest-api/prediction-markets/rewards/list-liquidity-rewards-events), and [Daily Summary](https://developer.gemini.com/rest-api/prediction-markets/rewards/get-liquidity-rewards-daily-summary).
 
 ### Non-trading cash reconciliation
 
@@ -316,9 +349,11 @@ Important behavior:
 - `qualifying_maker_count` is the most recent snapshot-window count, not a guarantee of final daily competition.
 - Sub-$1 daily totals are suppressed rather than carried forward.
 - Reward seeking does not remove fill, inventory, settlement, or adverse-selection risk.
-- Event metadata supplies contract `effectiveDate`, event `startTime`, and expiry independently. A contract can be tradeable and rewarded days before its real-world resolution; entry is allowed only after `effectiveDate` and while the contract is open and present in the current reward feed.
+- Event metadata supplies contract `effectiveDate` and expiry independently; live responses also currently supply event `startTime`. A contract can be tradeable and rewarded days before its real-world resolution. Entry is allowed only after the contract's effective bound and while the event/contract are active/open and present in the current reward feed. None of those fields proves when reward scoring began.
 - Shared-pool aggregation, exact cap aggregation and the live eligible-snapshot start remain unreported. Track `pool_id` for one budget, event ticker for timing, and reconcile the next authenticated daily summary's `snapshot_count`/`total_snapshots` before claiming an exact payout estimator.
+- September 15 verification: `snapshot_count` is the authenticated account's qualifying count; `total_snapshots` is the event/date denominator. The documented WebSocket streams do not expose these reward counters. Use the [authenticated REST daily summary](https://developer.gemini.com/rest-api/prediction-markets/rewards/get-liquidity-rewards-daily-summary), matched by exact event ID and scoring date; missing rows are not zero uptime. Fetch time is not scoring-through time. Per-minute scoring alone cannot establish the last included timestamp or guarantee final eligibility. See [timing verification](docs/REWARD_TIMING_VERIFICATION_2026-09-15.md).
 - Sports markets are excluded at their published game `startTime`, even if in-play trading remains open. This local risk choice is stricter than Gemini's program-wide eligibility rule and does not apply to crypto interval contracts whose intended scoring window is live.
+- September 15 implementation correction: the local sports 20-minute/pre-expiry five-minute cutoff limits future qualifying opportunities, never Gemini's estimated denominator. Daily-summary counters are not guaranteed live and do not establish remaining window duration. Unknown activation, snapshot phase and maintenance deductions stay unproven; local per-minute observations are only a proxy. [Implementation and rollback caveat](docs/RUNTIME_HARDENING_2026-09-15.md).
 - The observed public config returns only enablement, maximum spread and minimum payout. The other table values came from the program page, not that API response.
 
 ## Other Predictions incentives and fee overlays

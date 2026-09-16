@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from math import ceil
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -61,7 +62,7 @@ def estimated_reward_window(
     *,
     exit_before_expiry_seconds: int = 300,
 ) -> tuple[datetime, datetime, str]:
-    """Conservative event window and provenance for real-time feasibility.
+    """Estimated venue denominator, never shortened by a local exit policy.
 
     The reward API currently publishes an end but no start. A documented
     reward start wins when available; otherwise the Eastern day and known
@@ -87,9 +88,27 @@ def estimated_reward_window(
     if reward_end is not None:
         ends.append(reward_end)
     if expiry is not None:
-        ends.append(expiry - timedelta(seconds=exit_before_expiry_seconds))
+        ends.append(expiry)
     start, source = max(starts, key=lambda item: item[0])
     return start, min(ends), source
+
+
+def quote_cutoff(
+    contract: RewardedContract, venue_end: datetime, *,
+    exit_before_expiry_seconds: int = 300, sports_exit_before_start_seconds: int = 1200,
+) -> datetime:
+    """Last local quote opportunity; not evidence that venue scoring ends."""
+    ends = [venue_end]
+    expiry = _parse_optional_timestamp(contract.expiry)
+    if expiry is not None:
+        ends.append(expiry - timedelta(seconds=exit_before_expiry_seconds))
+    if contract.event_category.casefold() == "sports":
+        start = _parse_optional_timestamp(contract.event_starts_at)
+        if start is None or contract.event_is_live:
+            # No safe sports admission when the start deadline is unknown.
+            return datetime.min.replace(tzinfo=timezone.utc)
+        ends.append(start - timedelta(seconds=sports_exit_before_start_seconds))
+    return min(ends)
 
 
 def locally_qualifying(
@@ -127,6 +146,7 @@ def sample_and_load_progress(
     books: dict[str, LocalBook] | None = None,
     market_data_verified_at: datetime | None = None,
     exit_before_expiry_seconds: int = 300,
+    sports_exit_before_start_seconds: int = 1200,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -141,16 +161,20 @@ def sample_and_load_progress(
             contract, now, exit_before_expiry_seconds=exit_before_expiry_seconds,
         )
         if end <= start:
-            value = UptimeProgress(start_source=start_source)
+            value = UptimeProgress(start_source=start_source, window_valid=False)
             progress[key] = value
             progress.setdefault(contract.pool.pool_id, value)
             continue
+        cutoff = quote_cutoff(
+            contract, end, exit_before_expiry_seconds=exit_before_expiry_seconds,
+            sports_exit_before_start_seconds=sports_exit_before_start_seconds,
+        )
         if start <= now < end:
             store.sample_reward_uptime(
                 event_ticker=contract.event_ticker,
                 pool_id=contract.pool.pool_id, window_start=start, window_end=end,
                 sample_at=now, eligible=contract.pool.active and contract.rules.active,
-                qualifying=locally_qualifying(
+                qualifying=now < cutoff and locally_qualifying(
                     contract, account, (books or {}).get(contract.rules.symbol),
                     now=now, market_data_verified_at=market_data_verified_at,
                 ),
@@ -158,7 +182,12 @@ def sample_and_load_progress(
         eligible, qualifying, first_observed_at = store.load_reward_uptime(
             contract.event_ticker, contract.pool.pool_id, start, end,
         )
-        remaining = max(0, int((end - max(now, start)).total_seconds() // 60))
+        total = max(1, ceil((end - start).total_seconds() / 60))
+        elapsed = min(total, max(0, int((min(now, end) - start).total_seconds() // 60) + 1))
+        # Inactive/missing observations must not forgive elapsed minutes.
+        eligible = max(eligible, elapsed)
+        venue_remaining = max(0, total - eligible)
+        remaining = min(venue_remaining, max(0, int((cutoff - max(now, start)).total_seconds() // 60)))
         observed_elapsed = None
         if first_observed_at is not None:
             first = max(first_observed_at, start)
@@ -171,6 +200,8 @@ def sample_and_load_progress(
             window_start=start,
             window_end=end,
             start_source=start_source,
+            remaining_venue_snapshots_estimate=venue_remaining,
+            quote_cutoff=cutoff,
         )
         progress[key] = value
         # Compatibility alias for callers that only know a unique pool. Shared
