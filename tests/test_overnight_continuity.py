@@ -111,7 +111,7 @@ class MidnightRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch("gemini_bot.orchestrator._utc_now", return_value=MIDNIGHT - timedelta(microseconds=1)):
             self.assertTrue(self.r._candidate_actionable(c))
         with patch("gemini_bot.orchestrator._utc_now", return_value=MIDNIGHT):
-            self.assertFalse(self.r._candidate_actionable(c))
+            self.assertTrue(self.r._candidate_actionable(c))
             self.assertFalse(self.r._recovery_stop_requested())
             self.assertEqual(self.r.gate.state, EngineState.QUOTING)
 
@@ -138,14 +138,13 @@ class MidnightRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(EntryStateChangedBeforeSend, "fresh ranking"):
                 self.r._validate_send(self.fixture.payload())
 
-    async def test_presend_rejects_uptime_only_candidate_after_override(self):
+    async def test_presend_accepts_only_uptime_proxy_after_override(self):
         with patch("gemini_bot.orchestrator._utc_now", return_value=MIDNIGHT):
             self.freshness(MIDNIGHT)
             self.r._reward_epoch = self.r._current_reward_epoch(MIDNIGHT)
             self.r.ranked = [replace(fixtures.candidate(), eligible_now=False,
                                      reasons=("50% uptime is no longer reachable in the estimated window",))]
-            with self.assertRaisesRegex(EntryStateChangedBeforeSend, "eligibility"):
-                self.r._validate_send(self.fixture.payload())
+            self.r._validate_send(self.fixture.payload())
 
     async def test_midnight_safety_clock_keeps_session_running_but_expiry_drains(self):
         async def end_iteration(_):

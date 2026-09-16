@@ -188,6 +188,7 @@ class ProductionOrchestrator:
         self._continue_after_override = False
         self._continuous_service = False
         self._reward_program_paused = False
+        self._reward_refresh_requested = False
         self._resting_observations: dict[str, RestingObservation] = {}
         self._two_sided_resting_observations: dict[str, RestingObservation] = {}
         self._retained_pairs = 0
@@ -359,7 +360,9 @@ class ProductionOrchestrator:
             market_data_verified_at=self._market_data_verified_at(), profitability=self.profitability,
             target_uptime=self.config.strategy.target_uptime, maker_rebate_fractions=self._maker_rebate_fractions,
             preferred_symbols={pool: pair[1] for pool, pair in self._sticky_markets.items()},
-            allow_uptime_override=self._override_active(now),
+            # Gemini's exact snapshot phase/denominator is unavailable. Local
+            # 50% reachability remains telemetry, not an entry admission rule.
+            allow_uptime_override=True,
         )
         self._reward_epoch = epoch
         self.log.event(logging.INFO, "reward_epoch_changed", eastern_day_start=epoch[0],
@@ -807,6 +810,7 @@ class ProductionOrchestrator:
         if self._market_status[symbol] == "active":
             return  # Metadata and terminal/flat proof, not this event, release it.
         self.account.block_entries(symbol, reason="lifecycle")
+        self._reward_refresh_requested = True
         self.journal.audit("contract_lifecycle_block", {"symbol": symbol})
         if self.account.reducer.positions.get(symbol, Decimal("0")) != 0:
             raise RuntimeError("tracked contract changed lifecycle with open inventory")
@@ -1406,6 +1410,7 @@ class ProductionOrchestrator:
                 profitability=self.profitability,
                 target_uptime=self.config.strategy.target_uptime,
                 maker_rebate_fractions=self._maker_rebate_fractions,
+                allow_uptime_override=True,
             )
             self.journal.set_runtime_state(
                 "profitability_telemetry_v1",
@@ -1754,14 +1759,14 @@ class ProductionOrchestrator:
         return bool(book is not None and book.synchronized and self._public_stream_fresh(symbol))
 
     def _candidate_actionable(self, candidate: Any) -> bool:
-        """Allow only the uptime proxy to be ignored by explicit approval.
+        """Treat the uncertain local 50% calculation as reporting only.
 
-        The candidate remains reported as reward-ineligible. This exception is
-        solely for testing maker behavior and measuring live outcomes.
+        Every concrete venue, book, price, size, economics, lifecycle and risk
+        rejection still blocks. Only the single local reachability proxy can be
+        ignored because Gemini's exact snapshot phase/denominator is unknown.
         """
         reward_or_proxy_ok = candidate.eligible_now or bool(
-            self._override_active()
-            and candidate.quote is not None
+            candidate.quote is not None
             and tuple(candidate.reasons) == (_UPTIME_PROXY_REJECTION,)
         )
         return bool(
@@ -3109,7 +3114,15 @@ class ProductionOrchestrator:
                             else 300
                         )
                     reward_check = None
-                if reward_check is None and clock >= next_reward_check_at:
+                if reward_check is None and any(
+                    not item.pool.active or not self._entry_time_valid(item.rules.symbol)
+                    for item in self.universe
+                ):
+                    self._reward_refresh_requested = True
+                if reward_check is None and (
+                    self._reward_refresh_requested or clock >= next_reward_check_at
+                ):
+                    self._reward_refresh_requested = False
                     reward_check = asyncio.create_task(
                         self._reward_pools_still_active(), name="gemini-reward-refresh"
                     )
@@ -3153,7 +3166,7 @@ class ProductionOrchestrator:
                         target_uptime=self.config.strategy.target_uptime,
                         maker_rebate_fractions=self._maker_rebate_fractions,
                         preferred_symbols={pool: pair[1] for pool, pair in self._sticky_markets.items()},
-                        allow_uptime_override=self._override_active(),
+                        allow_uptime_override=True,
                     )
                     if clock >= getattr(self, "_next_report_at", 0.0):
                         self._write_rank_report(_utc_now())

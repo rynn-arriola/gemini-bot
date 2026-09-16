@@ -478,6 +478,7 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
     async def test_flat_contract_closure_is_isolated_without_global_halt(self):
         self.runtime._handle_contract_status({"e": "contractStatus", "s": "x", "n": "Closed"})
         self.assertIn("X", self.runtime.account.blocked_entries)
+        self.assertTrue(self.runtime._reward_refresh_requested)
         self.assertTrue(self.runtime.gate.may_submit)
 
     async def test_contract_closure_with_inventory_halts(self):
@@ -624,9 +625,8 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.private.place_maker.await_count, 1)
         self.assertEqual(runtime.account.reducer.pending_order_count(), 0)
 
-    async def test_uptime_proxy_exception_is_bounded_and_rejects_other_failures(self):
+    async def test_uptime_proxy_is_reporting_only_and_other_failures_still_block(self):
         runtime = self.runtime
-        runtime._commissioning_ignore_uptime_proxy = True
         from dataclasses import replace
         uptime_only = replace(candidate(), eligible_now=False, uptime_feasible=False,
                               reasons=("50% uptime is no longer reachable in the estimated window",))
