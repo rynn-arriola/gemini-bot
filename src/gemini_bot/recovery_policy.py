@@ -1,5 +1,5 @@
 """Only known transport/read failures authorize automatic operational retry."""
-from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidMessage
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import math
@@ -11,6 +11,17 @@ class NoMarketsAvailable(RuntimeError):
 
 
 def transient_failure(exc: BaseException) -> bool:
+    if isinstance(exc, InvalidMessage):
+        # websockets wraps an early HTTP handshake EOF in InvalidMessage.
+        # Malformed complete responses remain protocol failures, not retries.
+        cause = exc.__cause__
+        seen = set()
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            if isinstance(cause, (EOFError, ConnectionError, TimeoutError)):
+                return True
+            cause = cause.__cause__
+        return False
     if isinstance(exc, ApiError):
         return exc.status in {429, 500, 502, 503, 504} or (
             exc.status is None and exc.reason in {

@@ -1,5 +1,13 @@
 # Bug fixes
 
+## September 16, 2026 — maintenance recovery and missing terminal execution evidence
+
+- Treat typed transport EOF inside the WebSocket handshake wrapper as retryable, not malformed complete protocol/authentication responses.
+- Restore transports within the existing emergency-drain budget; release only definitely-unsent cancellation failures, never ambiguous mutations.
+- Join authenticated trade IDs/fees to exact terminal order identities for atomic, idempotent missed-fill recovery. Preserve original inventory deadlines and loss history. Explicit external reduction repair never adopts a replacement baseline.
+- Bind read-only supervisor preparation results to the current attempt token instead of relying on the observed child ExitCode.
+- Added no-buyer/fractional-fill regression coverage. A known no-depth exit wait can remain symbol-scoped; unexplained cash/accounting stays global and blocked. These repairs are not deployed; the current cash discrepancy remains unresolved.
+
 ## September 16, 2026 — second maker leg admission and telemetry
 
 Confirmed offline: YES could cancel during NO's transport wait, then NO still sent and was canceled as `pair_incomplete`. Final admission now checks the exact first order/client identity, acknowledged intent, unchanged price/full unfilled quantity and public/private generations. Invalidated second intents remain definitely unsent and terminal; existing symbol cleanup continues. Attempted-send failures retain unknown state and are not replayed. The guard is removed after send/failure without leaking into later pairs.

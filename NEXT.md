@@ -1,5 +1,10 @@
 # Next work
 
+- **Current priority, September 16 07:23 ET:** bot stopped after maintenance failure. Source recovery fixes pass 479 production/28 script tests, not deployed. Resolve the sub-cent cash mismatch with exact authenticated evidence; never round it away or reset the baseline. Fresh final read had one position and one active order. Temporary force-exit helper stopped; no active monitoring or successful exit is claimed. See STATUS.md and the maintenance report.
+- **Owner requested six-WebSocket recommendation:** proposed five public data shards plus one private account/execution connection. See `docs/WEBSOCKET_SHARDING_DESIGN_2026-09-16.md`. Implementation remains pending design review; preserve single mutation owner, shared rate authority and global account-safety gates.
+
+## Historical deployment follow-ups (superseded operational state)
+
 - **Pair-send repair deployed at 00:21:28 ET September 16:** source `87fab92`, runtime `data/production-20260916-churn-v11`, fresh continuous v7 authority with no uptime override. Exact first-order/generation guard plus diagnostics/telemetry pass 454 production/28 script tests. Observe natural prevented-orphan events and long-run churn; do not induce faults/fills. [Release](docs/CHURN_RELEASE_2026-09-16.md).
 - **Churn observation:** adverse cancellation reasons now distinguish missing/stale/unsynchronized/one-sided/own-adjusted-empty books and invalid target prices. Observe these after deployment; additional bounded decision price/sequence context may be useful if ambiguity persists. Public/private depth timing mismatch remains unproven; never suppress genuine safety cancellation based on that theory.
 

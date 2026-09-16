@@ -35,7 +35,7 @@ def _write_live_runner_result(
     })
 
 
-async def _prepare(config_path: Path, directory: Path) -> None:
+async def _prepare(config_path: Path, directory: Path, *, result_token: str | None = None) -> None:
     config = load_preflight_config(config_path)
     runtime = ProductionOrchestrator(config, directory, read_only=True)
     try:
@@ -46,6 +46,12 @@ async def _prepare(config_path: Path, directory: Path) -> None:
         )
     finally:
         await runtime.close()
+    if result_token is not None:
+        atomic_write_json(directory / 'prepare-result.json', {
+            'token': result_token, 'outcome': 'reconciled_read_only',
+            'open_positions': len(state.account.positions),
+            'pending_orders': len(state.account.active_orders),
+        })
 
 
 async def _run_live(
@@ -114,6 +120,20 @@ async def _reconcile_manual_flat(config_path: Path, directory: Path) -> None:
         await runtime.close()
 
 
+async def _reconcile_executions(config_path: Path, directory: Path) -> None:
+    runtime = ProductionOrchestrator(load_preflight_config(config_path),directory,read_only=True)
+    try:
+        try:
+            await runtime.prepare()
+        except RuntimeError as exc:
+            if str(exc) != 'cash reconciliation requires matched account state':
+                raise
+        count = await runtime.reconcile_observed_external_reductions()
+        print(f'Exact authenticated trade history reconciled, including actual fees; imported executions={count}. No orders submitted; activation remains paused.')
+    finally:
+        await runtime.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gemini Predictions live bot operator utility")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -124,6 +144,7 @@ def main() -> int:
     prepare = sub.add_parser("prepare-live", help="read-only reconcile/rank, then disconnect")
     prepare.add_argument("--env", type=Path, default=Path(".env"))
     prepare.add_argument("--directory", type=Path, default=Path("data/production"))
+    prepare.add_argument('--result-token')
     manual_flat = sub.add_parser(
         "reconcile-manual-flat",
         help="adopt a verified manual flatten without submitting orders",
@@ -135,6 +156,10 @@ def main() -> int:
         choices=("I_CONFIRM_MANUAL_FLAT",),
         help="explicit operator acknowledgement required",
     )
+    executions = sub.add_parser('reconcile-executions',help='explicit exact execution-history repair; no trading')
+    executions.add_argument('--env',type=Path,default=Path('.env'))
+    executions.add_argument('--directory',type=Path,default=Path('data/production'))
+    executions.add_argument('--acknowledgement',required=True,choices=('I_CONFIRM_EXECUTION_RECOVERY',))
     live = sub.add_parser("run-live", help="reconcile then activate with an owner-approved permit")
     live.add_argument("--env", type=Path, default=Path(".env"))
     live.add_argument("--directory", type=Path, default=Path("data/production"))
@@ -172,7 +197,7 @@ def main() -> int:
         return 0
     if args.command == "prepare-live":
         try:
-            asyncio.run(_prepare(args.env, args.directory))
+            asyncio.run(_prepare(args.env, args.directory, result_token=args.result_token))
         except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
             parser.error(str(exc))
         return 0
@@ -180,6 +205,12 @@ def main() -> int:
         try:
             asyncio.run(_reconcile_manual_flat(args.env, args.directory))
         except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
+            parser.error(str(exc))
+        return 0
+    if args.command == 'reconcile-executions':
+        try:
+            asyncio.run(_reconcile_executions(args.env,args.directory))
+        except (ConfigurationError,RuntimeError,ValueError,TimeoutError) as exc:
             parser.error(str(exc))
         return 0
     if args.command == "run-live":

@@ -15,6 +15,10 @@ from .execution import IntentLedger, IntentState
 from .storage import AuthenticatedCashAdjustment, SQLiteJournal
 
 
+class MissingExecutionEvidence(RuntimeError):
+    """A terminal cumulative update exposed a fill absent from the event journal."""
+
+
 def _event_time(frame: dict[str, Any]) -> datetime:
     raw = int(frame.get("T", frame.get("E", 0)))
     if raw <= 0:
@@ -67,6 +71,7 @@ class AccountRuntime:
         self.blocked_entries: set[str] = set(self.fill_blocked_entries)
         self.changed = asyncio.Event()
         self.fill_version = 0
+        self.missing_execution_orders: set[str] = set()
         self.event_sink: Callable[[str, dict[str, object]], None] | None = None
         saved_positions = journal.get_runtime_state("expected_positions")
         self.expected_positions = None if saved_positions is None else {
@@ -109,6 +114,7 @@ class AccountRuntime:
             and self.expected_confirmed_usd == self.confirmed_usd
             and self.expected_positions == self.reducer.positions
             and not self.unowned_order_seen
+            and not self.missing_execution_orders
         )
 
     @property
@@ -248,6 +254,27 @@ class AccountRuntime:
         if event_type != "orderUpdate":
             return
 
+        recovered = self.journal.get_runtime_state('external_reduction_terminal:' + str(frame.get('i', '')))
+        if recovered is not None:
+            # Operator-reconciled external reducer: accept only duplicate
+            # execution IDs or an exact terminal cumulative acknowledgement.
+            proof = json.loads(recovered)
+            for field, value in (('c', proof['client']), ('s', proof['symbol']),
+                                 ('O', proof['outcome']), ('S', 'SELL')):
+                if field in frame and ((str(frame[field]) != str(value)) if field == 'c'
+                                       else (str(frame[field]).upper() != str(value).upper())):
+                    raise RuntimeError('late recovered-order identity changed')
+            if frame.get('X') not in {'NEW','OPEN','PARTIALLY_FILLED','MODIFIED','FILLED','CANCELED'}:
+                raise RuntimeError('late recovered-order status is invalid')
+            executed = Decimal(str(frame.get('Z', '0')))
+            if not executed.is_finite() or not 0 <= executed <= Decimal(proof['quantity']):
+                raise RuntimeError('late recovered-order execution exceeds terminal proof')
+            if str(frame.get('t','')) not in proof['trades'] and not (
+                frame.get('X') in {'CANCELED','FILLED'} and executed == Decimal(proof['quantity'])
+            ):
+                raise RuntimeError('late external reduction lacks exact execution identity')
+            return
+
         previous_order = deepcopy(self.reducer.orders.get(str(frame.get("i", ""))))
         transition = self.reducer.apply_order_update(frame)
         order = self.reducer.orders[transition.order_id]
@@ -305,7 +332,8 @@ class AccountRuntime:
         """One durable unit: fill identity, cash, position and safety deadline."""
         trade_id = str(frame.get("t") or "")
         if not trade_id:
-            raise RuntimeError("fill without durable trade identity requires reconciliation")
+            self.missing_execution_orders.add(order.order_id)
+            raise MissingExecutionEvidence("fill without durable trade identity requires reconciliation")
         price = Decimal(str(frame.get("L", frame.get("p", "0"))))
         fee = Decimal(str(frame.get("n", "0")))
         if not price.is_finite() or not Decimal("0") < price < Decimal("1") or not fee.is_finite():

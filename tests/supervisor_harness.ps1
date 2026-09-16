@@ -1,4 +1,4 @@
-param([string]$RuntimePath, [string]$SupervisorScript, [int]$Version, [string]$Results)
+param([string]$RuntimePath, [string]$SupervisorScript, [int]$Version, [string]$Results, [string]$Preparation = 'missing')
 # Offline only: intercept every child-process launch and sleep. No bot runs.
 $ErrorActionPreference = 'Stop'
 $global:GeminiTestQueue = [System.Collections.Generic.Queue[string]]::new()
@@ -28,6 +28,10 @@ function Start-Process {
             if ($Code -eq 'cross') { $Session = 'wrong-session'; $Code = '5'; $Outcome = 'recoverable_flat' }
             @{session_id=$Session; exit_code=[int]$Code; outcome=$Outcome; retry_not_before=$RetryBefore} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $global:GeminiTestRuntime 'runner-result.json')
         }
+    } elseif ($ArgumentList -match '"prepare-live"' -and $Preparation -ne 'missing') {
+        $Token = [regex]::Match($ArgumentList, '"--result-token" "([^"]+)"').Groups[1].Value
+        if ($Preparation -eq 'wrong') { $Token = 'stale-attempt' }
+        @{token=$Token; outcome='reconciled_read_only'; open_positions=0; pending_orders=28} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $global:GeminiTestRuntime 'supervisor-recovery/prepare-result.json')
     }
     @{ launches=$global:GeminiTestLaunches; sleeps=$global:GeminiTestSleeps } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $global:GeminiTestRuntime 'harness-counts.json')
     $Fake = [pscustomobject]@{ Id=999999; ExitCode=0 }

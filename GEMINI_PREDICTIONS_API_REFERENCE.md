@@ -6,6 +6,10 @@ Working reference for the Gemini liquidity-rewards bot. This document summarizes
 
 Last verified: **2026-09-15 (America/New_York)**
 
+September 16 recovery recheck: [WebSocket introduction](https://developer.gemini.com/prediction-markets/websocket/introduction) still documents `cancelOnDisconnect=true`. The live 02:02 ET service restart nevertheless left session orders active; treat this as defense in depth, never terminal proof. Its precise venue-side failure cause is unproven. Reconnect and independently reconcile/cancel survivors.
+
+[List Past Trades](https://developer.gemini.com/trading/rest-api/orders/list-past-trades), `POST /v1/mytrades`, was verified read-only to return Predictions executions for exact `GEMI-...` symbols on September 16. It supplies actual `tid`, `order_id`, `client_order_id`, `amount`, `price`, `type`, `fee_amount`, `fee_currency` and `timestampms`. Outcome is joined from authenticated Predictions order history. Recovery uses a bounded symbol/time query, rejects a full 500-row page and requires exact terminal executed-quantity coverage. This supersedes assuming that order-history's missing fee field makes actual fill fees unavailable. Legacy conservative manual-close imports remain labeled historical upper bounds; new recovery uses actual trades.
+
 > Gemini changes markets, reward pools, program rules, schemas, and limits. Treat the official specifications as authoritative and re-check them before deploying trading changes.
 
 ## Canonical sources

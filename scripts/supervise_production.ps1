@@ -196,9 +196,12 @@ while ($true) {
 $RecoveryDirectory = Join-Path $RuntimePath "supervisor-recovery"
 Write-SupervisorStatus "RECONCILING" "runner stopped without reusable flat proof; read-only check only" $LastRunnerExitCode
 New-Item -ItemType Directory -Path $RecoveryDirectory -Force | Out-Null
+$RecoveryToken = [Guid]::NewGuid().ToString()
+$RecoveryResultPath = Join-Path $RecoveryDirectory 'prepare-result.json'
+Remove-Item -LiteralPath $RecoveryResultPath -Force -ErrorAction SilentlyContinue
 $RecoveryArguments = @(
     "-m", "gemini_bot", "prepare-live", "--env", $EnvironmentPath,
-    "--directory", $RecoveryDirectory
+    "--directory", $RecoveryDirectory, '--result-token', $RecoveryToken
 )
 $Recovery = Start-Process -FilePath $Python -ArgumentList (Join-QuotedArguments $RecoveryArguments) `
     -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
@@ -208,7 +211,12 @@ while (-not $Recovery.WaitForExit(10000)) {
     Write-SupervisorStatus "RECONCILING" "read-only account check; trading remains blocked" $LastRunnerExitCode
 }
 $Recovery.Refresh()
-$Reason = if ($Recovery.ExitCode -eq 0) {
+$RecoveryPassed = $false
+try {
+    $RecoveryResult = Get-Content -LiteralPath $RecoveryResultPath -Raw | ConvertFrom-Json
+    $RecoveryPassed = $RecoveryResult.token -eq $RecoveryToken -and $RecoveryResult.outcome -eq 'reconciled_read_only'
+} catch { $RecoveryPassed = $false }
+$Reason = if ($RecoveryPassed) {
     "automatic restart blocked or exhausted; read-only reconciliation passed; fresh approval required"
 } else {
     "automatic restart blocked; read-only reconciliation failed; manual account review required"

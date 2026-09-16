@@ -408,13 +408,13 @@ class StartupWaitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeSupervisorTests(unittest.TestCase):
-    def run_harness(self, results, version=7):
+    def run_harness(self, results, version=7, preparation='missing'):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             result = subprocess.run(['powershell', '-NoProfile', '-File', str(root / 'tests/supervisor_harness.ps1'),
                 '-RuntimePath', directory, '-SupervisorScript', str(root / 'scripts/supervise_production.ps1'),
-                '-Version', str(version), '-Results', results], capture_output=True, text=True, timeout=20)
+                '-Version', str(version), '-Results', results, '-Preparation', preparation], capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((path / 'harness-counts.json').exists(), result.stdout + result.stderr)
             counts = json.loads((path / 'harness-counts.json').read_text(encoding='utf-8-sig'))
@@ -455,6 +455,13 @@ class NativeSupervisorTests(unittest.TestCase):
         counts, events = self.run_harness('0', version=6)
         self.assertEqual(counts['launches'], 1)
         self.assertNotIn('ATTENTION_REQUIRED', [r['state'] for r in events])
+
+    def test_preparation_result_is_attempt_bound_and_does_not_authorize_restart(self):
+        for mode in ('passed','wrong','missing'):
+            counts, events = self.run_harness('3', preparation=mode)
+            self.assertEqual(counts['launches'],1)
+            attention = next(r for r in events if r['state']=='ATTENTION_REQUIRED')
+            self.assertEqual('reconciliation passed' in attention['reason'],mode=='passed')
 
 
 if __name__ == '__main__':

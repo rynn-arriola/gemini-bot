@@ -14,7 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 from websockets.exceptions import ConnectionClosed
 
-from .account_runtime import AccountRuntime
+from .account_runtime import AccountRuntime, MissingExecutionEvidence
 from .activation import (
     consume_activation_permit,
     finish_supervised_activation,
@@ -72,6 +72,7 @@ from .uptime import sample_and_load_progress, eastern_day_window, locally_qualif
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
+from .trade_recovery import import_terminal_trades, timestamp as history_timestamp
 
 
 _UPTIME_PROXY_REJECTION = "50% uptime is no longer reachable in the estimated window"
@@ -430,15 +431,15 @@ class ProductionOrchestrator:
                 )
         await asyncio.shield(self._stream_restarts[component])
 
-    async def _reconnect_stream(self, component: str) -> None:
+    async def _reconnect_stream(self, component: str, *, for_drain: bool = False) -> None:
         transport = self.public if component == "public" else self.private
         attempt = 0
         while True:
             attempt += 1
             self._stream_attempts[component] += 1
-            if not self._continuous_service and self._stream_attempts[component] > 3:
+            if (for_drain and attempt > 3) or (not for_drain and not self._continuous_service and self._stream_attempts[component] > 3):
                 raise RuntimeError("stream reconnect attempt budget exhausted")
-            if self._recovery_stop_requested():
+            if self._closed or (not for_drain and self._recovery_stop_requested()):
                 raise RuntimeError("stream recovery interrupted by stop or expiry")
             try:
                 async with asyncio.timeout(15):
@@ -463,13 +464,13 @@ class ProductionOrchestrator:
                     self.governor.apply_server_cooldown(component + "_ws", delay)
                 self.log.exception("stream_reconnect_retry", ErrorClass.TRANSPORT, exc,
                                    component=component, attempt=attempt)
-                if not self._continuous_service and attempt == 3:
+                if (for_drain or not self._continuous_service) and attempt == 3:
                     raise
                 # Bounded attempts, paced indefinitely only for transport loss.
                 # Wake for STOP at most one second later; server cooldowns are
                 # still enforced by the shared transport governor on connect.
                 for _ in range(min(60, 2 ** min(attempt - 1, 6))):
-                    if self._recovery_stop_requested():
+                    if self._closed or (not for_drain and self._recovery_stop_requested()):
                         raise RuntimeError("stream recovery interrupted by stop or expiry")
                     await asyncio.sleep(1)
 
@@ -493,6 +494,7 @@ class ProductionOrchestrator:
         # Private disconnect can hide a fill. Check every pre-disconnect working
         # order against exact terminal history; cash equality alone is not proof.
         histories: dict[str, list[dict[str, Any]]] = {}
+        proofs = []
         for order_id in tuple(self._private_recovery_orders):
             order = self.account.reducer.orders.get(order_id)
             if order is None:
@@ -504,7 +506,11 @@ class ProductionOrchestrator:
                 raise RecoveryPending("terminal cancellation history unavailable")
             if len(matches) != 1:
                 raise RuntimeError("recovery history contains duplicate order identity")
-            status = terminal_history_status(order, matches[0])
+            proofs.append((order,matches[0]))
+        await self._recover_terminal_executions([row for _,row in proofs])
+        for order,row in proofs:
+            order_id = order.order_id
+            status = terminal_history_status(order,row)
             order.status, order.remaining_quantity = status, Decimal("0")
             intent = self.ledger.get(order.client_order_id)
             if intent is not None and intent.state in {IntentState.SENT_UNKNOWN, IntentState.ACKNOWLEDGED}:
@@ -770,7 +776,18 @@ class ProductionOrchestrator:
                     await self._recover_stream("private", ConnectionError("obsolete stream"), generation=generation)
                     frames, generation = self.private.messages(), self._stream_generation["private"]
                     continue
-                self.account.apply(frame)
+                try:
+                    self.account.apply(frame)
+                except MissingExecutionEvidence as exc:
+                    if self.gate.state is not EngineState.QUOTING and not (
+                        self.gate.state is EngineState.DRAINING and self._stream_holds
+                    ):
+                        raise
+                    self._private_recovery_orders.update(self.account.missing_execution_orders)
+                    if not self._stream_holds:
+                        await self._recover_stream('private', exc, generation=generation)
+                        frames, generation = self.private.messages(), self._stream_generation['private']
+                    continue
                 self._mark_live_risk()
         except asyncio.CancelledError:
             raise
@@ -939,6 +956,33 @@ class ProductionOrchestrator:
                 raise RuntimeError("an earlier mutation is not terminal")
             self.journal.resolve_intent_terminal(client_id, str(row.get("orderId", "")) or None)
 
+    async def _recover_terminal_executions(self, rows: list[dict[str, Any]]) -> int:
+        missing = []
+        for row in rows:
+            if not self.journal.knows_client_order_id(str(row.get('clientOrderId',''))):
+                continue
+            oid = str(row.get('orderId',''))
+            recorded = sum((Decimal(r[0]) for r in self.journal.connection.execute(
+                'SELECT quantity FROM execution_fill WHERE order_id=?',(oid,))), Decimal(0))
+            executed = Decimal(str(row.get('filledQuantity','0')))
+            if not executed.is_finite() or executed < recorded:
+                raise RuntimeError('historical execution evidence regressed')
+            if executed > recorded or self.journal.get_runtime_state('maker_history_terminal:' + oid):
+                if not all(row.get(k) is not None for k in ('createdAt','updatedAt','price','quantity','side','outcome')):
+                    raise RuntimeError('terminal execution evidence is incomplete')
+                missing.append(row)
+        if not missing:
+            return 0
+        by_symbol: dict[str, int] = {}
+        for row in missing:
+            symbol = str(row['symbol']).upper()
+            since = int(history_timestamp(row['createdAt']).timestamp()*1000)
+            by_symbol[symbol] = min(since,by_symbol.get(symbol,since))
+        trades = []
+        for symbol,since in sorted(by_symbol.items()):
+            trades.extend(await self.rest.recent_account_trades(symbol=symbol,since_ms=since))
+        return import_terminal_trades(self.account,missing,trades,now=_utc_now())
+
     async def _targeted_prior_intent_history(
         self, active_orders: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
@@ -963,6 +1007,47 @@ class ProductionOrchestrator:
                     )
             history.extend(rows)
         return history
+
+    async def reconcile_observed_external_reductions(self) -> int:
+        """Explicit operator repair of exact trade evidence, without a baseline reset."""
+        if not self.read_only or not self.account.readiness.complete or not self.account.snapshots_fresh:
+            raise RuntimeError('operator execution repair requires fresh read-only account streams')
+        before = build_account_snapshot(await self.rest.positions(),await self.rest.active_orders())
+        if before.active_orders or self.journal.unresolved_ids():
+            raise RuntimeError('operator execution repair requires no active or unknown orders')
+        assert_position_consistency(before,self.account.reducer.positions)
+        boundaries = {str(s): history_timestamp(t) for s,t in self.journal.connection.execute(
+            'SELECT symbol,MIN(opened_at) FROM position_deadline GROUP BY symbol')}
+        if not (set(before.signed_positions) | set(self.account.expected_positions or {})) <= boundaries.keys():
+            raise RuntimeError('inventory without owned fill history cannot be repaired')
+        if len(boundaries) > self.config.risk.max_tracked_markets:
+            raise RuntimeError('execution recovery symbol bound exceeded')
+        trades, history = [], []
+        for symbol,begin in sorted(boundaries.items()):
+            rows = await self.rest.recent_account_trades(symbol=symbol,since_ms=int(begin.timestamp()*1000)-1000)
+            orders = await self.rest.recent_order_history(symbol=symbol)
+            ids = {str(t.get('order_id','')) for t in rows}
+            matched = [row for row in orders if str(row.get('orderId','')) in ids]
+            if len(matched) != len(ids):
+                raise RuntimeError('exact terminal order evidence for operator repair is incomplete')
+            trades.extend(rows)
+            history.extend(matched)
+        after = build_account_snapshot(await self.rest.positions(),await self.rest.active_orders())
+        assert_stable_account_bracket(before,after)
+        assert_position_consistency(after,self.account.reducer.positions)
+        count = import_terminal_trades(self.account,history,trades,now=_utc_now(),allow_external_reductions=True)
+        if not self.account.equity_classification_complete:
+            await self._reconcile_authenticated_nontrading_cash()
+        if not self.account.equity_classification_complete or not self.account.snapshots_fresh:
+            raise RuntimeError('execution history did not prove current cash and positions')
+        self.journal.replace_account_snapshot([r.as_storage() for r in after.positions],
+            [r.as_storage() for r in after.active_orders],observed_at=_utc_now())
+        for symbol in tuple(self.account.fill_blocked_entries):
+            if not self.account.reducer.positions.get(symbol):
+                await self._complete_flat_fill(symbol)
+        await self._risk_mark()
+        self._write_status('reconciled_paused',False,'authenticated execution history reconciled; no activation')
+        return count
 
     async def prepare(self, *, timeout: float = 30, manual_flat_repair: bool = False) -> PreparedState:
         """Read-only startup. This method contains no order mutation call."""
@@ -1077,6 +1162,26 @@ class ProductionOrchestrator:
             assert_stable_account_bracket(before, after)
             assert_position_consistency(after, self.account.reducer.positions)
             repair_flat = manual_flat_repair and not after.positions and not after.active_orders
+            if not self.account.equity_classification_complete and not repair_flat:
+                targets: dict[str, set[str]] = {}
+                for oid, symbol in self.journal.connection.execute('SELECT order_id,symbol FROM account_order'):
+                    targets.setdefault(str(symbol), set()).add(str(oid))
+                if len(targets) > self.config.risk.max_tracked_markets:
+                    raise RuntimeError('execution recovery symbol bound exceeded')
+                recovered_history = {str(row.get('orderId', '')): row for row in history}
+                for symbol in sorted(targets):
+                    rows = await self.rest.recent_order_history(symbol=symbol)
+                    found = {str(row.get('orderId', '')) for row in rows}
+                    active_ids = {order.order_id for order in after.active_orders}
+                    if len(rows) >= 1000 and not targets[symbol] <= found | active_ids:
+                        raise RuntimeError('execution recovery history is truncated')
+                    recovered_history.update({str(row.get('orderId', '')): row for row in rows
+                                              if str(row.get('orderId', '')) in targets[symbol]})
+                await self._recover_terminal_executions(list(recovered_history.values()))
+                refreshed = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
+                assert_stable_account_bracket(after, refreshed)
+                assert_position_consistency(refreshed, self.account.reducer.positions)
+                after = refreshed
             if manual_flat_repair and not repair_flat:
                 raise RuntimeError("manual-flat preparation requires zero positions and orders")
             if not self.account.equity_classification_complete and not repair_flat:
@@ -2823,7 +2928,49 @@ class ProductionOrchestrator:
     async def drain(self) -> None:
         self.gate.state = EngineState.DRAINING
         async with asyncio.timeout(_DRAIN_SECONDS):
+            if self._stream_holds:
+                await self._restore_drain_streams()
             await self._drain_bounded()
+
+    async def _restore_drain_streams(self) -> None:
+        """Restore transports only for quarantine/proof/reduction, never entry."""
+        tasks = list(self._tasks) + list(self._stream_restarts.values())
+        if self._stream_recovery_task is not None:
+            tasks.append(self._stream_recovery_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._stream_restarts.clear()
+        self._stream_recovery_task = None
+        self._stream_ready.clear()
+        for component in ('public', 'private'):
+            self._stream_generation[component] += 1
+        self._private_recovery_orders.update(o.order_id for o in self.account.reducer.orders.values() if o.working)
+        self.account.last_balance_at = self.account.last_position_at = None
+        self.account.balances_seen = self.account.positions_seen = False
+        self.account.subscription_acknowledged = False
+        self.account.reducer.position_update_ns = 0
+        # Failed attempted sends remain latched. Only a proven pre-send failure
+        # can release its cancel owner after connection replacement.
+        for oid, task in tuple(self._cancel_tasks.items()):
+            if task.done() and not task.cancelled() and isinstance(task.exception(), TransportChangedBeforeSend):
+                self._cancel_tasks.pop(oid)
+        await asyncio.gather(self._reconnect_stream('public', for_drain=True),
+                             self._reconnect_stream('private', for_drain=True))
+        self._tasks = [asyncio.create_task(self._public_pump()), asyncio.create_task(self._private_pump())]
+        if hasattr(self.public, 'prove_liveness'):
+            self._tasks.append(asyncio.create_task(self._public_liveness_pump()))
+        await self._wait_ready(15)
+        while True:
+            try:
+                await self._recovery_account_proof()
+                break
+            except RecoveryPending:
+                await asyncio.sleep(1)
+        self._stream_holds.clear()
+        self._private_recovery_orders.clear()
+        self.log.event(logging.INFO, 'drain_transports_reconciled', trading_resumed=False)
 
     async def _drain_bounded(self) -> None:
         # Start known-entry cancellation immediately, even if another market's

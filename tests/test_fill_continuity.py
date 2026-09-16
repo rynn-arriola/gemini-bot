@@ -70,6 +70,29 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
         book.apply_snapshot([(D(".48"), D(depth))], [(D(".52"), D(depth))], 1, 1, NOW)
         self.r.public.books[symbol] = book
 
+    async def test_no_no_side_bids_waits_then_exits_without_restarting_or_extending_deadline(self):
+        self.inventory(outcome=Outcome.NO, quantity=D('1.01'))
+        r = self.r
+        deadline = r.journal.get_deadline('X','NO')
+        self.book()
+        r.public.books['X'].asks.clear()
+        await r._run_exit_worker('X')
+        self.assertEqual(r._exit_waits['X'].reason,'exit_depth_unavailable')
+        self.assertEqual(r.gate.state,EngineState.QUOTING)
+        self.assertEqual(r.journal.get_deadline('X','NO'),deadline)
+        r.private.exit_position.assert_not_awaited()
+        self.book()
+        async def exit_now(leg, **kwargs):
+            self.assertEqual(leg.quantity,D('1.01'))
+            self.assertEqual(leg.outcome,Outcome.NO)
+            return self.order(leg)
+        r.private.exit_position.side_effect=exit_now
+        await r._run_exit_worker('X')
+        self.assertFalse(r.account.reducer.positions)
+        self.assertNotIn('X',r.account.blocked_entries)
+        self.assertIsNone(r.journal.get_deadline('X','NO'))
+        self.assertEqual(r.gate.state,EngineState.QUOTING)
+
     async def test_net_flat_two_fills_cleanup_both_deadlines_and_reentry_block(self):
         self.inventory()
         self.inventory(outcome=Outcome.NO)

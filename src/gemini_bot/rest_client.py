@@ -35,6 +35,7 @@ PRIVATE_READS = frozenset({
     "/v1/prediction-markets/maker-rebate/payouts",
     "/v1/prediction-markets/maker-rebate/summary/total",
     "/v2/transfers",
+    "/v1/mytrades",
 })
 
 
@@ -371,6 +372,17 @@ class GeminiReadRestClient:
 
     async def positions(self, *, ceiling: int = 1000) -> list[dict[str, Any]]:
         return await self._private_pages("/v1/prediction-markets/positions", "positions", ceiling)
+
+    async def recent_account_trades(self, *, symbol: str, since_ms: int) -> list[dict[str, Any]]:
+        """Bounded diagnostic trade history; availability for Predictions is venue-dependent."""
+        if not symbol or symbol != symbol.upper() or since_ms <= 0:
+            raise ValueError('trade history requires exact symbol and positive time boundary')
+        rows = await self._private_list_read('/v1/mytrades', {
+            'symbol': symbol, 'timestamp': since_ms, 'limit_trades': 500,
+        }, lane='private_rest')
+        if len(rows) >= 500 or any(not isinstance(row, dict) for row in rows):
+            raise ApiError(200, 'invalid_or_truncated_trade_history')
+        return rows
 
     async def order_history(self, *, ceiling: int = 1000) -> list[dict[str, Any]]:
         return await self._private_pages("/v1/prediction-markets/orders/history", "orders", ceiling)
