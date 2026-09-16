@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — priced BUY reservation and eighth-market churn
+
+Doubling entry size to 20 exposed inconsistent accounting: whole-pair admission used price times quantity, but existing live orders and final sends reserved a blanket $1 per contract. Seven pairs consumed 280 under the latter calculation. An eighth first leg could pass pair admission, then the second leg failed at 320 and the sibling was canceled repeatedly. The owner explicitly rejected reducing size or this blanket order reserve.
+
+Working BUYs now reserve remaining quantity times limit price and new BUY legs use submitted quantity times limit price, matching complete-pair admission. Existing held-position reserves, no-netting against pending SELLs, available funds, $300 gross/$90 market, 30-order/15-pair caps, exact fill/exit safety and $30 six-hour HARD remain unchanged. Regression tests reproduce the old eighth-pair cancellation and artificial full-width block, then verify 30 size-20 orders within cost limits, exact/over-cap boundaries, funds, partial remaining quantity, SELL/held inventory and genuine second-leg state changes. This reduces avoidable unquoted intervals and preserves existing pairs; it does not promise 30 eligible orders or reward qualification.
+
 ## September 16, 2026 — settled held contract no longer crashes every market
 
 At 17:00 ET Gemini changed the held contract's lifecycle while exact inventory still existed. The public status handler raised a global runtime error, canceled all unrelated resting orders, and emergency drain then failed because that contract had no executable exit depth. Gemini subsequently settled the position, but the durable expected position/cash basis remained stale, so the prior startup accounting could not safely resume.

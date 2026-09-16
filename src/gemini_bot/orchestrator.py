@@ -1852,9 +1852,10 @@ class ProductionOrchestrator:
                     )
             exposure = self._websocket_exposure()
             quantity = Decimal(str(params["quantity"]))
+            reservation = Decimal(str(params["price"])) * quantity
             if (exposure.pending_orders + 1 > self._dynamic_pending_cap
-                    or exposure.gross_reservation_usd + quantity > self.config.risk.max_gross_reservation_usd
-                    or exposure.market_exposure_usd.get(symbol, Decimal("0")) + quantity > self.config.risk.max_market_exposure_usd):
+                    or exposure.gross_reservation_usd + reservation > self.config.risk.max_gross_reservation_usd
+                    or exposure.market_exposure_usd.get(symbol, Decimal("0")) + reservation > self.config.risk.max_market_exposure_usd):
                 raise EntryStateChangedBeforeSend(
                     "entry exposure changed while waiting to send"
                 )
@@ -2293,7 +2294,12 @@ class ProductionOrchestrator:
         return retained
 
     def _websocket_exposure(self) -> ExposureState:
-        """Conservative live exposure from authenticated WebSocket truth."""
+        """Reserve BUY cost, retaining the existing held-inventory allowance.
+
+        Whole-pair admission and the final send guard use the same price-times-
+        quantity reservation. Never net inventory against an unfilled SELL or
+        assume an exit/settlement will free capital before authenticated proof.
+        """
         gross = sum((abs(value) for value in self.account.reducer.positions.values()), Decimal("0"))
         market = {symbol: abs(value) for symbol, value in self.account.reducer.positions.items()}
         outcomes: dict[str, set[Outcome]] = {}
@@ -2303,7 +2309,7 @@ class ProductionOrchestrator:
                 continue
             pending += 1
             if order.side.value == "BUY":
-                reservation = order.remaining_quantity * Decimal("1")
+                reservation = order.remaining_quantity * order.price
                 gross += reservation
                 market[order.symbol] = market.get(order.symbol, Decimal("0")) + reservation
                 outcomes.setdefault(order.symbol, set()).add(order.outcome)

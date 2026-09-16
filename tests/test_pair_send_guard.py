@@ -123,6 +123,113 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.r._maker_pair_guards)
         self.r._cancel_symbol_entries.assert_not_awaited()
 
+    def add_working(self, count, *, price=D('.46'), quantity=D(20)):
+        for index in range(count):
+            symbol = f'OTHER{index // 2}'
+            outcome = Outcome.YES if index % 2 == 0 else Outcome.NO
+            leg = QuoteLeg(symbol, outcome, Side.BUY, price, quantity)
+            intent = self.r.ledger.prepare(leg, OrderPurpose.ENTRY)
+            self.r.ledger.mark_sent(intent.client_order_id)
+            self.r.account.apply({'e': 'orderUpdate', 'i': f'other-{index}',
+                'c': intent.client_order_id, 's': symbol, 'S': 'BUY',
+                'O': outcome.value, 'q': str(quantity), 'z': str(quantity),
+                'p': str(price), 'X': 'NEW'})
+
+    async def test_thirtieth_twenty_contract_order_fits_priced_reservation(self):
+        self.add_working(28)
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertEqual(len(self.sent), 2)
+        exposure = self.r._websocket_exposure()
+        self.assertEqual(exposure.pending_orders, 30)
+        self.assertEqual(exposure.two_sided_quotes, 15)
+        self.assertEqual(exposure.gross_reservation_usd, D('276'))
+        self.r._cancel_symbol_entries.assert_not_awaited()
+        self.assertTrue(all(o.working for k, o in self.r.account.reducer.orders.items()
+                            if k.startswith('other-')))
+
+    async def test_eighth_market_no_longer_repeats_first_leg_cancel(self):
+        self.add_working(14)
+        for _ in range(3):
+            await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(self.r.account.reducer.pending_order_count(), 16)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+        self.assertEqual(self.r.journal.connection.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE kind='maker_pair_presend_state_change'"
+        ).fetchone()[0], 0)
+
+    async def test_odd_pending_slot_cannot_start_a_pair(self):
+        self.add_working(29, price=D('.1'))
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertFalse(self.sent)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_pair_over_actual_gross_cap_sends_neither_leg(self):
+        self.add_working(28, price=D('.51'))
+        # Existing cost 285.60 plus the complete pair 18.40 exceeds 300.
+        for _ in range(3):
+            await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertFalse(self.sent)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+        self.assertEqual(self.r.account.reducer.pending_order_count(), 28)
+
+    async def test_pair_at_exact_gross_cap_is_allowed(self):
+        self.add_working(28, price=D('.50'))
+        # Reserve exactly 281.60 before the 18.40 pair.
+        self.r.account.reducer.orders['other-0'].price = D('.58')
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(self.r._websocket_exposure().gross_reservation_usd, D('300'))
+        self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_available_funds_still_block_the_complete_pair(self):
+        self.r.account.available_usd = D('18.39')
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertFalse(self.sent)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_market_cap_still_blocks_the_complete_pair(self):
+        self.r.config = replace(self.r.config, risk=replace(
+            self.r.config.risk, max_market_exposure_usd=D('18.39')))
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertFalse(self.sent)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_market_cap_rechecked_after_second_leg_admission(self):
+        def lower_cap():
+            self.r.config = replace(self.r.config, risk=replace(
+                self.r.config.risk, max_market_exposure_usd=D('18.39')))
+        self.at_second_admission = lower_cap
+        await self.assert_second_blocked()
+
+    async def test_hard_stop_pending_cap_zero_starts_no_pair(self):
+        self.r._dynamic_pending_cap = 0
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertFalse(self.sent)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_actual_exposure_change_still_blocks_second_send(self):
+        self.add_working(28, price=D('.50'))
+        def exposure_changes():
+            self.r.account.reducer.orders['other-0'].price = D('.99')
+        self.at_second_admission = exposure_changes
+        await self.assert_second_blocked()
+
+    def test_partial_order_uses_remaining_cost_and_inventory_is_not_freed_by_sell(self):
+        self.add_working(2)
+        first = self.r.account.reducer.orders['other-0']
+        first.remaining_quantity = D(7)
+        self.r.account.reducer.positions['HELD'] = D(-20)
+        sell = self.r.account.reducer.orders['other-1']
+        sell.side = Side.SELL
+        sell.symbol = 'HELD'
+        exposure = self.r._websocket_exposure()
+        self.assertEqual(exposure.pending_orders, 2)
+        self.assertEqual(exposure.gross_reservation_usd, D('23.22'))
+        self.assertEqual(exposure.market_exposure_usd['HELD'], D(20))
+        first.status = 'CANCELED'
+        self.assertEqual(self.r._websocket_exposure().gross_reservation_usd, D(20))
+
     async def test_attempted_send_failure_is_unknown_and_not_retried(self):
         self.fail_second_send = True
         with self.assertRaises(ConnectionError):
