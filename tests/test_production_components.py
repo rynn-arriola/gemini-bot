@@ -681,9 +681,29 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_flat_preparation_reaches_repair_with_old_expected_state(self) -> None:
         await self._prepare_fixture(manual_flat_repair=True)
 
-    async def test_held_market_missing_from_catalog_is_typed_readonly_standby(self) -> None:
+    async def test_unknown_held_market_missing_from_catalog_stays_global_standby(self) -> None:
         with self.assertRaises(InventoryMarketUnavailable):
             await self._prepare_fixture(manual_flat_repair=False, outside_inventory=True)
+
+    async def test_owned_held_market_missing_from_catalog_is_scoped(self) -> None:
+        def verify(runtime):
+            self.assertEqual(runtime._inventory_catalog_holds, {"Y"})
+            self.assertEqual(runtime.account.reducer.positions, {"Y": Decimal("10")})
+            self.assertIn("Y", runtime.account.blocked_entries)
+            self.assertNotIn("Y", runtime.public.books)
+            exposure = runtime._websocket_exposure()
+            self.assertEqual(exposure.pending_orders, 0)
+            self.assertEqual(exposure.gross_reservation_usd, Decimal("10"))
+            self.assertEqual(runtime._inventory_locked_pool_ids(), {"pool-held"})
+            status = json.loads((runtime.directory / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["inventory_catalog_holds"], ["Y"])
+
+        await self._prepare_fixture(
+            manual_flat_repair=False,
+            outside_inventory=True,
+            scoped_outside_inventory=True,
+            after_prepare=verify,
+        )
 
     async def test_prepared_account_events_record_subclock_gaps_and_counters(self) -> None:
         def exercise(runtime):
@@ -740,6 +760,7 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def _prepare_fixture(
         self, *, manual_flat_repair: bool, after_prepare=None,
         outside_inventory: bool = False,
+        scoped_outside_inventory: bool = False,
     ) -> None:
         class Rest:
             async def terms_status(self): return {"hasAcceptedLatest": True}
@@ -796,7 +817,12 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
             async def messages(self):
                 yield {"status": 200}
                 yield {"e": "balanceUpdate", "B": [{"a": "USD", "f": "100", "c": "100"}]}
-                yield {"e": "positionReport", "P": [], "u": 1}
+                yield {
+                    "e": "positionReport",
+                    "P": ([{"t": "ec", "s": "Y", "a": [{"t": "position", "v": "10"}]}]
+                          if scoped_outside_inventory else []),
+                    "u": 1,
+                }
                 while True:
                     await asyncio.sleep(3600)
                     yield {}
@@ -820,6 +846,20 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
                     try:
                         prior.set_runtime_state("expected_confirmed_usd", "96", updated_at=NOW)
                         prior.set_runtime_state("expected_positions", '{"X":"10"}', updated_at=NOW)
+                    finally:
+                        prior.close()
+                elif scoped_outside_inventory:
+                    prior = SQLiteJournal(runtime.control_directory / "production.sqlite")
+                    try:
+                        prior.set_runtime_state("expected_confirmed_usd", "100", updated_at=NOW)
+                        prior.set_runtime_state("expected_positions", '{"Y":"10"}', updated_at=NOW)
+                        prior.set_runtime_state(
+                            "sticky_markets_v1", '{"pool-held":["HELD","Y"]}', updated_at=NOW,
+                        )
+                        prior.persist_deadline(
+                            "Y", "YES", NOW - timedelta(minutes=10),
+                            NOW - timedelta(minutes=5), Decimal("10"),
+                        )
                     finally:
                         prior.close()
                 result = await runtime.prepare(timeout=2, manual_flat_repair=manual_flat_repair)

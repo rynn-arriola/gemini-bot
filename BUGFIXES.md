@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — catalog-omitted inventory no longer blocks unrelated markets
+
+The typed catalog-standby repair kept the runner alive but still stopped every market before activation whenever one exact held contract was omitted from a discovery response. That contradicted the approved market-isolation and resting-time objective.
+
+V7 now scopes only fully proven incumbent inventory: exact REST/WS quantity, durable sticky owner and original deadline, with no active order or unresolved exit intent. The held symbol stays entry-blocked and unsubscribed, counts exposure and one pool allocation, consumes zero pending-order slots, and receives no uptime credit. Healthy markets can activate normally. Discovery retries every 60 seconds while the hold exists; current metadata plus fresh synchronized depth restore the same symbol and its existing exit worker. Unknown or incomplete evidence still enters global read-only standby. Four new regressions bring verification to 557 production and 28 script tests. [Design and evidence](docs/SCOPED_INVENTORY_CATALOG_RECOVERY_2026-09-16.md).
+
 ## September 16, 2026 — transient catalog omission with held inventory
 
 The first persistent-task launch proved the launcher stayed alive, but the runner never activated. Its initial REST read found the exact existing position while that discovery attempt returned only 20 subscribable markets and omitted the held ZEC symbol, so startup raised a generic fatal error and the supervisor entered attention. No permit was consumed and no order was submitted. A later authenticated position read still showed the one known position and zero active orders; a fresh public discovery returned 32 markets and included the same held symbol, establishing a transient catalog omission rather than unknown inventory.

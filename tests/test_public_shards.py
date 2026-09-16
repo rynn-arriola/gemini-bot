@@ -173,6 +173,9 @@ class ShardOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(r._public_generation('X'),old_x)
         self.assertEqual(r._public_generation('B'),old_b)
 
+    async def test_unsubscribed_inventory_has_stable_quarantine_generation(self):
+        self.assertEqual(self.r._public_generation('CATALOG-MISSING'), (0, -1))
+
     async def test_healthy_sibling_admission_remains_open_but_held_symbol_cannot_send(self):
         from gemini_bot.execution import OrderPurpose, place_request
         r = self.r
@@ -326,6 +329,17 @@ class StartupInventoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_continuous_known_inventory_keeps_original_deadline_without_forced_startup_exit(self):
         r = self.r
+        deadline = r.journal.get_deadline('X','YES')
+        await r._prepare_activation_inventory()
+        r._exit_due_positions.assert_not_awaited()
+        self.assertEqual(r.journal.get_deadline('X','YES'),deadline)
+        self.assertIn('X',r.account.fill_blocked_entries)
+
+    async def test_catalog_quarantined_inventory_does_not_block_activation_inventory_proof(self):
+        r = self.r
+        r.universe = []
+        r._inventory_catalog_holds = {'X'}
+        r._permitted_symbols = {'X'}
         deadline = r.journal.get_deadline('X','YES')
         await r._prepare_activation_inventory()
         r._exit_due_positions.assert_not_awaited()

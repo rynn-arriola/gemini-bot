@@ -313,6 +313,25 @@ class RolloverOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.r.public.subscribe.assert_not_awaited()
         self.r.public.unsubscribe.assert_not_awaited()
 
+    async def test_catalog_omitted_inventory_recovers_without_rotating_healthy_markets(self):
+        pool_id = self.fresh.pool.pool_id
+        self.r.universe = []
+        self.r._inventory_catalog_holds = {"Y"}
+        self.r._sticky_markets = {pool_id: ("NEW", "Y")}
+        self.r._sticky_pool_ids = {pool_id}
+        self.r.account.reducer.positions["Y"] = D("10")
+        self.r.account.block_entries("Y", fill=True)
+
+        await self.r._rollover_flat_markets([])
+
+        self.assertEqual([c.rules.symbol for c in self.r.universe], ["Y"])
+        self.r.public.unsubscribe.assert_not_awaited()
+        self.r.public.subscribe.assert_awaited_once_with(("Y",))
+        self.assertEqual(self.r._inventory_catalog_holds, set())
+        self.assertIn("Y", self.r.account.blocked_entries)
+        self.assertIn("Y", self.r._permitted_symbols)
+        self.assertIn("Y", self.r._expiry)
+
     async def test_unsubscribed_late_depth_cannot_resurrect_book(self):
         socket = fixtures.PublicMarketSocket(fixtures.AdmissionGovernor())
         socket._send = AsyncMock()

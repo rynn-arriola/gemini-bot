@@ -1,0 +1,11 @@
+# Scoped held-inventory catalog recovery
+
+On September 16, Gemini reward discovery repeatedly returned 20 markets while omitting the exact held ZEC contract. The first repair kept the service alive and read-only, but it still prevented unrelated markets from resting. That preserved safety but did not meet the owner's market-isolation requirement.
+
+V7 now distinguishes a proven incumbent from unknown inventory. A catalog-omitted position is market-scoped only when authenticated account quantity agrees, the durable sticky owner and original deadline exist, and no working order, nonterminal intent, pending exit or uncertain mutation exists for that symbol. The quarantined position stays entry-blocked, counts exact gross and per-market exposure, reserves one of the 15 active-pool allocations, consumes zero of the 30 pending-order slots, and earns no uptime credit while unavailable. Other reconciled reward markets may activate normally.
+
+The bot does not invent expiry, tick or depth data. It leaves the omitted symbol unsubscribed, creates fresh authenticated no-send exit-wait proofs, and rechecks reward discovery every 60 seconds. When current catalog metadata returns, it restores the same sticky symbol, subscribes it, requires synchronized fresh depth and resumes the existing bounded exit worker. Unknown ownership, missing deadlines, active/ambiguous mutations and account or integrity disagreement still block activation globally.
+
+Offline verification passed 557 production tests and 28 script tests. New coverage proves unknown inventory remains globally blocked, exact owned inventory prepares market-scoped with zero pending slots and preserved exposure/pool ownership, activation accepts only the catalog-quarantined incumbent, unsubscribed sharded generation is stable, and current catalog recovery restores the same held symbol without releasing its entry block. Python compilation, every PowerShell parse, whitespace checks and offline Windows policy/durable-storage validation also passed. No live order or induced fill was used for this verification.
+
+50% impact: this improves potential qualifying uptime on healthy markets by avoiding a global startup gap. It never credits the quarantined market, relaxes its exit requirements, or bypasses normal local feasibility and profitability admission.

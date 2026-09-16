@@ -165,6 +165,10 @@ class ProductionOrchestrator:
         self._activated_pool_ids: set[str] = set()
         self._sticky_pool_ids: set[str] = set()
         self._sticky_markets: dict[str, tuple[str, str]] = {}
+        # Exact, previously owned inventory can outlive a transient omission
+        # from reward discovery. These symbols remain entry-blocked and count
+        # toward exposure/pool ownership, but do not make healthy markets wait.
+        self._inventory_catalog_holds: set[str] = set()
         self._expiry: dict[str, datetime] = {}
         self._trade_start: dict[str, datetime] = {}
         self._sports_start: dict[str, datetime] = {}
@@ -266,13 +270,14 @@ class ProductionOrchestrator:
              "uptime_override_active": self._override_active(),
              "uptime_override_until": self._uptime_override_until.isoformat() if self._uptime_override_until else None,
              "continue_after_override": self._continue_after_override,
-             "continuous_service": self._continuous_service,
-             "reward_program_paused": self._reward_program_paused,
-             "resting_continuity": self._continuity_view(),
-             "exit_recovery": {s: {"reason": w.reason, "rounds": w.rounds,
-                                    "retry_in_seconds": max(0, w.retry_at - time.monotonic())}
+              "continuous_service": self._continuous_service,
+              "reward_program_paused": self._reward_program_paused,
+              "resting_continuity": self._continuity_view(),
+              "exit_recovery": {s: {"reason": w.reason, "rounds": w.rounds,
+                                     "retry_in_seconds": max(0, w.retry_at - time.monotonic())}
                                for s, w in self._exit_waits.items()},
-             "reward_epoch": self._reward_epoch},
+              "inventory_catalog_holds": sorted(self._inventory_catalog_holds),
+              "reward_epoch": self._reward_epoch},
         )
 
     def _account_event(self, event: str, fields: dict[str, object]) -> None:
@@ -379,9 +384,21 @@ class ProductionOrchestrator:
         for c in self.universe:
             if c.pool.pool_id in locked_pools:
                 markets[c.pool.pool_id] = (c.event_ticker, c.rules.symbol)
+        # A catalog-omitted held market is deliberately absent from universe;
+        # preserve its exact durable owner identity until it is flat.
+        for pool_id in locked_pools:
+            if pool_id in self._sticky_markets:
+                markets.setdefault(pool_id, self._sticky_markets[pool_id])
         if markets != self._sticky_markets:
             self.journal.set_runtime_state("sticky_markets_v1", json.dumps(markets, sort_keys=True), updated_at=_utc_now())
             self._sticky_markets = markets
+
+    def _inventory_locked_pool_ids(self) -> set[str]:
+        held = {symbol for symbol, quantity in self.account.reducer.positions.items() if quantity}
+        return {
+            pool_id for pool_id, (_, symbol) in self._sticky_markets.items()
+            if symbol in held
+        }
 
     def _recovery_stop_requested(self) -> bool:
         now = _utc_now()
@@ -401,7 +418,11 @@ class ProductionOrchestrator:
 
     def _public_generation(self, symbol: str):
         if isinstance(self.public, PublicMarketShards):
-            return (self._stream_generation['public'], self.public.generation(symbol))
+            shard = self.public.assignments.get(canonical_symbol(symbol))
+            return (
+                self._stream_generation['public'],
+                -1 if shard is None else self.public.generations[shard],
+            )
         return self._stream_generation['public']
 
     def _public_shard_held(self, symbol: str) -> bool:
@@ -1235,8 +1256,15 @@ class ProductionOrchestrator:
                     raise ExternalOrderPresent("an unowned active order blocks production startup")
 
             self._load_sticky_markets()
+            # Inventory is itself a tracked owner. Reserve catalog capacity so
+            # a temporarily omitted held symbol can be restored later without
+            # exceeding the reviewed 32-owner/public-subscription bound.
+            discovery_capacity = max(
+                1,
+                self.config.risk.max_tracked_markets - len(before.positions),
+            )
             self.universe = await RewardUniverseLoader(self.rest).load(
-                maximum_pools=self.config.risk.max_tracked_markets,
+                maximum_pools=discovery_capacity,
                 preferred=self._sticky_markets, now=_utc_now(),
             )
             if not self.universe:
@@ -1258,14 +1286,41 @@ class ProductionOrchestrator:
                 for symbol, starts_at in self._sports_start.items()
             }
             self.account.expiry = self._expiry
-            if any(row.symbol not in self._expiry for row in before.positions):
-                # Reward discovery can briefly omit a still-open incumbent
-                # event. The position itself is exact authenticated evidence,
-                # but inventing contract metadata or using stale depth is not.
-                # V7 keeps this pre-activation condition read-only and repeats
-                # the entire preparation only after the market is subscribable.
-                raise InventoryMarketUnavailable(
-                    "held inventory market is absent from the current subscribable catalog"
+            missing_inventory = {
+                row.symbol for row in before.positions if row.symbol not in self._expiry
+            }
+            if missing_inventory:
+                sticky_symbols = {
+                    symbol for _, symbol in self._sticky_markets.values()
+                }
+                active_order_symbols = {row.symbol for row in before.active_orders}
+                safe_holds = {
+                    row.symbol for row in before.positions
+                    if (
+                        row.symbol in missing_inventory
+                        and row.symbol in sticky_symbols
+                        and row.symbol not in active_order_symbols
+                        and not self.journal.pending_exit(row.symbol)
+                        and not self.journal.has_nonterminal_intents(row.symbol)
+                        and self.journal.get_deadline(row.symbol, row.outcome.value) is not None
+                    )
+                }
+                if safe_holds != missing_inventory:
+                    # Unknown ownership, deadline or mutation evidence remains
+                    # a global pre-activation blocker. Only the exact durable
+                    # incumbent case is safe to quarantine by market.
+                    raise InventoryMarketUnavailable(
+                        "held inventory market is absent without complete scoped ownership proof"
+                    )
+                self._inventory_catalog_holds = safe_holds
+                for symbol in safe_holds:
+                    self.account.block_entries(symbol, fill=True)
+                self.log.event(
+                    logging.WARNING,
+                    "inventory_catalog_quarantined",
+                    symbols=sorted(safe_holds),
+                    unrelated_markets_allowed=True,
+                    pending_order_slots=0,
                 )
             # Seed identity before sparse terminal WebSocket updates can arrive.
             for row in before.active_orders:
@@ -2713,9 +2768,17 @@ class ProductionOrchestrator:
         if isinstance(self.public, PublicMarketShards) and self.public.held:
             return  # Do not move owners/subscriptions while a shard is recovering.
         retiring = [c for c in self.universe if not c.pool.active or not self._entry_time_valid(c.rules.symbol)]
-        if not retiring and len(self.universe) >= self.config.risk.max_tracked_markets:
+        if (not retiring and not self._inventory_catalog_holds
+                and len(self.universe) >= self.config.risk.max_tracked_markets):
             return
-        preferred = {c.pool.pool_id: (c.event_ticker, c.rules.symbol) for c in self.universe if c not in retiring}
+        preferred = {
+            c.pool.pool_id: (c.event_ticker, c.rules.symbol)
+            for c in self.universe if c not in retiring
+        }
+        preferred.update({
+            pool_id: pair for pool_id, pair in self._sticky_markets.items()
+            if pair[1] in self._inventory_catalog_holds
+        })
         proposed = await RewardUniverseLoader(self.rest).load(
             maximum_pools=self.config.risk.max_tracked_markets, preferred=preferred,
             now=_utc_now(), rewards=rewards,
@@ -2775,7 +2838,13 @@ class ProductionOrchestrator:
             for c in proposed:
                 if len(self.universe) + len(additions) >= self.config.risk.max_tracked_markets:
                     break
-                if c.pool.pool_id in pools or c.rules.symbol in self.account.blocked_entries:
+                recovering_inventory = (
+                    c.rules.symbol in self._inventory_catalog_holds
+                    and bool(self.account.reducer.positions.get(c.rules.symbol, Decimal("0")))
+                )
+                if c.pool.pool_id in pools or (
+                    c.rules.symbol in self.account.blocked_entries and not recovering_inventory
+                ):
                     continue
                 pools.add(c.pool.pool_id)
                 additions.append(c)
@@ -2795,6 +2864,18 @@ class ProductionOrchestrator:
             self._permitted_symbols.update(c.rules.symbol for c in additions)
             if additions:
                 await self.public.subscribe(tuple(c.rules.symbol for c in additions))
+                recovered_inventory = {
+                    c.rules.symbol for c in additions
+                    if c.rules.symbol in self._inventory_catalog_holds
+                }
+                if recovered_inventory:
+                    self._inventory_catalog_holds.difference_update(recovered_inventory)
+                    self.log.event(
+                        logging.INFO,
+                        "inventory_catalog_recovered",
+                        symbols=sorted(recovered_inventory),
+                        exit_workers_resumed=True,
+                    )
             if removable or additions:
                 self._save_shard_assignments()
                 self.journal.set_runtime_state("sticky_markets_v1", json.dumps(self._sticky_markets, sort_keys=True), updated_at=_utc_now())
@@ -2823,12 +2904,14 @@ class ProductionOrchestrator:
             account_fingerprint=hashlib.sha256(self.config.api_key.encode()).hexdigest(),
         )
         self._permitted_symbols = (
-            {item.rules.symbol for item in self.universe}
+            {item.rules.symbol for item in self.universe} | self._inventory_catalog_holds
             if permit.universe_scope == "reward_catalog"
             else set(permit.symbols)
         )
         self._permit_policy_digest = permit.policy_sha256
-        if not self._permitted_symbols <= {item.rules.symbol for item in self.universe}:
+        if not self._permitted_symbols <= (
+            {item.rules.symbol for item in self.universe} | self._inventory_catalog_holds
+        ):
             raise RuntimeError("approved symbols are not in the reconciled universe")
         if commissioning_seconds is not None and (not 2 <= commissioning_seconds <= 30 or permit.maximum_active_pools != 1):
             raise ValueError("commissioning requires 2-30 seconds and a one-pool permit")
@@ -2908,7 +2991,9 @@ class ProductionOrchestrator:
             next_stale_check_at = 0.0
             next_risk_at = asyncio.get_running_loop().time() + 60
             next_uptime_at = 0.0
-            next_reward_check_at = asyncio.get_running_loop().time() + 300
+            next_reward_check_at = asyncio.get_running_loop().time() + (
+                60 if self._inventory_catalog_holds else 300
+            )
             stop_at = None if commissioning_seconds is None else asyncio.get_running_loop().time() + commissioning_seconds
             while self.gate.state is EngineState.QUOTING:
                 if self._continue_after_override and self._advance_reward_epoch(_utc_now()):
@@ -2945,7 +3030,11 @@ class ProductionOrchestrator:
                             self.gate.state = EngineState.DRAINING
                             break
                         self._complete_read_recovery("reward_metadata")
-                        next_reward_check_at = clock + (30 if self._reward_program_paused else 300)
+                        next_reward_check_at = clock + (
+                            30 if self._reward_program_paused
+                            else 60 if self._inventory_catalog_holds
+                            else 300
+                        )
                     reward_check = None
                 if reward_check is None and clock >= next_reward_check_at:
                     reward_check = asyncio.create_task(
@@ -3011,6 +3100,7 @@ class ProductionOrchestrator:
                         for symbol, quantity in self.account.reducer.positions.items()
                         if quantity != 0 and symbol in pool_by_symbol
                     }
+                    locked_pools.update(self._inventory_locked_pool_ids())
                     if isinstance(self.public, PublicMarketShards):
                         locked_pools.update(pool for pool, (_, symbol) in self._sticky_markets.items()
                                             if self.public.assignments.get(symbol) in self.public.held)
@@ -3098,11 +3188,15 @@ class ProductionOrchestrator:
                 or not self.account.snapshots_fresh or not self.account.equity_classification_complete):
             raise RuntimeError('startup inventory changed during authenticated proof')
         assert_position_consistency(snapshot, self.account.reducer.positions)
+        catalog_symbols = {item.rules.symbol for item in self.universe}
         for symbol, signed in self.account.reducer.positions.items():
             if (symbol not in self._permitted_symbols or self.journal.pending_exit(symbol)
                     or self.journal.has_nonterminal_intents(symbol)
                     or self.journal.get_deadline(symbol, 'YES' if signed > 0 else 'NO') is None):
                 raise RuntimeError('startup inventory lacks safe original ownership/deadline')
+            if symbol not in catalog_symbols:
+                if symbol not in self._inventory_catalog_holds:
+                    raise RuntimeError('startup inventory is outside the reconciled catalog scope')
             self.account.block_entries(symbol, fill=True)
         self._last_snapshot = snapshot
 
