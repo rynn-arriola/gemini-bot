@@ -97,5 +97,5 @@ Production logging is JSON Lines through a bounded non-blocking queue so a slow 
 - Atomic JSON status and SQLite journal under an ignored `data/production/` directory.
 - Exclusive Windows-compatible owner lock prevents two mutation processes.
 - `STOP` requests drain: block new risk, cancel resting entry orders, reconcile, reduce positions under policy, then exit.
-- `scripts/start_production.ps1` launches a hidden native process; Prepare and Live are distinct modes. Live requires a permit path. `scripts/stop_production.ps1` only requests graceful drain.
+- `scripts/start_production.ps1` keeps Prepare as a hidden child but launches Live through one project-scoped, on-demand Windows Scheduled Task. The task has no trigger, unlimited execution time and `IgnoreNew` instance policy, so a temporary terminal/job does not own the supervisor lifetime. Live still requires a permit path and a fresh process-backed supervisor heartbeat. `scripts/stop_production.ps1` only requests graceful drain.
 - No WSL, systemd, Bash, cron, or POSIX-only locking.

@@ -30,10 +30,17 @@ function Process-Exists($Value) {
 $Supervisor = Read-JsonFile "supervisor-status.json"
 $RunnerStatus = Read-JsonFile "status.json"
 $RunnerResultDocument = Read-JsonFile "runner-result.json"
+$LauncherTask = Read-JsonFile "launcher-task.json"
 $SupervisorFresh = Is-Fresh $Supervisor 45
 $RunnerFresh = Is-Fresh $RunnerStatus 90
 $RunnerExists = Process-Exists $Supervisor.runner_pid
 $SupervisorExists = Process-Exists $Supervisor.supervisor_pid
+$PersistentTaskState = $null
+if ($null -ne $LauncherTask -and $LauncherTask.task_name) {
+    try {
+        $PersistentTaskState = [string](Get-ScheduledTask -TaskName ([string]$LauncherTask.task_name) -ErrorAction Stop).State
+    } catch { $PersistentTaskState = $null }
+}
 $Healthy = $SupervisorFresh -and $RunnerFresh -and $RunnerExists -and $SupervisorExists -and $Supervisor.state -eq "RUNNING" -and $RunnerStatus.phase -in @("quoting", "recovering", "standby")
 [ordered]@{
     observation = if ($Healthy -and ($RunnerStatus.phase -eq "recovering" -or @($RunnerStatus.entry_read_holds).Count -gt 0)) { "FRESH_RECOVERY_HOLD" } elseif ($Healthy -and $RunnerStatus.phase -eq "standby") { "FRESH_STANDBY_HEARTBEATS" } elseif ($Healthy) { "FRESH_QUOTING_HEARTBEATS" } elseif ($SupervisorFresh -and $SupervisorExists -and $Supervisor.state -eq "BACKOFF") { "FRESH_SUPERVISED_BACKOFF" } else { "ATTENTION_REQUIRED_OR_STOPPED" }
@@ -48,6 +55,9 @@ $Healthy = $SupervisorFresh -and $RunnerFresh -and $RunnerExists -and $Superviso
     last_runner_update = $RunnerStatus.updated_at
     last_runner_reason = $RunnerStatus.reason
     saved_result_outcome = $RunnerResultDocument.outcome
+    launcher_kind = $LauncherTask.launch_kind
+    persistent_task_name = $LauncherTask.task_name
+    persistent_task_state = $PersistentTaskState
     venue_state_verified = $false
 } | ConvertTo-Json
 if ($Logs) {

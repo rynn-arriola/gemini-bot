@@ -284,3 +284,42 @@ class LoggingHardeningTests(unittest.TestCase):
             self.assertEqual(row["observation"], "ATTENTION_REQUIRED_OR_STOPPED")
             self.assertFalse(row["venue_state_verified"])
             self.assertFalse(row["supervisor_fresh"])
+
+    def test_live_launcher_uses_unlimited_on_demand_scheduled_task(self):
+        root = Path(__file__).resolve().parents[1]
+        (root / "data").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="test-launcher-", dir=root / "data") as directory:
+            path = Path(directory)
+            environment = path / "offline.env"
+            permit = path / "offline-permit.json"
+            runtime_argument = str(path.relative_to(root))
+            environment_argument = str(environment.relative_to(root))
+            permit_argument = str(permit.relative_to(root))
+            environment.write_text("OFFLINE_ONLY=1\n", encoding="utf-8")
+            permit.write_text("{}\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-File",
+                    str(root / "tests/persistent_launcher_harness.ps1"),
+                    "-RuntimeDirectory", runtime_argument,
+                    "-EnvironmentFile", environment_argument,
+                    "-PermitFile", permit_argument,
+                ],
+                capture_output=True, text=True, check=True,
+            )
+            row = json.loads(result.stdout)
+            self.assertTrue(row["registered"])
+            self.assertTrue(row["started"])
+            self.assertRegex(row["task_name"], r"^GeminiBotProduction-[0-9A-F]{12}$")
+            self.assertTrue(row["action"]["Execute"].lower().endswith("windows\\system32\\windowspowershell\\v1.0\\powershell.exe"))
+            self.assertIn("supervise_production.ps1", row["action"]["Argument"])
+            self.assertIn(str(path), row["action"]["Argument"])
+            self.assertEqual(row["settings"]["ExecutionTimeLimit"], "00:00:00")
+            self.assertEqual(row["settings"]["MultipleInstances"], "IgnoreNew")
+            self.assertTrue(row["settings"]["AllowStartIfOnBatteries"])
+            self.assertTrue(row["settings"]["DontStopIfGoingOnBatteries"])
+            self.assertEqual(row["principal"]["LogonType"], "Interactive")
+            self.assertEqual(row["principal"]["RunLevel"], "Limited")
+            self.assertEqual(row["launcher_state"]["launch_kind"], "on_demand_scheduled_task")
+            self.assertFalse(row["launcher_state"]["boot_trigger"])
+            self.assertEqual(row["process_id"], row["harness_pid"])

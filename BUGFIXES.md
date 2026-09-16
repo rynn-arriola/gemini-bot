@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — Live supervisor detached from temporary launcher job
+
+A user-started Live run remained healthy until both the runner and supervisor vanished together about 40 minutes after launch. The final heartbeat and order transitions were normal; there was no STOP, durable runner result, stderr, bot error/critical event, Windows application failure or power event. The supervisor was a descendant of the temporary launching PowerShell, so external job-tree termination is the strongest evidence-based explanation, not a proven bot exception.
+
+Live startup now registers one stable project-scoped, on-demand Windows Scheduled Task and starts the supervisor through Task Scheduler. The task has unlimited execution time, permits only one instance, has no trigger and carries no authority beyond the supplied build/account/policy permit. Startup refuses a running task or process-backed supervisor, waits for a fresh supervisor heartbeat, and records non-sensitive task metadata. Runtime health output includes the task state. An offline mutation-mocked harness proves Live never falls back to `Start-Process`; a real harmless scheduler probe ran, returned result zero and was removed. Full verification passed 551 production and 28 script tests plus compilation, PowerShell parsing and offline release validation. This reduces avoidable resting-order gaps but credits no missed reward snapshots and changes no ranking, 50% admission, size, breadth, exit or loss rule.
+
 ## September 16, 2026 — one-time exception binds both cash surfaces
 
 After the manual SELL cancellation, stable order-free proof reached the approved exception but refused because REST `amount` and WebSocket `c` exposed different precision. Applying the REST value would leave runtime reconciliation broken because the engine compares against exact WS `c`. The operator-only incident path now binds stable REST and WS values separately, requires each to remain inside the same approved sub-cent incident, and adopts exact WS cash once. No general rounding/tolerance or automatic future exception was added.
