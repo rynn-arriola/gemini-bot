@@ -15,3 +15,12 @@ class UnclassifiedCash(ReconciliationRequired):
 
 class UnclassifiedPositions(ReconciliationRequired):
     pass
+
+
+class InventoryMarketUnavailable(ReconciliationRequired):
+    """Exact held inventory is absent from the current subscribable catalog.
+
+    V7 may wait and repeat the complete read-only startup proof. The exception
+    never authorizes stale-market exit, synthetic contract metadata, permit
+    consumption, or post-activation recovery.
+    """

@@ -13,7 +13,8 @@ from gemini_bot.cli import (
     LiveRunnerExit,
 )
 from gemini_bot.reconciliation_errors import (
-    ExternalOrderPresent, UnclassifiedCash, UnclassifiedPositions,
+    ExternalOrderPresent, InventoryMarketUnavailable, UnclassifiedCash,
+    UnclassifiedPositions,
 )
 from gemini_bot.recovery_policy import transient_failure
 from gemini_bot.rest_client import ApiError
@@ -41,6 +42,15 @@ class ReconciliationWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(run.await_count, 2)
             wait.assert_awaited_once()
             self.assertEqual(run.await_args_list[0], run.await_args_list[1])
+
+    async def test_inventory_catalog_gap_waits_read_only_before_full_retry(self):
+        with patch('gemini_bot.cli._run_live_once', new_callable=AsyncMock) as run, \
+                patch('gemini_bot.cli._wait_for_reconciliation', new_callable=AsyncMock) as wait:
+            run.side_effect = [InventoryMarketUnavailable('catalog gap'), None]
+            wait.return_value = True
+            await self.run_bot()
+            self.assertEqual(run.await_count, 2)
+            wait.assert_awaited_once()
 
     async def test_stop_in_wait_never_retries_live_attempt(self):
         with patch('gemini_bot.cli._run_live_once', new_callable=AsyncMock) as run, \
@@ -166,7 +176,10 @@ class ReconciliationWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await _wait_reconciliation_delay(self.root, 'UnclassifiedCash', 0))
 
     def test_evidence_blockers_are_never_transient_failures(self):
-        for cls in (UnclassifiedCash, UnclassifiedPositions, ExternalOrderPresent):
+        for cls in (
+            UnclassifiedCash, UnclassifiedPositions, ExternalOrderPresent,
+            InventoryMarketUnavailable,
+        ):
             self.assertFalse(transient_failure(cls('unclassified')))
 
     def test_subcent_cash_blocker_never_writes_balance_or_adjustment(self):

@@ -30,6 +30,7 @@ from gemini_bot.reconciliation import (
     build_account_snapshot,
     exposure_from_snapshot,
 )
+from gemini_bot.reconciliation_errors import InventoryMarketUnavailable
 from gemini_bot.risk_windows import RiskWindowPolicy
 from gemini_bot.runtime_files import atomic_write_json
 from gemini_bot.storage import SQLiteJournal, WindowsOwnerLock
@@ -680,6 +681,10 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_flat_preparation_reaches_repair_with_old_expected_state(self) -> None:
         await self._prepare_fixture(manual_flat_repair=True)
 
+    async def test_held_market_missing_from_catalog_is_typed_readonly_standby(self) -> None:
+        with self.assertRaises(InventoryMarketUnavailable):
+            await self._prepare_fixture(manual_flat_repair=False, outside_inventory=True)
+
     async def test_prepared_account_events_record_subclock_gaps_and_counters(self) -> None:
         def exercise(runtime):
             # Exercise the replacement account created by real prepare(), not
@@ -732,11 +737,20 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
 
         await self._prepare_fixture(manual_flat_repair=False, after_prepare=exercise)
 
-    async def _prepare_fixture(self, *, manual_flat_repair: bool, after_prepare=None) -> None:
+    async def _prepare_fixture(
+        self, *, manual_flat_repair: bool, after_prepare=None,
+        outside_inventory: bool = False,
+    ) -> None:
         class Rest:
             async def terms_status(self): return {"hasAcceptedLatest": True}
             async def reward_config(self): return {"enabled": True}
-            async def positions(self): return []
+            async def positions(self):
+                if not outside_inventory:
+                    return []
+                return [{
+                    "symbol": "Y", "outcome": "YES", "totalQuantity": "10",
+                    "avgPrice": ".40", "marketValue": "4",
+                }]
             async def active_orders(self): return []
             async def order_history(self): return []
             async def reward_events(self, *, ceiling: int = 3000):

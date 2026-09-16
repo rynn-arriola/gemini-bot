@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — transient catalog omission with held inventory
+
+The first persistent-task launch proved the launcher stayed alive, but the runner never activated. Its initial REST read found the exact existing position while that discovery attempt returned only 20 subscribable markets and omitted the held ZEC symbol, so startup raised a generic fatal error and the supervisor entered attention. No permit was consumed and no order was submitted. A later authenticated position read still showed the one known position and zero active orders; a fresh public discovery returned 32 markets and included the same held symbol, establishing a transient catalog omission rather than unknown inventory.
+
+The exact pre-activation condition is now a typed `InventoryMarketUnavailable` reconciliation blocker. V7 remains in the existing nonactivated, STOP-responsive, 60-second read-only standby loop and repeats complete preparation and normal permit validation only after the exact market becomes subscribable. It never fabricates contract rules, subscribes stale data, sends an exit, resets the original deadline/loss/uptime, or changes legacy/post-activation/unknown/accounting failure handling. Two regressions cover real preparation classification and full retry routing; 553 production and 28 script tests plus compilation, PowerShell parsing and offline release validation pass. Snapshot impact: prevents a transient discovery omission from requiring manual restart, but all waiting time remains uncredited and safety still overrides the 50% objective.
+
 ## September 16, 2026 — Live supervisor detached from temporary launcher job
 
 A user-started Live run remained healthy until both the runner and supervisor vanished together about 40 minutes after launch. The final heartbeat and order transitions were normal; there was no STOP, durable runner result, stderr, bot error/critical event, Windows application failure or power event. The supervisor was a descendant of the temporary launching PowerShell, so external job-tree termination is the strongest evidence-based explanation, not a proven bot exception.

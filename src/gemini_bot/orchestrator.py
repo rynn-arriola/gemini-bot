@@ -24,7 +24,7 @@ from .activation import (
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
-from .reconciliation_errors import ExternalOrderPresent
+from .reconciliation_errors import ExternalOrderPresent, InventoryMarketUnavailable
 from .discovery import RewardUniverseLoader
 from .catalog import join_reward_contracts
 from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
@@ -1259,7 +1259,14 @@ class ProductionOrchestrator:
             }
             self.account.expiry = self._expiry
             if any(row.symbol not in self._expiry for row in before.positions):
-                raise RuntimeError("existing inventory outside the subscribed universe requires reconciliation")
+                # Reward discovery can briefly omit a still-open incumbent
+                # event. The position itself is exact authenticated evidence,
+                # but inventing contract metadata or using stale depth is not.
+                # V7 keeps this pre-activation condition read-only and repeats
+                # the entire preparation only after the market is subscribable.
+                raise InventoryMarketUnavailable(
+                    "held inventory market is absent from the current subscribable catalog"
+                )
             # Seed identity before sparse terminal WebSocket updates can arrive.
             for row in before.active_orders:
                 self.account.reducer.apply_order_update({
