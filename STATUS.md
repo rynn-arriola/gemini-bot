@@ -23,7 +23,7 @@ Updated September 16, 2026, 17:35 ET. Current handoff, not a perpetual venue-sta
 
 ## Verified release and limits
 
-- **Settlement/20-contract candidate release: 567 production + 28 script tests = 595 passed.** Compilation, every PowerShell parse, whitespace checks and offline Windows policy/storage validation passed. A fresh authenticated read-only preparation exercised the real settled-position recovery and ended flat/order-free at `ready_paused`; no activation permit was consumed and no mutation occurred. Commit/push and a fresh exact-build permit remain required before restart.
+- **Settlement/20-contract release is restart-ready at `dfadb52` on `origin/main`: 567 production + 28 script tests = 595 passed.** Compilation, every PowerShell parse, whitespace checks and offline Windows policy/storage validation passed. A fresh authenticated read-only preparation exercised the real settled-position recovery and ended flat/order-free at `ready_paused`; no mutation occurred. Fresh unconsumed v7 authority `activation-permit-settlement-20-20260916.json` validates against the exact account/build/policy with 15 pools, two same-session recovery restarts, null expiry and no uptime override.
 
 - **Sticky-market/no-local-50 release: 559 production + 28 script tests = 587 passed.** Python compilation, every PowerShell parse, whitespace checks and offline Windows policy/storage validation passed. Exact-build read-only preparation reconciled one position/zero orders, 19 tracked and 16 ranked markets with no holds. Commit `3cb4156` exactly matches `origin/main`; post-launch authenticated REST proved 24/24 active orders have canonical journal ownership and none belongs to the held-position market.
 
@@ -48,4 +48,4 @@ Updated September 16, 2026, 17:35 ET. Current handoff, not a perpetual venue-sta
 
 ## Operator route
 
-The old supervisor is still alive only in `ATTENTION_REQUIRED`; there is no runner and authenticated preparation is flat/order-free. Do not reuse the consumed prior permit or start a second owner. Publish the verified build, create/validate a fresh exact-build permit, then use the existing persistent Scheduled Task route for the owner-authorized restart. [NEXT.md](NEXT.md) lists follow-up measurement.
+The old supervisor is still alive only in `ATTENTION_REQUIRED`; there is no runner and authenticated preparation is flat/order-free. Do not reuse the consumed prior permit or start a second owner. End the old attention-only supervisor cleanly, then use the existing persistent Scheduled Task route and the fresh settlement/20-contract permit for the owner-authorized restart. [NEXT.md](NEXT.md) lists follow-up measurement.
