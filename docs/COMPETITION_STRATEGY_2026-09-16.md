@@ -2,11 +2,12 @@
 
 ## Scope and deployment boundary
 
-Owner approved the full reviewed strategy September 16. Source is prepared in
-`feature/competition-ranking`, separate from the running checkout. No live
-mutation, activation, permit change, stop or restart is part of this release.
-Deployment needs fresh owner authorization and exact-build account preparation.
-Polymarket remains reference-only.
+Owner approved the full reviewed strategy September 16. Source was prepared in
+`feature/competition-ranking`, separate from the running checkout. The subsequent
+"Do it then" instruction explicitly authorized deployment and restart. Source
+`2b85042` plus deployment decision `b4b8366` was fast-forwarded to main only after
+the prior runner drained flat and both old processes exited. Polymarket remains
+reference-only.
 
 ## Selection
 
@@ -95,10 +96,11 @@ prior, curve, shared allocation and profitability. No live earnings guarantee.
 
 ## Continuity impact and limitations
 
-Source preparation introduces no unquoted interval. Deployment will incur a
-controlled reconciliation gap. Revised economics may reject an incumbent that
-the old headcount model accepted, so compare fresh read-only rankings before
-activation. Alternatives are bounded, not an exhaustive all-market optimizer.
+Source preparation introduced no unquoted interval. Deployment incurs a
+controlled reconciliation gap. Fresh read-only preparation found 32 tracked,
+28 ranked and 21 actionable candidates. Ten of 14 old incumbents pass; four fail
+the new non-positive-net estimate. The local 50% proxy is not their blocker.
+Alternatives are bounded, not an exhaustive all-market optimizer.
 Aggregate books cannot reveal competitor identity, exact caps, historical
 presence or future fills. Own/public-feed timing skew remains possible. Journal
 backup/root-cause work and long-run recovery evidence remain separate pending
@@ -128,3 +130,30 @@ regressions. No live fault or fill was induced.
 A synthetic 32-market / 98-level-per-book rank-and-select benchmark over 100
 iterations measured median 6.159 ms and p95 9.468 ms on this host, with no network
 calls. This is a local microbenchmark, not live CPU or sustained latency proof.
+
+## Authorized deployment preparation
+
+The old v11 runner completed its flat drain at 19:24:01 ET. Its runner and
+supervisor exited and the persistent task became Ready before source changed.
+Canonical journal integrity passed and a separate SQLite backup passed its own
+quick-check. Fill, settlement, authenticated cash adjustment, deadline, realized
+risk and legacy cohort history matched before/after the new read-only preparation.
+All 33 strategy regressions and offline release validation passed in the live
+checkout. Main was pushed and remote-matched to `b4b8366` before launch.
+
+Official reward rules and the dated maker promotion were rechecked before
+deployment. A fresh exact-account/build/policy v7 permit was validated with null
+expiry, no uptime override, 15 owners and two same-supervisor recovery bursts.
+The persistent task launched supervisor 35788 in
+`data/production-20260916-strategy-v12`. First new order was acknowledged at
+19:27:47 ET. Authenticated REST at 19:28:05 proved 30 exactly journal-owned
+20-contract orders across 15 markets and zero positions. Canonical integrity
+passed; all five public shards were connected, with no read/stream holds,
+supervisor restarts or WARNING/ERROR/CRITICAL log events. Live reports identify
+ranking version 3 and source/permit digests match. This is not proof of
+long-run availability, profitable payout or completion of the journal-backup
+automation/root-cause follow-ups.
+
+Last old cancellation to first new acknowledgement was 227.382 seconds (about
+3 minutes 47 seconds), plus individual market placement time. This controlled
+deployment gap is not earned snapshot uptime.
