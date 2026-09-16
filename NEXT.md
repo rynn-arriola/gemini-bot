@@ -1,5 +1,7 @@
 # Next work
 
+- **Fill-flow audit follow-up, not repaired:** prioritize market-scoped exit recovery, remove unrelated exit waits from fill-priority cancellation, and clean completed fill lifecycle holds only after exact flat/terminal proof. Two offline reproductions found net-flat fills and flat-during-cancel leave a symbol blocked. Additional IOC rounds beyond three attempts/30 seconds require an explicit policy decision. Preserve no-restart instruction. See [fill-flow audit](docs/FILL_FLOW_AUDIT_2026-09-15.md).
+
 - **Do not restart or deploy:** continuous-service v7 is source-only, awaiting explicit owner authorization. Before a future deployment, verify the committed build, re-check account state and create fresh build-bound authority. The running v6 permit cannot authorize the changed source on an automatic re-launch; do not reuse or edit it to bypass build binding. No new permit has been created. See [continuous-service evidence](docs/CONTINUOUS_SERVICE_2026-09-15.md).
 - After separately authorized deployment, measure actual retained-order duration, replacement gaps, reward score and CPU/memory/disk growth during a long run. The new behavior is offline-tested, not live-accepted. Single-symbol sequence-gap isolation remains a follow-up requiring safe unsubscribe/snapshot-generation proof; shared-stream failure currently still pauses all dependent markets.
 
