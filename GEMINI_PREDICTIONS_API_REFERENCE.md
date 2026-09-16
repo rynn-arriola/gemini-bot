@@ -6,6 +6,8 @@ Working reference for the Gemini liquidity-rewards bot. This document summarizes
 
 Last verified: **2026-09-16 (America/New_York)** for the recovery/sharding addenda; earlier full reference scan September 15.
 
+September 16 no-liquidity recheck: [Get Positions](https://developer.gemini.com/rest-api/prediction-markets/positions/get-positions) explicitly makes `marketValue`, `unrealizedPnl` and `unrealizedPct` optional when the held outcome has no live sell quote. Quantity/outcome/basis remain authoritative; absent valuation is not a zero position or an executable last-trade price. REST position parsing now preserves unavailable valuation without blocking exact inventory reconciliation.
+
 September 16 six-connection smoke: five public sockets plus one read-only authenticated account socket connected successfully, with five synchronized books and account snapshots. Every socket learned live `conninfo` under one shared governor. This is observed acceptance, not a published universal maximum or permission to multiply request/order quotas. [Rate reference](https://developer.gemini.com/rate-limit).
 
 [Get Available Balances](https://developer.gemini.com/trading/rest-api/fund-management/get-available-balances), `POST /v1/balances`, is available as a bounded diagnostic read with pending-balance fields. The incident's REST and WS cash checks both disagree with exact reconstructed cash by a sub-cent amount. Documentation's migration/display precision guidance does not establish a Predictions per-execution rounding rule; no runtime cash tolerance or baseline correction is inferred.

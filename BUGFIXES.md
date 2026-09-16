@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 16, 2026 — absent valuation on an untradeable position
+
+Gemini documents that a position can omit `marketValue` when no sell quote exists, but REST reconciliation indexed that field unconditionally. Offline no-buyer startup reproduced `KeyError` before the existing scoped exit wait. Parsing now retains the exact position and exposure basis with an unavailable valuation; saved snapshot text explicitly says `unavailable`, never zero or last-trade price. Nonfinite/malformed amounts still fail closed. Integration covers startup, no-buyer wait, original deadline preservation, liquidity return and exact flatten, plus unchanged cash/external-order checks. No live order or restart.
+
 ## September 16, 2026 — startup evidence standby and STOP race
 
 Known external-order/unclassified-account startup blockers previously terminated the v7 runner immediately. They now enter paced read-only standby without adopting orders or resetting cash. Complete preparation and permit validation still precede any activation; malformed/auth/unknown/post-activation failures are not reclassified as recoverable. A STOP received during final preparation now prevents activation. This repairs service availability, not the unresolved cash evidence. [Scope and reference review](docs/RECONCILIATION_STANDBY_2026-09-16.md).

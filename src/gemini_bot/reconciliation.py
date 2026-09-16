@@ -14,7 +14,7 @@ class ReconciledPosition:
     outcome: Outcome
     signed_quantity: Decimal
     average_price: Decimal
-    market_value: Decimal
+    market_value: Decimal | None
 
     def as_storage(self) -> dict[str, str]:
         return {
@@ -22,7 +22,9 @@ class ReconciledPosition:
             "outcome": self.outcome.value,
             "signed_quantity": str(self.signed_quantity),
             "average_price": str(self.average_price),
-            "market_value": str(self.market_value),
+            # TEXT snapshot field: preserve unavailable, never fabricate an
+            # executable mark from cost basis or the last traded price.
+            "market_value": "unavailable" if self.market_value is None else str(self.market_value),
         }
 
 
@@ -62,7 +64,9 @@ class AccountSnapshot:
         return {position.symbol: position.signed_quantity for position in self.positions}
 
     @property
-    def position_market_value(self) -> Decimal:
+    def position_market_value(self) -> Decimal | None:
+        if any(row.market_value is None for row in self.positions):
+            return None
         return sum((row.market_value for row in self.positions), Decimal("0"))
 
 
@@ -77,8 +81,11 @@ def parse_positions(rows: list[dict[str, Any]]) -> tuple[ReconciledPosition, ...
         outcome = Outcome(str(row["outcome"]).upper())
         quantity = Decimal(str(row["totalQuantity"]))
         average = Decimal(str(row["avgPrice"]))
-        market_value = Decimal(str(row["marketValue"]))
-        if quantity <= 0 or not Decimal("0") < average < Decimal("1") or market_value < 0:
+        raw_value = row.get("marketValue")
+        market_value = None if raw_value is None else Decimal(str(raw_value))
+        if (not quantity.is_finite() or not average.is_finite()
+                or quantity <= 0 or not Decimal("0") < average < Decimal("1")
+                or (market_value is not None and (not market_value.is_finite() or market_value < 0))):
             raise ValueError("invalid REST position values")
         signed = quantity if outcome is Outcome.YES else -quantity
         result.append(ReconciledPosition(symbol, outcome, signed, average, market_value))

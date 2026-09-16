@@ -1,6 +1,6 @@
 # Gemini current status
 
-Updated September 16, 2026, 08:18 ET. Current handoff, not a perpetual venue-state guarantee.
+Updated September 16, 2026, 08:26 ET. Current handoff, not a perpetual venue-state guarantee.
 
 ## Operational truth
 
@@ -10,6 +10,8 @@ Updated September 16, 2026, 08:18 ET. Current handoff, not a perpetual venue-sta
 - The recovery/sharding source is installed in the local checkout used by the existing editable runtime, **not activated or naturally accepted in live trading**. Verified imports resolve to this workspace. Earlier v11 startup and midnight/churn observations remain historical, not current availability claims. No risk/size/breadth/exit-rule or normal 50% admission relaxation; recovery gaps receive no reward credit.
 
 ## Verified release and limits
+
+- **No-buyer follow-up: 529 production + 28 script tests = 557 passed.** Fixed a reproduced startup parser crash when Gemini omits `marketValue` because no sell quote exists. Exact position, exposure and deadline remain; valuation is unavailable, not fabricated. Offline startup → no-depth wait → liquidity return → exact exit passes without restart. Latest read-only check again found one position/one order and no held-outcome bid. No mutation/restart; manual SELL handoff and unexplained cash remain blockers to trading.
 
 - **Startup standby follow-up: 522 production + 28 script tests = 550 passed.** V7 waits read-only on typed startup evidence blockers, retains cooldowns/STOP and retries full fresh preparation/permit validation only after proof passes. A STOP during final preparation now prevents activation. Real read-only hold check created zero intents and consumed no authority. This does not repair the cash discrepancy, adopt the external order or make post-activation integrity failures automatically retryable. [Evidence, history/Polymarket comparison and limits](docs/RECONCILIATION_STANDBY_2026-09-16.md).
 
