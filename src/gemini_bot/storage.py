@@ -333,6 +333,17 @@ class SQLiteJournal:
             "DELETE FROM position_deadline WHERE symbol=? AND outcome=?", (symbol, outcome)
         )
 
+    def deadline_symbols(self) -> set[str]:
+        return {str(row[0]) for row in self.connection.execute(
+            "SELECT DISTINCT symbol FROM position_deadline"
+        )}
+
+    def has_nonterminal_intents(self, symbol: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM order_intent WHERE symbol=? AND state != 'terminal' LIMIT 1",
+            (symbol,),
+        ).fetchone() is not None
+
     def adopt_verified_flat_baseline(
         self, *, confirmed_usd: Decimal, observed_at: datetime
     ) -> None:

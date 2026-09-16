@@ -29,6 +29,7 @@ from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_s
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .exit_pricing import exact_crossing_exit
+from .exit_recovery import ExitDeferred, ExitWait
 from .live_ws import (
     EntryStateChangedBeforeSend,
     LiveWebSocket,
@@ -110,6 +111,12 @@ class ProductionOrchestrator:
         self.lock = WindowsOwnerLock(self.control_directory / "mutation-owner.lock")
         self._lifecycle_lock = asyncio.Lock()
         self._exit_uncertain: set[str] = set()
+        self._exit_rejected: set[str] = set()
+        self._exit_residual_limits: dict[str, Decimal] = {}
+        self._exit_round_deadlines: dict[str, float] = {}
+        self._position_proof_wait_started: dict[str, float] = {}
+        self._exit_workers: dict[str, asyncio.Task[None]] = {}
+        self._exit_waits: dict[str, ExitWait] = {}
         self.governor = AdmissionGovernor()
         self.ledger = IntentLedger(self.journal)
         self.rest = GeminiReadRestClient(
@@ -228,6 +235,9 @@ class ProductionOrchestrator:
              "continuous_service": self._continuous_service,
              "reward_program_paused": self._reward_program_paused,
              "resting_continuity": self._continuity_view(),
+             "exit_recovery": {s: {"reason": w.reason, "rounds": w.rounds,
+                                    "retry_in_seconds": max(0, w.retry_at - time.monotonic())}
+                               for s, w in self._exit_waits.items()},
              "reward_epoch": self._reward_epoch},
         )
 
@@ -599,7 +609,7 @@ class ProductionOrchestrator:
         symbol = str(frame.get("s", "")).upper()
         if symbol not in self._expiry or str(frame.get("n", "")).lower() == "active":
             return
-        self.account.blocked_entries.add(symbol)
+        self.account.block_entries(symbol)
         self.journal.audit("contract_lifecycle_block", {"symbol": symbol})
         if self.account.reducer.positions.get(symbol, Decimal("0")) != 0:
             raise RuntimeError("tracked contract changed lifecycle with open inventory")
@@ -1215,7 +1225,7 @@ class ProductionOrchestrator:
                 raise EntryStateChangedBeforeSend("activation permit expired while waiting to send")
             for held_symbol, signed in self.account.reducer.positions.items():
                 deadline = self.journal.get_deadline(held_symbol, "YES" if signed > 0 else "NO")
-                if deadline is None or _utc_now() >= deadline:
+                if deadline is None or (_utc_now() >= deadline and not self._isolated_exit_proof_current(held_symbol)):
                     raise EntryStateChangedBeforeSend(
                         "inventory safety action must precede any new entry"
                     )
@@ -1228,6 +1238,12 @@ class ProductionOrchestrator:
                     "entry exposure changed while waiting to send"
                 )
         else:
+            round_deadline = self._exit_round_deadlines.get(symbol)
+            if round_deadline is not None and time.monotonic() >= round_deadline:
+                raise EntryStateChangedBeforeSend("exit round expired before send")
+            if self._continuous_service and (not self.account.snapshots_fresh
+                    or not self.account.equity_classification_complete):
+                raise EntryStateChangedBeforeSend("exact classified account proof is stale")
             if self._stream_holds and ("private" in self._stream_holds or "private" not in self._stream_ready or not self.account.snapshots_fresh
                                        or not self.account.equity_classification_complete):
                 raise EntryStateChangedBeforeSend("recovery has not proved exact exit state")
@@ -1625,31 +1641,197 @@ class ProductionOrchestrator:
         )
 
     async def _safety_loop(self) -> None:
-        while self.gate.state in {EngineState.QUOTING, EngineState.DRAINING}:
-            symbol = await self.account.safety_symbols.get()
-            if "private" in self._stream_holds:
-                # Coordinator first verifies which pre-disconnect orders still
-                # exist. Cancel-on-disconnect may already have removed them.
+        workers: dict[str, asyncio.Task[None]] = {}
+        try:
+            while self.gate.state in {EngineState.QUOTING, EngineState.DRAINING}:
+                for symbol, task in tuple(workers.items()):
+                    if task.done():
+                        task.result()  # Unknown cancellation must never be swallowed.
+                        workers.pop(symbol)
+                try:
+                    symbol = await asyncio.wait_for(self.account.safety_symbols.get(), .1)
+                except TimeoutError:
+                    continue
                 self.account.safety_symbols.task_done()
-                continue
-            while self._stream_holds and "private" not in self._stream_ready:
-                self._check_stream_recovery()
-                await asyncio.sleep(.1)
-            async with self._lifecycle_lock:
+                if "private" in self._stream_holds or "private" not in self._stream_ready:
+                    # Recovery owns pre-disconnect terminal proof/cancellation.
+                    continue
+                if symbol not in workers:
+                    if len(workers) >= 64:
+                        raise RuntimeError("fill cancellation worker bound exceeded")
+                    # No lifecycle lock: a blocked fill cannot add risk, and
+                    # per-order cancellation already has one deduplicated owner.
+                    workers[symbol] = asyncio.create_task(
+                        self._cancel_fill_entries_if_blocked(symbol), name="gemini-fill-cancel",
+                    )
+        finally:
+            for task in workers.values():
+                task.cancel()
+            await asyncio.gather(*workers.values(), return_exceptions=True)
+
+    async def _cancel_fill_entries_if_blocked(self, symbol: str) -> None:
+        # A queued notification may outlive exact flat cleanup. Do not cancel
+        # a newly eligible pair because of an obsolete fill notification.
+        if (symbol in self.account.blocked_entries and "private" not in self._stream_holds
+                and "private" in self._stream_ready):
+            await self._cancel_symbol_entries(symbol)
+
+    def _isolated_exit_proof_current(self, symbol: str) -> bool:
+        wait = self._exit_waits.get(symbol)
+        return bool(
+            self._continuous_service and wait is not None and wait.residual
+            and 0 <= time.monotonic() - wait.proved_at <= 60
+            and wait.fill_version == self.account.fill_version
+            and wait.generation == (self._stream_generation["public"], self._stream_generation["private"])
+            and not self._stream_holds and self.account.snapshots_fresh
+            and self.account.equity_classification_complete
+            and self.account.reducer.positions.get(symbol) == wait.residual
+            and symbol not in self._exit_workers and symbol not in self._exit_uncertain
+            and not self.journal.has_nonterminal_intents(symbol)
+            and not any(o.working and o.symbol == symbol for o in self.account.reducer.orders.values())
+        )
+
+    async def _exit_account_snapshot(self, symbol: str) -> AccountSnapshot:
+        """Read-only bracket. A fill/generation change invalidates this proof."""
+        if (self._stream_holds or not self.account.snapshots_fresh
+                or not self.account.equity_classification_complete):
+            raise ExitDeferred("account_proof_pending")
+        version, generation = self.account.fill_version, dict(self._stream_generation)
+        snapshot = build_account_snapshot(
+            await self.rest.positions(),
+            await self.rest.active_orders(),
+        )
+        for order in snapshot.active_orders:
+            if not order.client_order_id or not self.journal.knows_client_order_id(order.client_order_id):
+                raise RuntimeError("exit proof found an unowned active order")
+        if (version != self.account.fill_version or generation != self._stream_generation
+                or self._stream_holds or not self.account.snapshots_fresh
+                or not self.account.equity_classification_complete):
+            raise ExitDeferred("account_proof_changed")
+        rest_positions = snapshot.signed_positions
+        ws_positions = self.account.reducer.positions
+        differences = {s for s in set(rest_positions) | set(ws_positions)
+                       if rest_positions.get(s, Decimal(0)) != ws_positions.get(s, Decimal(0))}
+        if differences == {symbol}:
+            # Normal fill/exit publication can briefly lag on REST. No mutation
+            # or entry proof is allowed during this bounded convergence wait.
+            started = self._position_proof_wait_started.setdefault(symbol, time.monotonic())
+            if time.monotonic() - started <= 10:
+                raise ExitDeferred("position_proof_pending")
+        assert_position_consistency(snapshot, ws_positions)
+        self._position_proof_wait_started.pop(symbol, None)
+        if any(order.symbol == symbol for order in snapshot.active_orders):
+            raise ExitDeferred("working_order_proof_pending")
+        if (self.journal.has_nonterminal_intents(symbol)
+                or any(o.working and o.symbol == symbol for o in self.account.reducer.orders.values())):
+            raise ExitDeferred("terminal_intent_proof_pending")
+        return snapshot
+
+    async def _complete_flat_fill(self, symbol: str) -> bool:
+        if symbol in self._exit_uncertain or self.journal.pending_exit(symbol):
+            raise RuntimeError("flat lifecycle still has an uncertain exit")
+        snapshot = await self._exit_account_snapshot(symbol)
+        if snapshot.signed_positions.get(symbol, Decimal(0)):
+            return False
+        # No await between fresh proof and this atomic cleanup. Never adopt
+        # manual cash, fabricate fills or clear an independent lifecycle hold.
+        with self.journal.transaction():
+            for outcome in ("YES", "NO"):
+                self.journal.clear_deadline(symbol, outcome)
+            self.journal.audit("fill_lifecycle_flat", {"symbol": symbol})
+        self.account.release_fill_block(symbol)
+        self._exit_waits.pop(symbol, None)
+        self._exit_residual_limits.pop(symbol, None)
+        return True
+
+    async def _run_exit_worker(self, symbol: str) -> None:
+        previous = self._exit_waits.get(symbol)
+        try:
+            if not self.account.reducer.positions.get(symbol):
                 await self._cancel_symbol_entries(symbol)
-            self.account.safety_symbols.task_done()
+                if not await self._complete_flat_fill(symbol):
+                    raise ExitDeferred("position_changed_during_flat_proof")
+            else:
+                await self._exit_due_positions_locked(symbol_filter=symbol, scoped=True)
+        except Exception as exc:
+            # Only explicitly no-send/terminal scheduling waits and read errors
+            # qualify. Unknown mutation outcomes and integrity failures escape.
+            if not isinstance(exc, ExitDeferred) and not (
+                isinstance(exc, (ApiError, TimeoutError)) and transient_failure(exc)
+            ):
+                raise
+            if (symbol in self._exit_uncertain or self.journal.pending_exit(symbol)
+                    or self.journal.has_nonterminal_intents(symbol)):
+                raise
+            rounds = 1 if previous is None else previous.rounds + 1
+            delay = max(min(5 * 2 ** min(rounds - 1, 4), 60), retry_after_seconds(exc))
+            reason = str(exc) if isinstance(exc, ExitDeferred) else "transient_account_read"
+            if reason == "position_proof_pending":
+                delay = 2
+            # Proof is renewed below only on known depth/round boundaries;
+            # stale/mismatched account proof never licenses unrelated entries.
+            proven = isinstance(exc, ExitDeferred) and reason in {
+                "exit_book_unavailable", "exit_depth_unavailable", "exit_round_exhausted",
+            } and self.account.snapshots_fresh and self.account.equity_classification_complete
+            residual = self.account.reducer.positions.get(symbol) if proven else self._exit_residual_limits.get(symbol)
+            self._exit_waits[symbol] = ExitWait(
+                reason, time.monotonic() + delay, rounds, residual,
+                time.monotonic() if proven else 0, self.account.fill_version if proven else -1,
+                (self._stream_generation["public"], self._stream_generation["private"]),
+            )
+            self.log.event(logging.WARNING, "market_exit_wait", symbol=symbol,
+                           reason=reason, retry_seconds=delay, rounds=rounds,
+                           original_deadline_preserved=True)
+        finally:
+            self._exit_round_deadlines.pop(symbol, None)
+
+    def _schedule_exit_workers(self) -> None:
+        for symbol, task in tuple(self._exit_workers.items()):
+            if task.done():
+                task.result()
+                self._exit_workers.pop(symbol)
+        if self.gate.state is not EngineState.QUOTING or self._stream_holds:
+            return
+        symbols = set(self.account.reducer.positions) | self.account.fill_blocked_entries
+        for symbol in sorted(symbols):
+            if symbol in self._exit_workers:
+                continue
+            wait = self._exit_waits.get(symbol)
+            if wait is not None and time.monotonic() < wait.retry_at:
+                continue
+            signed = self.account.reducer.positions.get(symbol, Decimal(0))
+            if signed:
+                deadline = self.journal.get_deadline(symbol, "YES" if signed > 0 else "NO")
+                if deadline is None:
+                    raise RuntimeError("inventory has no proven fill deadline")
+                deadline = min(deadline, self.account.hard_exit_cutoff.get(symbol, deadline))
+                if _utc_now() < deadline:
+                    continue
+            if len(self._exit_workers) >= self.config.risk.max_tracked_markets:
+                raise RuntimeError("exit worker owner bound exceeded")
+            self.account.block_entries(symbol, fill=True)
+            self._exit_workers[symbol] = asyncio.create_task(
+                self._run_exit_worker(symbol), name="gemini-market-exit",
+            )
 
     async def _exit_due_positions(self, *, force: bool = False) -> None:
+        if self._continuous_service and not force:
+            self._schedule_exit_workers()
+            return
         async with self._lifecycle_lock:
             await self._exit_due_positions_locked(force=force)
 
-    async def _exit_due_positions_locked(self, *, force: bool = False) -> None:
+    async def _exit_due_positions_locked(
+        self, *, force: bool = False, symbol_filter: str | None = None, scoped: bool = False,
+    ) -> None:
         for symbol, signed in tuple(self.account.reducer.positions.items()):
-            if signed == 0:
+            if signed == 0 or (symbol_filter is not None and symbol != symbol_filter):
                 continue
             outcome = Outcome.YES if signed > 0 else Outcome.NO
             deadline = self.journal.get_deadline(symbol, outcome.value)
             if not force and deadline is None:
+                if scoped:
+                    raise RuntimeError("inventory has no proven fill deadline")
                 self.gate.halt()
                 self._write_status("halted", False, "inventory has no proven fill deadline")
                 return
@@ -1665,27 +1847,49 @@ class ProductionOrchestrator:
                 # Never extend the original deadline or use stale executable
                 # depth. Service this overdue exit as soon as exact state returns.
                 continue
+            if symbol in self._exit_rejected:
+                raise RuntimeError("prior exit rejected; automatic retry prohibited")
             if symbol in self._exit_uncertain or self.journal.pending_exit(symbol):
                 raise TimeoutError("prior exit still requires terminal reconciliation; retry prohibited")
-            self.account.blocked_entries.add(symbol)
+            self.account.block_entries(symbol, fill=True)
             await self._cancel_symbol_entries(symbol)
-            snapshot = build_account_snapshot(await self.rest.positions(), [])
+            snapshot = await self._exit_account_snapshot(symbol) if scoped else build_account_snapshot(await self.rest.positions(), [])
             assert_position_consistency(snapshot, self.account.reducer.positions)
             signed = snapshot.signed_positions.get(symbol, Decimal("0"))
             if not signed:
+                if scoped:
+                    await self._complete_flat_fill(symbol)
                 continue
+            limit = self._exit_residual_limits.get(symbol) if scoped else None
+            if limit is not None and (
+                (signed > 0) != (limit > 0) or abs(signed) > abs(limit)
+            ):
+                raise RuntimeError("exit residual increased or reversed between rounds")
+            if scoped:
+                self._exit_residual_limits[symbol] = signed
             exit_started_at = asyncio.get_running_loop().time()
+            if scoped:
+                self._exit_round_deadlines[symbol] = time.monotonic() + 30
             attempt = 0
             while signed:
                 if attempt >= 3 or asyncio.get_running_loop().time() - exit_started_at >= 30:
+                    if scoped:
+                        raise ExitDeferred("exit_round_exhausted")
                     raise RuntimeError("exact IOC exit exhausted its bounded retry authority")
                 if symbol in self._exit_uncertain or self.journal.pending_exit(symbol):
                     raise TimeoutError("prior exit still requires terminal reconciliation; retry prohibited")
                 book = self.public.books.get(symbol)
+                if scoped and (self._stream_holds or not self.account.snapshots_fresh
+                        or not self.account.equity_classification_complete):
+                    raise ExitDeferred("account_proof_pending")
                 if not self._book_fresh(symbol):
+                    if scoped:
+                        raise ExitDeferred("exit_book_unavailable")
                     raise RuntimeError("exit book is stale or unsynchronized")
                 leg = exact_crossing_exit(book, signed) if book is not None else None
                 if leg is None:
+                    if scoped:
+                        raise ExitDeferred("exit_depth_unavailable")
                     raise RuntimeError("fresh full depth cannot support an exact position exit")
 
                 submitted_signed = signed
@@ -1784,6 +1988,7 @@ class ProductionOrchestrator:
                         signed = Decimal("0")
                         break
                     if terminal and order is not None and order.status == "REJECTED":
+                        self._exit_rejected.add(symbol)
                         raise RuntimeError("exact IOC exit was rejected; automatic retry prohibited")
                     if (
                         terminal
@@ -1799,6 +2004,8 @@ class ProductionOrchestrator:
                         # and the exact residual agree across REST and the
                         # authenticated WebSocket, a new exact reducer is safe.
                         retry_residual = rest_signed
+                        if scoped:
+                            self._exit_residual_limits[symbol] = rest_signed
                         self.journal.audit("exit_ioc_terminal_residual", {
                             "symbol": symbol,
                             "attempt": attempt,
@@ -1826,12 +2033,17 @@ class ProductionOrchestrator:
                 if retry_residual is None:
                     raise RuntimeError("exact IOC exit residual state is unavailable")
                 if attempt >= 3 or asyncio.get_running_loop().time() - exit_started_at >= 30:
+                    if scoped:
+                        raise ExitDeferred("exit_round_exhausted")
                     raise RuntimeError("exact IOC exit exhausted its bounded retry authority")
                 signed = retry_residual
                 await asyncio.sleep(min(2 ** (attempt - 1), 5))
-            self.journal.clear_deadline(symbol, outcome.value)
             self._exit_uncertain.discard(symbol)
-            self.account.blocked_entries.discard(symbol)
+            if scoped:
+                await self._complete_flat_fill(symbol)
+            else:
+                self.journal.clear_deadline(symbol, outcome.value)
+                self.account.release_fill_block(symbol)
 
     async def _risk_mark(self) -> int:
         self._risk_read_verified = False
@@ -2004,7 +2216,7 @@ class ProductionOrchestrator:
         for item in self.universe:
             reward = active_rows.get(item.event_ticker)
             if reward is None:
-                self.account.blocked_entries.add(item.rules.symbol)
+                self.account.block_entries(item.rules.symbol)
                 refreshed.append(replace(item, pool=replace(item.pool, active=False)))
                 continue
             current = join_reward_contracts([reward], {item.event_ticker: await self.rest.event(item.event_ticker)})
@@ -2024,7 +2236,7 @@ class ProductionOrchestrator:
                         )
                     ))
             if invalid:
-                self.account.blocked_entries.add(item.rules.symbol)
+                self.account.block_entries(item.rules.symbol)
                 refreshed.append(replace(item, pool=replace(item.pool, active=False)))
                 continue
             refreshed.append(chosen)
@@ -2419,6 +2631,11 @@ class ProductionOrchestrator:
 
     async def drain(self) -> None:
         self.gate.state = EngineState.DRAINING
+        # Existing owners finish their bounded in-flight round before forced
+        # drain may submit anything. Never cancel an ACK waiter then duplicate
+        # its still-unknown order. No new workers launch in DRAINING.
+        await asyncio.gather(*self._exit_workers.values(), return_exceptions=True)
+        self._exit_workers.clear()
         for order in build_account_snapshot([], await self.rest.active_orders()).active_orders:
             if not order.client_order_id or not self.journal.knows_client_order_id(order.client_order_id):
                 raise RuntimeError("drain found an unowned active order")
@@ -2546,6 +2763,10 @@ class ProductionOrchestrator:
         if self._closed:
             return
         self._closed = True
+        for task in self._exit_workers.values():
+            task.cancel()
+        await asyncio.gather(*self._exit_workers.values(), return_exceptions=True)
+        self._exit_workers.clear()
         self.log.event(logging.INFO, "runner_closing", phase=self.gate.state.value,
                        account_flat_verified=False, reason="closing local resources; not venue flatness proof")
         recovery_tasks = list(self._stream_restarts.values())

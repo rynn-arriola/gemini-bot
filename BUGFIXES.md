@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 15, 2026 — fill/exit continuity (source only, no restart)
+
+V7 uses independent market exit owners and paced additional rounds only after known-terminal, fresh exact residual proof. Known thin/stale exit books and exhausted rounds no longer inherently drain unrelated markets. Fill cancellation bypasses unrelated lifecycle/exit waits while retaining the existing per-order deduplicated mutation owner. Exact flat proof atomically clears both completed outcome deadlines and only the fill hold, fixing net-flat paired fills and flat-during-cancel. Startup reconstructs those holds from durable deadlines.
+
+Final flow review also added bounded same-symbol REST/WS convergence, obsolete fill-notification refusal, post-pacing round-deadline checks and a rejected-exit latch that emergency drain cannot bypass. Unknown mutations/cancellation/ownership, persistent accounting disagreement and integrity failures remain fail-closed. Stop/HARD joins existing workers before bounded forced drain; no automatic HARD reset. **394 production + 28 script tests passed**, with 45 new cases, three deliberate reversals and offline compilation/release verification. No live deployment or live acceptance. [Scope, reward impact and limitations](docs/FILL_CONTINUITY_2026-09-15.md).
+
 ## September 15, 2026 — continuous service and resting-time protection (not deployed)
 
 Normal maintenance previously replaced an entire working pair on any target-price difference. V7 retains intact pairs that are still fresh, safely priced, qualifying and profitable under the existing model evaluated at actual resting prices. It still cancels unsafe/partial/ineligible pairs and places replacements at the exact two-tick target. This reduces avoidable gaps without promising improved rewards; wider retained prices can score less.

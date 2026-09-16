@@ -61,7 +61,9 @@ class AccountRuntime:
         self.exit_before_expiry_seconds = 300
         self.expiry: dict[str, datetime] = {}
         self.hard_exit_cutoff: dict[str, datetime] = {}
-        self.blocked_entries: set[str] = set()
+        self.fill_blocked_entries: set[str] = journal.deadline_symbols()
+        self.other_entry_blocks: set[str] = set()
+        self.blocked_entries: set[str] = set(self.fill_blocked_entries)
         self.changed = asyncio.Event()
         self.fill_version = 0
         self.event_sink: Callable[[str, dict[str, object]], None] | None = None
@@ -77,6 +79,15 @@ class AccountRuntime:
             self.balances_seen,
             self.positions_seen,
         )
+
+    def block_entries(self, symbol: str, *, fill: bool = False) -> None:
+        (self.fill_blocked_entries if fill else self.other_entry_blocks).add(symbol)
+        self.blocked_entries.add(symbol)
+
+    def release_fill_block(self, symbol: str) -> None:
+        self.fill_blocked_entries.discard(symbol)
+        if symbol not in self.other_entry_blocks:
+            self.blocked_entries.discard(symbol)
 
     @property
     def equity_classification_complete(self) -> bool:
@@ -142,6 +153,8 @@ class AccountRuntime:
         self.expected_positions = {}
         self.expected_confirmed_usd = self.confirmed_usd
         self.blocked_entries.clear()
+        self.fill_blocked_entries.clear()
+        self.other_entry_blocks.clear()
 
     def reconcile_authenticated_cash_adjustments(
         self,
@@ -244,7 +257,7 @@ class AccountRuntime:
                     self.reducer.orders[order.order_id] = previous_order
                 raise
             if recorded and transition.cancel_other_entry_orders:
-                self.blocked_entries.add(order.symbol)
+                self.block_entries(order.symbol, fill=True)
                 try:
                     self.safety_symbols.put_nowait(order.symbol)
                 except asyncio.QueueFull as exc:

@@ -1,5 +1,7 @@
 # Fill-flow audit — September 15, 2026
 
+Follow-up: owner subsequently approved the recommendations. [Fill continuity implementation](FILL_CONTINUITY_2026-09-15.md) records the source-only repairs and verification. The findings below describe the audited pre-repair build and remain historical evidence, not the latest implementation state.
+
 ## Scope and conclusion
 
 Owner requested investigation of stops after fills, with Polymarket as a
