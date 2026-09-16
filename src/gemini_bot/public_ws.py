@@ -106,6 +106,8 @@ class PublicMarketSocket:
                 raise ConnectionError("public WebSocket is not connected")
             pong = await connection.ping()
             latency = await asyncio.wait_for(pong, timeout=timeout)
+            if self._connection is not connection:
+                raise ConnectionError('public socket changed during ping')
             self.note_message()
             return float(latency)
 

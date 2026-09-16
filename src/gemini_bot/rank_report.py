@@ -26,7 +26,7 @@ def rank_live_universe(
     offset_ticks: int,
     uptime: dict[str, UptimeProgress] | None = None,
     account: AccountReducer | None = None,
-    market_data_verified_at: datetime | None = None,
+    market_data_verified_at: datetime | dict[str, datetime | None] | None = None,
     profitability: ProfitabilityTracker | None = None,
     target_uptime: Decimal = Decimal(".75"),
     maker_rebate_fractions: dict[str, Decimal] | None = None,
@@ -53,12 +53,16 @@ def rank_live_universe(
         top = book.top() if book is not None else None
         if top is None:
             continue
-        if market_data_verified_at is not None:
+        verified_at = (market_data_verified_at.get(contract.rules.symbol)
+                       if isinstance(market_data_verified_at, dict) else market_data_verified_at)
+        if isinstance(market_data_verified_at, dict) and verified_at is None:
+            continue  # Another shard's traffic cannot freshen this book.
+        if verified_at is not None:
             # The book's levels may be unchanged while another message on the
             # same gap-checked WebSocket proves connection continuity.
             top = type(top)(
                 top.symbol, top.bid, top.bid_size, top.ask, top.ask_size,
-                top.update_id, market_data_verified_at,
+                top.update_id, verified_at,
             )
         evidence = ProfitabilityEvidence()
         if profitability is not None:

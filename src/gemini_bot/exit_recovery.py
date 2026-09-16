@@ -15,4 +15,4 @@ class ExitWait:
     residual: Decimal | None = None
     proved_at: float = 0.0
     fill_version: int = -1
-    generation: tuple[int, int] = (-1, -1)
+    generation: tuple[int | tuple[int, int], int] = (-1, -1)

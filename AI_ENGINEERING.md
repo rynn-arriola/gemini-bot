@@ -4,7 +4,7 @@
 
 - Keep domain decisions pure and transport-independent. Network adapters convert venue messages into typed domain state.
 - One mutation owner controls order intents. Record an intent before sending; after any attempted send, treat the outcome as unknown until reconciled.
-- Use one public market-data WebSocket and one authenticated account/execution WebSocket by default. Add connections only from measured capacity evidence, never as quota evasion.
+- Owner-approved September 16 architecture uses five public market-data shards and one authenticated account/execution WebSocket. This is failure isolation, not increased order quota. Keep one mutation owner and one shared rate authority; add further connections only from measured capacity evidence and explicit scope review, never as quota evasion. The one-public adapter remains for legacy/offline regression coverage.
 - Maintain one shared rate authority across all adapters. Emergency cancellation has scheduling priority but never bypasses an explicit server cooldown.
 - Do not silently turn a WebSocket outage into high-frequency REST polling. Mark state stale, cancel/suspend risk safely, and use bounded REST reconciliation.
 - Reward budgets are keyed by unique pool identity. Multiple contracts sharing a pool never multiply its advertised budget.

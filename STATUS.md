@@ -1,21 +1,23 @@
 # Gemini current status
 
-Updated September 16, 2026, 07:23 ET. Current handoff, not a perpetual venue-state guarantee.
+Updated September 16, 2026, 07:44 ET. Current handoff, not a perpetual venue-state guarantee.
 
 ## Operational truth
 
 - **The bot is stopped, not restarted.** V11 (`data/production-20260916-churn-v11`, previously source `87fab92`) halted at 02:02:49 ET after both sockets received service-restart closes and a private handshake EOF was treated as fatal. Emergency cancellation could not send over the disconnected socket. The old supervisor and temporary exit helper have exited; no new live permit was issued.
 - The incident's surviving owned entries were canceled earlier. At **07:23:01 ET**, a fresh authenticated read found **one position and one active order**; this supersedes the earlier order-free proof. No order was changed by this final read. The temporary helper had observed no executable NO-side bid and sent no exit; it is no longer monitoring.
 - Exact authenticated trade IDs and fees repaired the missed executions and identified the external close. **Positions match, but a sub-cent cash discrepancy remains unresolved.** Rounding to cents happens to match; that is not authoritative evidence for a rounding rule. Exact cash classification remains blocked. No tolerance, baseline reset, loss reset or activation bypass was introduced.
-- The recovery repairs below are source changes, **not a deployed or naturally accepted release**. Earlier v11 startup and midnight/churn observations remain historical, not current availability claims. No risk/size/breadth/exit-rule or normal 50% admission relaxation; recovery gaps receive no reward credit.
+- The recovery/sharding source is installed in the local checkout used by the existing editable runtime, **not activated or naturally accepted in live trading**. Verified imports resolve to this workspace. Earlier v11 startup and midnight/churn observations remain historical, not current availability claims. No risk/size/breadth/exit-rule or normal 50% admission relaxation; recovery gaps receive no reward credit.
 
 ## Verified release and limits
 
-- **479 production + 28 script tests = 507 passed.** Compilation and offline Windows release checks passed. No induced live faults/fills or new deployment.
+- **507 production + 28 script tests = 535 passed.** Compilation and offline Windows release checks passed. Two deliberate in-memory safety reversals were caught. No induced live faults/fills or activation.
 - Source repairs: typed handshake-EOF recovery, bounded drain transport restoration, exact missed-fill reconstruction, explicit external-reduction reconciliation, and attempt-bound supervisor preparation results.
 - Offline no-buyer regression retains original inventory deadlines, blocks new exposure on the affected symbol, and waits for fresh executable liquidity in the same runner. Unknown sends/accounting still fail closed; missing bids never prove flat. [Maintenance incident and repair evidence](docs/MAINTENANCE_RECOVERY_2026-09-16.md).
+- Five-public/one-private implementation passed 28 dedicated offline cases plus a real **read-only six-connection smoke**: five synchronized books, authenticated account snapshots, zero new order intents, cancel-on-disconnect disabled. Known public transport failures are shard-scoped; private/account/integrity failures remain global. Known v7 startup inventory retains its original scoped exit wait instead of requiring an immediate pre-loop fill. [Design and verification](docs/WEBSOCKET_SHARDING_DESIGN_2026-09-16.md).
+- The separate authenticated USD balance endpoint reproduced the sub-cent discrepancy with no pending deposit/withdrawal; cash-out history supplied no corroborating rows. No guessed cent-rounding rule was added. A later read still found one position and one active order. No trading/helper/supervisor process was present at the 07:44 ET process check.
 - Authenticated reward-summary calibration remains pending. Local clock/continuity estimates never prove exchange snapshots or rewards. The earlier unexplained process disappearance remains unproven; no host-crash recovery guarantee.
 
 ## Operator route
 
-Resolve the cash discrepancy from authoritative evidence before live readiness can pass; current external-order state must also be reconciled. Owner requested a six-WebSocket recommendation: proposed five public shards plus one private account connection, not implemented or approved for deployment. [NEXT.md](NEXT.md) lists pending work and [DECISIONS.md](DECISIONS.md) retains unchanged strategy/risk authority.
+Final read-only `prepare-live` in `data/six-socket-final-readiness-20260916` stopped at **an unowned active order blocks production startup**. The external order must be handled by its owner and reconciled; the unexplained cash difference also remains a blocker. Source is installed but the bot is **not restart-ready**. No fresh live permit was issued. [NEXT.md](NEXT.md) lists pending work and [DECISIONS.md](DECISIONS.md) retains unchanged strategy/risk authority.

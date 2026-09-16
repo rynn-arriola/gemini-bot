@@ -211,7 +211,7 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         strategy, risk = load_policy()
-        self.runtime = ProductionOrchestrator(LiveConfig("account-fake", "fake-secret", "", True, strategy, risk), Path(self.tmp.name))
+        self.runtime = ProductionOrchestrator(LiveConfig("account-fake", "fake-secret", "", True, strategy, risk), Path(self.tmp.name), public_shard_count=1)
         self.runtime.control_directory = Path(self.tmp.name) / "isolated-control"
         self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")
         self.runtime.public.books["X"] = book()

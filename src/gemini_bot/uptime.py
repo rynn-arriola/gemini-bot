@@ -117,10 +117,12 @@ def locally_qualifying(
     book: LocalBook | None = None,
     *,
     now: datetime | None = None,
-    market_data_verified_at: datetime | None = None,
+    market_data_verified_at: datetime | dict[str, datetime | None] | None = None,
     minimum_sides: int = 1,
 ) -> bool:
-    freshness_at = market_data_verified_at or (book.observed_at if book is not None else None)
+    freshness_at = (market_data_verified_at.get(contract.rules.symbol)
+                    if isinstance(market_data_verified_at, dict)
+                    else market_data_verified_at or (book.observed_at if book is not None else None))
     if (book is None or not book.synchronized or book.top() is None or now is None
             or freshness_at is None or not 0 <= (now - freshness_at).total_seconds() <= 3
             or not contract.pool.active or not contract.rules.active or contract.rules.post_only_mode):
@@ -145,7 +147,7 @@ def sample_and_load_progress(
     *,
     now: datetime,
     books: dict[str, LocalBook] | None = None,
-    market_data_verified_at: datetime | None = None,
+    market_data_verified_at: datetime | dict[str, datetime | None] | None = None,
     exit_before_expiry_seconds: int = 300,
     sports_exit_before_start_seconds: int = 1200,
 ) -> dict[str, UptimeProgress]:

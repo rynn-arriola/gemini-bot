@@ -73,6 +73,7 @@ from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_i
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
 from .trade_recovery import import_terminal_trades, timestamp as history_timestamp
+from .public_shards import PublicMarketShards, ShardEvent, PUBLIC_SHARD_COUNT
 
 
 _UPTIME_PROXY_REJECTION = "50% uptime is no longer reachable in the estimated window"
@@ -107,7 +108,7 @@ class MakerPairGuard:
     first_server_id: str
     first_leg: QuoteLeg
     second_leg: QuoteLeg
-    public_generation: int
+    public_generation: int | tuple[int, int]
     private_generation: int
 
 
@@ -118,7 +119,8 @@ class ProductionOrchestrator:
     mutation path cannot be entered without a valid one-use activation permit.
     """
 
-    def __init__(self, config: LiveConfig, directory: Path, *, read_only: bool = False) -> None:
+    def __init__(self, config: LiveConfig, directory: Path, *, read_only: bool = False,
+                 public_shard_count: int = PUBLIC_SHARD_COUNT) -> None:
         self.config = config
         self.read_only = read_only
         self.directory = directory.resolve()
@@ -139,7 +141,8 @@ class ProductionOrchestrator:
         self.rest = GeminiReadRestClient(
             self.governor, api_key=config.api_key, api_secret=config.api_secret
         )
-        self.public = PublicMarketSocket(self.governor)
+        self.public = (PublicMarketSocket(self.governor) if public_shard_count == 1
+                       else PublicMarketShards(self.governor, count=public_shard_count))
         self.private = LiveWebSocket(
             config.api_key, config.api_secret, self.governor, self.ledger,
             read_only=read_only, cancel_on_disconnect=not read_only,
@@ -200,6 +203,8 @@ class ProductionOrchestrator:
         self._read_recovery_attempts: dict[str, int] = {}
         self._risk_read_verified = False
         self._stream_holds: set[str] = set()
+        self._shard_restarts: dict[int, asyncio.Task[None]] = {}
+        self._shard_attempts: dict[int, int] = {}
         self._stream_restarts: dict[str, asyncio.Task[None]] = {}
         self._stream_recovery_task: asyncio.Task[None] | None = None
         self._stream_recovery_started = 0.0
@@ -254,6 +259,8 @@ class ProductionOrchestrator:
             ), "exchange_reward_uptime": self.exchange_reward_uptime.metadata(now=_utc_now()),
              "entry_read_holds": sorted(self._read_recovery_attempts),
              "stream_recovery_holds": sorted(self._stream_holds),
+             "public_shards": self.public.status() if isinstance(self.public, PublicMarketShards) else [],
+             "public_shard_reconnect_attempts": dict(self._shard_attempts),
              "session_expires_at": self._permit_expires_at.isoformat() if self._permit_expires_at else None,
              "uptime_override_active": self._override_active(),
              "uptime_override_until": self._uptime_override_until.isoformat() if self._uptime_override_until else None,
@@ -384,8 +391,108 @@ class ProductionOrchestrator:
                     and now >= self._uptime_override_until))
 
     def _check_stream_recovery(self) -> None:
+        for shard, task in tuple(self._shard_restarts.items()):
+            if task.done():
+                task.result()
+                self._shard_restarts.pop(shard)
         if self._stream_recovery_task is not None and self._stream_recovery_task.done():
             self._stream_recovery_task.result()
+
+    def _public_generation(self, symbol: str):
+        if isinstance(self.public, PublicMarketShards):
+            return (self._stream_generation['public'], self.public.generation(symbol))
+        return self._stream_generation['public']
+
+    def _public_shard_held(self, symbol: str) -> bool:
+        return (isinstance(self.public, PublicMarketShards)
+                and self.public.assignments.get(symbol) in self.public.held)
+
+    def _save_shard_assignments(self) -> None:
+        if isinstance(self.public, PublicMarketShards):
+            self.journal.set_runtime_state('public_shards_v1', json.dumps(self.public.assignments, sort_keys=True), updated_at=_utc_now())
+
+    def _begin_shard_recovery(self, event: ShardEvent) -> None:
+        if not isinstance(self.public, PublicMarketShards) or not self.public.accepts(event):
+            return
+        if self.gate.state is not EngineState.QUOTING or self._recovery_stop_requested():
+            raise RuntimeError('public shard loss outside active session') from event.error
+        if self.journal.unresolved_ids():
+            raise RuntimeError('shard loss during unknown mutation requires reconciliation') from event.error
+        self.public.invalidate(event.shard)
+        task = self._shard_restarts.get(event.shard)
+        if task is not None and not task.done():
+            return  # The owner observes the generation change and reconnects.
+        if task is not None:
+            task.result()
+        self._shard_attempts[event.shard] = 0
+        self.log.event(logging.WARNING, 'public_shard_paused', shard=event.shard,
+                       affected_symbols=list(self.public.symbols(event.shard)), other_shards_preserved=True)
+        self._shard_restarts[event.shard] = asyncio.create_task(
+            self._recover_public_shard(event.shard), name=f'gemini-shard-recovery-{event.shard}',
+        )
+
+    async def _recover_public_shard(self, shard: int) -> None:
+        try:
+            while True:
+                if self._recovery_stop_requested():
+                    return  # Hold remains; drain never grants entry permission.
+                if self._stream_holds or not self.account.snapshots_fresh:
+                    await asyncio.sleep(.25)
+                    continue
+                symbols = self.public.symbols(shard)
+                for symbol in symbols:
+                    await self._cancel_symbol_entries(symbol)
+                self._shard_attempts[shard] += 1
+                if not self._continuous_service and self._shard_attempts[shard] > 3:
+                    raise RuntimeError('public shard retry budget exhausted')
+                generation = self.public.generations[shard]
+                try:
+                    async with asyncio.timeout(15):
+                        await self.public.reconnect(shard)
+                except Exception as exc:
+                    if not (transient_failure(exc) or isinstance(exc, OSError)):
+                        raise
+                    delay = retry_after_seconds(exc)
+                    if delay:
+                        self.governor.apply_server_cooldown('public_ws', delay)
+                    self.log.exception('public_shard_retry', ErrorClass.TRANSPORT, exc,
+                                       shard=shard, attempt=self._shard_attempts[shard])
+                    for _ in range(min(60, 2 ** min(self._shard_attempts[shard] - 1, 6))):
+                        if self._recovery_stop_requested():
+                            return
+                        await asyncio.sleep(1)
+                    continue
+                proof_started = time.monotonic()
+                while generation == self.public.generations[shard]:
+                    if self._recovery_stop_requested():
+                        return
+                    if self._stream_holds:
+                        proof_started = time.monotonic()
+                        await asyncio.sleep(.25)
+                        continue
+                    if time.monotonic() - proof_started >= 60:
+                        raise RuntimeError('public shard did not prove readiness within budget')
+                    observed = self.public.sockets[shard].last_message_at
+                    fresh = observed is not None and 0 <= (_utc_now() - observed).total_seconds() <= float(self.config.strategy.stale_book_seconds)
+                    if (fresh and all(self.public.books[s].synchronized for s in symbols)
+                            and not self._stream_holds and self.account.snapshots_fresh
+                            and self.account.equity_classification_complete
+                            and not self.journal.unresolved_ids()
+                            and not any(o.working and o.side is Side.BUY and o.symbol in symbols
+                                        for o in self.account.reducer.orders.values())):
+                        # Account socket never changed; terminal cancels and
+                        # exact classified live account state are mandatory.
+                        self.public.held.discard(shard)
+                        self.log.event(logging.INFO, 'public_shard_recovered', shard=shard,
+                                       other_shards_preserved=True)
+                        return
+                    await asyncio.sleep(.05)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.gate.halt()
+            self.log.exception('public_shard_recovery_failed', ErrorClass.TRANSPORT, exc, shard=shard)
+            raise
 
     async def _recover_stream(self, component: str, cause: BaseException, *, generation: int | None = None) -> None:
         if generation is not None and generation != self._stream_generation[component]:
@@ -442,7 +549,9 @@ class ProductionOrchestrator:
             if self._closed or (not for_drain and self._recovery_stop_requested()):
                 raise RuntimeError("stream recovery interrupted by stop or expiry")
             try:
-                async with asyncio.timeout(15):
+                budget = (15 * len(self.public.sockets)
+                          if component == 'public' and isinstance(self.public, PublicMarketShards) else 15)
+                async with asyncio.timeout(budget):
                     await transport.close()
                     if component == "public":
                         self.public.books = {item.rules.symbol: LocalBook(item.rules.symbol) for item in self.universe}
@@ -585,7 +694,8 @@ class ProductionOrchestrator:
                         # No await between the final authority check and resume.
                         if (generation != self._stream_generation or self._stream_ready != {"public", "private"}
                                 or (not self.universe and not self._continuous_service)
-                                or not all(self._book_fresh(item.rules.symbol) for item in self.universe)):
+                                or not all(self._book_fresh(item.rules.symbol) for item in self.universe
+                                           if not self._public_shard_held(item.rules.symbol))):
                             await asyncio.sleep(1)
                             continue
                         if self._recovery_stop_requested() or not self.account.snapshots_fresh or not self.account.equity_classification_complete:
@@ -707,13 +817,25 @@ class ProductionOrchestrator:
                     await self._recover_stream("public", ConnectionError("obsolete stream"), generation=generation)
                     frames, generation = self.public.frames(), self._stream_generation["public"]
                     continue
+                shard_event = frame if isinstance(frame, ShardEvent) else None
+                if shard_event is not None:
+                    if not self.public.accepts(shard_event):
+                        continue
+                    if shard_event.error is not None:
+                        if not (transient_failure(shard_event.error) or isinstance(shard_event.error, OSError)):
+                            raise shard_event.error
+                        self._begin_shard_recovery(shard_event)
+                        continue
+                    if not self.public.owns_frame(shard_event):
+                        continue
+                    frame = shard_event.frame or {}
                 observed_at = _utc_now()
                 if frame.get("e") == "contractStatus":
                     self._handle_contract_status(frame)
                 if (all(key in frame for key in ("s", "t", "p", "q", "m"))
                         and str(frame["s"]).upper() in self.public.books):
                     self.profitability.observe_trade(frame, observed_at=observed_at)
-                updated_symbol = self.public.apply_frame(frame)
+                updated_symbol = self.public.apply_frame(shard_event if shard_event is not None else frame)
                 if (
                     frame.get("e") == "depthUpdate"
                     and updated_symbol is not None
@@ -725,6 +847,10 @@ class ProductionOrchestrator:
                         self.profitability.observe_book(book, observed_at=observed_at)
                 self._mark_live_risk()
                 if updated_symbol is not None and updated_symbol in self.public.resync_required:
+                    if shard_event is not None:
+                        self._begin_shard_recovery(ShardEvent(shard_event.shard, shard_event.generation,
+                                                            error=ConnectionError('depth sequence gap')))
+                        continue
                     await self._recover_stream("public", ConnectionError("depth sequence gap"), generation=generation)
                     frames, generation = self.public.frames(), self._stream_generation["public"]
         except asyncio.CancelledError:
@@ -1141,6 +1267,10 @@ class ProductionOrchestrator:
                     "q": str(row.original_quantity), "z": str(row.remaining_quantity),
                     "p": str(row.price), "X": "OPEN",
                 })
+            if isinstance(self.public, PublicMarketShards):
+                self.public.restore_assignments(self.journal.get_runtime_state('public_shards_v1'))
+                current_symbols = {c.rules.symbol for c in self.universe}
+                self.public.assignments = {s: i for s, i in self.public.assignments.items() if s in current_symbols}
             await self.public.connect()
             await self.private.connect()
             self._tasks = [
@@ -1152,6 +1282,7 @@ class ProductionOrchestrator:
                     self._public_liveness_pump(), name="gemini-public-liveness",
                 ))
             await self.public.subscribe(tuple(item.rules.symbol for item in self.universe))
+            self._save_shard_assignments()
             await self.private.subscribe_account()
             await self._wait_ready(timeout)
 
@@ -1399,7 +1530,7 @@ class ProductionOrchestrator:
                         or first.remaining_quantity != pair.first_leg.quantity
                         or intent is None or intent.state is not IntentState.ACKNOWLEDGED
                         or intent.server_order_id != pair.first_server_id
-                        or self._stream_generation["public"] != pair.public_generation
+                        or self._public_generation(symbol) != pair.public_generation
                         or self._stream_generation["private"] != pair.private_generation
                         or params["eventOutcome"] != pair.second_leg.outcome.value
                         or Decimal(str(params["price"])) != pair.second_leg.price
@@ -1459,7 +1590,11 @@ class ProductionOrchestrator:
                     or params["eventOutcome"] != ("YES" if position > 0 else "NO")):
                 raise RuntimeError("position changed while waiting to send exact exit")
 
-    def _market_data_verified_at(self) -> datetime | None:
+    def _market_data_verified_at(self, symbol: str | None = None):
+        if isinstance(self.public, PublicMarketShards):
+            if symbol is not None:
+                return self.public.verified_at(symbol)
+            return {s: self.public.verified_at(s) for s in self.public.assignments}
         observed = getattr(self.public, "last_message_at", None)
         if observed is not None:
             return observed
@@ -1469,8 +1604,10 @@ class ProductionOrchestrator:
         values = [book.observed_at for book in self.public.books.values() if book.observed_at is not None]
         return max(values) if values else None
 
-    def _public_stream_fresh(self) -> bool:
-        observed = self._market_data_verified_at()
+    def _public_stream_fresh(self, symbol: str | None = None) -> bool:
+        if isinstance(self.public, PublicMarketShards) and symbol is None:
+            return bool(self.public.assignments) and all(self._public_stream_fresh(s) for s in self.public.assignments)
+        observed = self._market_data_verified_at(symbol)
         if observed is None:
             return False
         age = (_utc_now() - observed).total_seconds()
@@ -1478,7 +1615,7 @@ class ProductionOrchestrator:
 
     def _book_fresh(self, symbol: str) -> bool:
         book = self.public.books.get(symbol)
-        return bool(book is not None and book.synchronized and self._public_stream_fresh())
+        return bool(book is not None and book.synchronized and self._public_stream_fresh(symbol))
 
     def _candidate_actionable(self, candidate: Any) -> bool:
         """Allow only the uptime proxy to be ignored by explicit approval.
@@ -1577,6 +1714,7 @@ class ProductionOrchestrator:
         if not admission.allowed or available is None or candidate.quote.total_reservation_proxy_usd > available:
             return
         pair_generations = dict(self._stream_generation)
+        pair_public_generation = self._public_generation(candidate.symbol)
         first_id = await self.private.place_maker(candidate.quote.yes)
         await self.account.wait_for_order_event(first_id)
         first = self.ledger.get(first_id)
@@ -1612,7 +1750,7 @@ class ProductionOrchestrator:
         # Keep its exact identity/geometry bound through the final send guard.
         pair_guard = MakerPairGuard(
             first_id, first.server_order_id, candidate.quote.yes, candidate.quote.no,
-            pair_generations["public"], pair_generations["private"],
+            pair_public_generation, pair_generations["private"],
         )
         self._maker_pair_guards[candidate.symbol] = pair_guard
         try:
@@ -1702,7 +1840,7 @@ class ProductionOrchestrator:
             return None, "book_missing"
         if not book.synchronized:
             return None, "book_unsynchronized"
-        if not self._public_stream_fresh():
+        if not self._public_stream_fresh(symbol):
             return None, "market_stream_stale"
         if book.top() is None:
             return None, "public_book_one_sided"
@@ -1936,7 +2074,7 @@ class ProductionOrchestrator:
             self._continuous_service and wait is not None and wait.residual
             and 0 <= time.monotonic() - wait.proved_at <= 60
             and wait.fill_version == self.account.fill_version
-            and wait.generation == (self._stream_generation["public"], self._stream_generation["private"])
+            and wait.generation == (self._public_generation(symbol), self._stream_generation["private"])
             and not self._stream_holds and self.account.snapshots_fresh
             and self.account.equity_classification_complete
             and self.account.reducer.positions.get(symbol) == wait.residual
@@ -2033,7 +2171,7 @@ class ProductionOrchestrator:
             self._exit_waits[symbol] = ExitWait(
                 reason, time.monotonic() + delay, rounds, residual,
                 time.monotonic() if proven else 0, self.account.fill_version if proven else -1,
-                (self._stream_generation["public"], self._stream_generation["private"]),
+                (self._public_generation(symbol), self._stream_generation["private"]),
             )
             self.log.event(logging.WARNING, "market_exit_wait", symbol=symbol,
                            reason=reason, retry_seconds=delay, rounds=rounds,
@@ -2564,6 +2702,8 @@ class ProductionOrchestrator:
         """Replace only expired/inactive owners after terminal and flat proof."""
         if self._stream_holds or self._read_recovery_attempts or self._recovery_stop_requested():
             return
+        if isinstance(self.public, PublicMarketShards) and self.public.held:
+            return  # Do not move owners/subscriptions while a shard is recovering.
         retiring = [c for c in self.universe if not c.pool.active or not self._entry_time_valid(c.rules.symbol)]
         if not retiring and len(self.universe) >= self.config.risk.max_tracked_markets:
             return
@@ -2574,6 +2714,8 @@ class ProductionOrchestrator:
         )
         async with self._lifecycle_lock:
             if self._stream_holds or self._read_recovery_attempts or self._recovery_stop_requested():
+                return
+            if isinstance(self.public, PublicMarketShards) and self.public.held:
                 return
             removable = []
             for contract in retiring:
@@ -2646,6 +2788,7 @@ class ProductionOrchestrator:
             if additions:
                 await self.public.subscribe(tuple(c.rules.symbol for c in additions))
             if removable or additions:
+                self._save_shard_assignments()
                 self.journal.set_runtime_state("sticky_markets_v1", json.dumps(self._sticky_markets, sort_keys=True), updated_at=_utc_now())
                 self._reward_epoch = None  # New identities require freshly computed eligibility.
                 self.log.event(logging.INFO, "catalog_owners_refreshed", retired=len(removable), added=len(additions))
@@ -2731,10 +2874,11 @@ class ProductionOrchestrator:
         try:
             for order in self._last_snapshot.active_orders:
                 await self._cancel_order_and_confirm(order.order_id)
-            if self._last_snapshot.positions:
-                await self._exit_due_positions(force=True)
+            await self._prepare_activation_inventory()
             await self._risk_mark()
             self.gate.activate(True)
+            if self._continuous_service:
+                self._schedule_exit_workers()
             if commissioning_seconds is None:
                 self._reward_reporting_task = asyncio.create_task(
                     self._reward_reporting_loop(), name="gemini-reward-uptime-reporting",
@@ -2859,6 +3003,9 @@ class ProductionOrchestrator:
                         for symbol, quantity in self.account.reducer.positions.items()
                         if quantity != 0 and symbol in pool_by_symbol
                     }
+                    if isinstance(self.public, PublicMarketShards):
+                        locked_pools.update(pool for pool, (_, symbol) in self._sticky_markets.items()
+                                            if self.public.assignments.get(symbol) in self.public.held)
                     # Cohorts are sticky: live telemetry affects initial choice
                     # and replacement of unsafe/ineligible pools, but one noisy
                     # minute cannot churn otherwise healthy quotes and destroy
@@ -2925,9 +3072,41 @@ class ProductionOrchestrator:
                 safety.cancel()
                 await asyncio.gather(safety, return_exceptions=True)
 
+    async def _prepare_activation_inventory(self) -> None:
+        if not self._last_snapshot.positions and not self.account.reducer.positions:
+            return
+        if not self._continuous_service:
+            await self._exit_due_positions(force=True)
+            return
+        # A fresh authorized v7 run may inherit *known* inventory. Its normal
+        # scoped worker can wait for liquidity instead of failing startup.
+        if not self.account.snapshots_fresh or not self.account.equity_classification_complete:
+            raise RuntimeError('startup inventory is not exactly reconciled')
+        # Startup cancellations may themselves fill. Do not reuse the earlier
+        # prepare snapshot as if it described post-cancellation inventory.
+        version = self.account.fill_version
+        snapshot = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
+        if (snapshot.active_orders or version != self.account.fill_version
+                or not self.account.snapshots_fresh or not self.account.equity_classification_complete):
+            raise RuntimeError('startup inventory changed during authenticated proof')
+        assert_position_consistency(snapshot, self.account.reducer.positions)
+        for symbol, signed in self.account.reducer.positions.items():
+            if (symbol not in self._permitted_symbols or self.journal.pending_exit(symbol)
+                    or self.journal.has_nonterminal_intents(symbol)
+                    or self.journal.get_deadline(symbol, 'YES' if signed > 0 else 'NO') is None):
+                raise RuntimeError('startup inventory lacks safe original ownership/deadline')
+            self.account.block_entries(symbol, fill=True)
+        self._last_snapshot = snapshot
+
     async def drain(self) -> None:
         self.gate.state = EngineState.DRAINING
         async with asyncio.timeout(_DRAIN_SECONDS):
+            for task in self._shard_restarts.values():
+                task.cancel()
+            await asyncio.gather(*self._shard_restarts.values(), return_exceptions=True)
+            self._shard_restarts.clear()
+            if isinstance(self.public, PublicMarketShards) and self.public.held:
+                self._stream_holds.add('public')
             if self._stream_holds:
                 await self._restore_drain_streams()
             await self._drain_bounded()
@@ -3135,7 +3314,7 @@ class ProductionOrchestrator:
         self._exit_workers.clear()
         self.log.event(logging.INFO, "runner_closing", phase=self.gate.state.value,
                        account_flat_verified=False, reason="closing local resources; not venue flatness proof")
-        recovery_tasks = list(self._stream_restarts.values())
+        recovery_tasks = list(self._stream_restarts.values()) + list(self._shard_restarts.values())
         if self._stream_recovery_task is not None:
             recovery_tasks.append(self._stream_recovery_task)
         for task in recovery_tasks:

@@ -36,6 +36,7 @@ PRIVATE_READS = frozenset({
     "/v1/prediction-markets/maker-rebate/summary/total",
     "/v2/transfers",
     "/v1/mytrades",
+    "/v1/balances",
 })
 
 
@@ -251,6 +252,13 @@ class GeminiReadRestClient:
 
     async def terms_status(self) -> dict[str, Any]:
         return await self.private_read("/v1/prediction-markets/terms/status", method="GET")
+
+    async def account_balances(self) -> list[dict[str, Any]]:
+        """Bounded diagnostic ledger read; never substitutes for live WS proof."""
+        rows = await self._private_list_read('/v1/balances', {'showPendingBalances': True}, lane='private_rest')
+        if len(rows) > 1000 or any(not isinstance(row, dict) for row in rows):
+            raise ApiError(200, 'invalid_balances_shape')
+        return rows
 
     async def reward_config(self) -> dict[str, Any]:
         return await self.public_get("/v1/prediction-markets/liquidity-rewards/config")

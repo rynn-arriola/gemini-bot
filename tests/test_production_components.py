@@ -832,7 +832,7 @@ class OrchestratorWiringTests(unittest.IsolatedAsyncioTestCase):
             strategy, risk = load_policy()
             runtime = ProductionOrchestrator(
                 LiveConfig("account-example", "secret", "", True, strategy, risk),
-                Path(directory),
+                Path(directory), public_shard_count=1,
             )
 
             class Private:

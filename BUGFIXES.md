@@ -1,5 +1,12 @@
 # Bug fixes
 
+## September 16, 2026 — shard isolation and known-inventory startup
+
+- Five public shards now have independent book generation, liveness and recovery. A typed public outage/gap no longer requires canceling healthy groups; unknown/private/account failures still block globally. Shared quotas, cancellation priority, sticky reservations and late-frame rejection remain enforced.
+- Startup previously forced immediate liquidation before entering the continuous no-depth wait flow. A newly authorized v7 session can instead hand exactly reconciled inventory with original ownership/deadlines to the existing scoped worker. Legacy startup, unknown cash, missing deadline/ownership, pending reducers and HARD are not relaxed.
+- Quiet ping completion cannot freshen a replacement connection. Rank/uptime calculations use each symbol's own shard freshness. Private recovery does not wait on paused public shards that are themselves waiting on private reconciliation.
+- Offline tests and read-only six-connection smoke pass. Source is installed locally, not activated. Cash reconciliation remains unresolved; this is not a successful restart claim.
+
 ## September 16, 2026 — maintenance recovery and missing terminal execution evidence
 
 - Treat typed transport EOF inside the WebSocket handshake wrapper as retryable, not malformed complete protocol/authentication responses.

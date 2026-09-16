@@ -4,7 +4,11 @@ Implementation repair check, September 15, 2026: revalidated official streams, a
 
 Working reference for the Gemini liquidity-rewards bot. This document summarizes the official Gemini Prediction Markets REST and WebSocket APIs and links to the canonical specification for every surface.
 
-Last verified: **2026-09-15 (America/New_York)**
+Last verified: **2026-09-16 (America/New_York)** for the recovery/sharding addenda; earlier full reference scan September 15.
+
+September 16 six-connection smoke: five public sockets plus one read-only authenticated account socket connected successfully, with five synchronized books and account snapshots. Every socket learned live `conninfo` under one shared governor. This is observed acceptance, not a published universal maximum or permission to multiply request/order quotas. [Rate reference](https://developer.gemini.com/rate-limit).
+
+[Get Available Balances](https://developer.gemini.com/trading/rest-api/fund-management/get-available-balances), `POST /v1/balances`, is available as a bounded diagnostic read with pending-balance fields. The incident's REST and WS cash checks both disagree with exact reconstructed cash by a sub-cent amount. Documentation's migration/display precision guidance does not establish a Predictions per-execution rounding rule; no runtime cash tolerance or baseline correction is inferred.
 
 September 16 recovery recheck: [WebSocket introduction](https://developer.gemini.com/prediction-markets/websocket/introduction) still documents `cancelOnDisconnect=true`. The live 02:02 ET service restart nevertheless left session orders active; treat this as defense in depth, never terminal proof. Its precise venue-side failure cause is unproven. Reconnect and independently reconcile/cancel survivors.
 

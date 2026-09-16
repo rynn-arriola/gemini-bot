@@ -40,3 +40,33 @@ Required offline acceptance: one/all shard outages, independent quiet liveness,
 old-frame rejection, gaps, private/global failures, reconnect storms, shared
 429/cancel priority, fill during quarantine, no-depth exit, second-leg admission,
 stable rollover/ownership, shutdown task cleanup, and unchanged snapshot rules.
+
+## Implementation and verification
+
+Implemented in `public_shards.py` and the production orchestrator. Membership is
+persisted, new symbols go to the least-populated shard, and healthy assignments
+are retained. Catalog rollover waits during a shard recovery; selected held pools
+remain reserved. No routine subscription request is sent to unaffected shards.
+Per-symbol freshness reaches ranking, quote admission, retention and uptime.
+
+507 production tests plus 28 script tests passed, including the additional
+startup-cancel-fill regression and 28 dedicated shard/startup cases. Cases cover
+adapter fan-in, generation/membership, shared cooldown/counters, healthy sibling
+admission, same-run recovery, repeated EOF, private/shard coordination, unsafe
+cancel escalation, and known-inventory startup. The fractional-cash test remains
+in the separate execution-recovery module.
+Two deliberate in-memory reversals of generation defenses were detected.
+Compilation and offline Windows policy/storage validation passed.
+
+Real read-only smoke connected five public sockets and one authenticated private
+socket, synchronized five books and received account snapshots. It created zero
+order intents and disabled cancel-on-disconnect; no activation or cancellation
+occurred. This is connectivity acceptance, not live fault injection, a long-run
+performance benchmark or proof of reward eligibility. Imports confirm the local
+editable runtime uses this checkout. No new live permit or trading process was
+started. Final read-only startup stopped on an unowned active order. Exact cash
+and external-order reconciliation remain restart blockers.
+
+50% impact: healthy shards retain their quotes; affected-shard quarantine and
+resynchronization create necessary unquoted intervals. Those gaps are uncredited.
+No pooled/day uptime transfer, renewed override, or admission/risk relaxation.

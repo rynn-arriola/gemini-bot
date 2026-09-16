@@ -50,6 +50,7 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         self.runtime = ProductionOrchestrator(
             LiveConfig("account-review-fake", "fake-review-secret", "", True, strategy, risk),
             Path(self.temporary.name),
+            public_shard_count=1,
         )
         self.runtime.control_directory = Path(self.temporary.name) / "isolated-control"
         self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")
