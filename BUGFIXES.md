@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — settled held contract no longer crashes every market
+
+At 17:00 ET Gemini changed the held contract's lifecycle while exact inventory still existed. The public status handler raised a global runtime error, canceled all unrelated resting orders, and emergency drain then failed because that contract had no executable exit depth. Gemini subsequently settled the position, but the durable expected position/cash basis remained stale, so the prior startup accounting could not safely resume.
+
+The affected symbol now enters the same market-local settlement-wait boundary used by the local Polymarket bot: preserve its exact deadline/exposure, block only that symbol and let unrelated reconciled markets continue. Gemini's authenticated terminal zero-position/payout frame commits settlement live; a stable event-filtered settled-position REST row recovers a missed terminal message on restart. Settlement has its own immutable ledger row, credits exact payout, closes exact owned quantity, clears the deadline, and realizes fill basis plus payout into the unchanged $30 six-hour HARD calculation. Duplicate proof is idempotent; quantity/payout/ownership/history/account disagreement remains fail-closed. Production quote size is now the owner-approved 20 contracts, while every existing cap and the $30 HARD remain unchanged.
+
 ## September 16, 2026 — sticky markets no longer stop on an uncertain local uptime bound
 
 The live cohort had been resting since shortly after midnight, but reconstructed local uptime rows began at 11:27 and made the bot report that 50% was unreachable. Order history proved earlier resting presence, while Gemini's authenticated daily summary still contained no usable snapshot rows. The local calculation therefore could not safely establish either qualification or disqualification.

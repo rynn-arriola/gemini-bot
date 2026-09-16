@@ -105,7 +105,7 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_flat_during_cancel_cleans_lifecycle_without_exit(self):
         self.inventory()
         async def cancel(symbol):
-            self.order(candidate().quote.no)
+            self.order(replace(candidate().quote.no, quantity=D(10)))
         self.r._cancel_symbol_entries = AsyncMock(side_effect=cancel)
         await self.r._run_exit_worker("X")
         self.assertNotIn("X", self.r.account.blocked_entries)

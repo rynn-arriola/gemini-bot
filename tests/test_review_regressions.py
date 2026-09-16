@@ -35,12 +35,12 @@ from gemini_bot.uptime import sample_and_load_progress
 NOW = datetime(2026, 9, 15, 16, tzinfo=timezone.utc)
 
 
-def candidate():
+def candidate(quantity=D("20")):
     return rank_candidate(RankInput(
         RewardPool("pool", D("100")),
         ContractRules("X", D(".01"), D("1"), D("1")),
         BookTop("X", D(".48"), D("100"), D(".52"), D("100"), 1, NOW),
-    ), now=NOW)
+    ), now=NOW, quantity=quantity)
 
 
 class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
@@ -115,8 +115,10 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             partial = leg.outcome is Outcome.YES
             self.runtime.account.apply({
                 "e": "orderUpdate", "i": str(len(sent)), "c": intent.client_order_id,
-                "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10", "p": ".46",
-                "z": "7" if partial else "10", "Z": "3" if partial else "0",
+                "s": "X", "S": "BUY", "O": leg.outcome.value,
+                "q": str(leg.quantity), "p": ".46",
+                "z": str(leg.quantity - 3) if partial else str(leg.quantity),
+                "Z": "3" if partial else "0",
                 "X": "PARTIALLY_FILLED" if partial else "OPEN", "t": "fake-trade",
             })
             return intent.client_order_id
@@ -135,8 +137,9 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             order_id = str(len(sent))
             frame = {
                 "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
-                "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10",
-                "p": str(leg.price), "z": "10", "Z": "0", "X": "NEW",
+                "s": "X", "S": "BUY", "O": leg.outcome.value,
+                "q": str(leg.quantity), "p": str(leg.price),
+                "z": str(leg.quantity), "Z": "0", "X": "NEW",
             }
             self.runtime.account.apply(frame)
             if leg.outcome is Outcome.NO:
@@ -157,8 +160,9 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             order_id = leg.outcome.value
             self.runtime.account.apply({
                 "e": "orderUpdate", "i": order_id, "c": intent.client_order_id,
-                "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10",
-                "p": str(leg.price), "z": "10" if leg.outcome is Outcome.YES else "0",
+                "s": "X", "S": "BUY", "O": leg.outcome.value,
+                "q": str(leg.quantity), "p": str(leg.price),
+                "z": str(leg.quantity) if leg.outcome is Outcome.YES else "0",
                 "Z": "0", "X": "NEW" if leg.outcome is Outcome.YES else "REJECTED",
             })
             return intent.client_order_id
@@ -175,8 +179,9 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.ledger.mark_sent(intent.client_order_id)
             self.runtime.account.apply({
                 "e": "orderUpdate", "i": leg.outcome.value, "c": intent.client_order_id,
-                "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10", "p": ".46",
-                "z": "10", "X": "OPEN",
+                "s": "X", "S": "BUY", "O": leg.outcome.value,
+                "q": str(leg.quantity), "p": ".46",
+                "z": str(leg.quantity), "X": "OPEN",
             })
             return intent.client_order_id
         self.runtime.private.place_maker = AsyncMock(side_effect=place)

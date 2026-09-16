@@ -293,7 +293,8 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
             params = json.loads(raw)["params"]
             self.runtime.account.apply({
                 "e": "orderUpdate", "i": "yes-order", "c": params["clientOrderId"],
-                "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "10",
+                "s": "X", "S": "BUY", "O": "YES",
+                "q": params["quantity"], "z": params["quantity"],
                 "p": params["price"], "X": "OPEN",
             })
             self.runtime.public.books["X"].apply_snapshot(
@@ -318,7 +319,8 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
             params = json.loads(raw)["params"]
             self.runtime.account.apply({
                 "e": "orderUpdate", "i": "yes-order", "c": params["clientOrderId"],
-                "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "10",
+                "s": "X", "S": "BUY", "O": "YES",
+                "q": params["quantity"], "z": params["quantity"],
                 "p": params["price"], "X": "OPEN",
             })
             # Model the brief cash/position mismatch after a fill while the
@@ -346,10 +348,11 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.ledger.mark_sent(intent.client_order_id)
         self.runtime.private.place_maker = AsyncMock(return_value=intent.client_order_id)
         async def fill_before_waiter_returns(_client_order_id):
+            quantity = candidate().quote.yes.quantity
             self.runtime.account.apply({
                 "e": "orderUpdate", "i": "filled-order", "c": intent.client_order_id,
-                "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "0",
-                "p": ".46", "X": "FILLED", "Z": "10", "L": ".46",
+                "s": "X", "S": "BUY", "O": "YES", "q": str(quantity), "z": "0",
+                "p": ".46", "X": "FILLED", "Z": str(quantity), "L": ".46",
                 "n": "0", "t": "fill-before-waiter", "T": int(NOW.timestamp() * 1000),
             })
         self.runtime.account.wait_for_order_event = AsyncMock(
@@ -603,3 +606,25 @@ class ManualCloseHistoryTests(unittest.IsolatedAsyncioTestCase):
                 symbol="X", closed_from=NOW,
                 closed_to=NOW + timedelta(minutes=2), limit=1,
             )
+
+    async def test_settled_positions_uses_exact_bounded_event_filter(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        row = {
+            "instrumentSymbol": "X", "position": "10", "positionQuantity": "10",
+            "outcome": "yes", "payout": "10", "settledAt": NOW.isoformat(),
+        }
+        client.private_read = AsyncMock(return_value={"positions": [row], "total": 1})
+        self.assertEqual(
+            await client.settled_positions(event_ticker="EVENT"), [row],
+        )
+        client.private_read.assert_awaited_once_with(
+            "/v1/prediction-markets/positions/settled",
+            method="POST",
+            query_params={"eventTicker": "EVENT", "limit": 100, "offset": 0},
+        )
+
+    async def test_settled_positions_refuses_an_incomplete_window(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        client.private_read = AsyncMock(return_value={"positions": [{}], "total": 2})
+        with self.assertRaisesRegex(ApiError, "window_ceiling"):
+            await client.settled_positions(event_ticker="EVENT")

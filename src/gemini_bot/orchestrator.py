@@ -65,6 +65,7 @@ from .risk_windows import RiskWindowPolicy
 from .runtime_files import atomic_write_json, runtime_status
 from .storage import (
     AuthenticatedCashAdjustment,
+    AuthenticatedSettlement,
     SQLiteJournal,
     WindowsOwnerLock,
     shared_control_directory,
@@ -206,6 +207,7 @@ class ProductionOrchestrator:
         self._entry_cancel_symbols: dict[str, int] = {}
         self._maker_pair_guards: dict[str, MakerPairGuard] = {}
         self._cash_reconciliation_task: asyncio.Task[int] | None = None
+        self._settlement_reconciliation_task: asyncio.Task[int] | None = None
         self._read_recovery_attempts: dict[str, int] = {}
         self._risk_read_verified = False
         self._stream_holds: set[str] = set()
@@ -811,11 +813,45 @@ class ProductionOrchestrator:
             return  # Metadata and terminal/flat proof, not this event, release it.
         self.account.block_entries(symbol, reason="lifecycle")
         self._reward_refresh_requested = True
-        self.journal.audit("contract_lifecycle_block", {"symbol": symbol})
-        if self.account.reducer.positions.get(symbol, Decimal("0")) != 0:
-            raise RuntimeError("tracked contract changed lifecycle with open inventory")
+        signed = self.account.reducer.positions.get(symbol, Decimal("0"))
+        self.journal.audit("contract_lifecycle_block", {
+            "symbol": symbol,
+            "status": self._market_status[symbol],
+            "has_inventory": signed != 0,
+        })
+        if signed:
+            outcome = "YES" if signed > 0 else "NO"
+            isolatable = (
+                self._continuous_service
+                and self.gate.state is EngineState.QUOTING
+                and self.account.snapshots_fresh
+                and self.account.equity_classification_complete
+                and self.journal.get_deadline(symbol, outcome) is not None
+                and symbol not in self._exit_uncertain
+                and not self.journal.pending_exit(symbol)
+                and not self.journal.has_nonterminal_intents(symbol)
+            )
+            if not isolatable:
+                raise RuntimeError(
+                    "tracked contract changed lifecycle without complete scoped inventory proof"
+                )
+            # A terminal/paused contract commonly loses executable depth before
+            # Gemini publishes settlement.  Preserve the exact position and its
+            # original deadline, keep its exit/settlement worker alive, and let
+            # unrelated shards continue.  Account-wide ambiguity still takes
+            # the fail-closed branch above.
+            self.account.block_entries(symbol, fill=True)
+            self.log.event(
+                logging.WARNING,
+                "market_lifecycle_inventory_quarantined",
+                symbol=symbol,
+                lifecycle_status=self._market_status[symbol],
+                unrelated_markets_allowed=True,
+                pending_order_slots=0,
+                original_deadline_preserved=True,
+            )
         if self.account.reducer.risk_adding_order_ids(symbol):
-            if self.gate.state is not EngineState.QUOTING:
+            if self.gate.state not in {EngineState.QUOTING, EngineState.DRAINING}:
                 raise RuntimeError("tracked contract changed lifecycle with working entries")
             try:
                 self.account.safety_symbols.put_nowait(symbol)
@@ -1092,6 +1128,107 @@ class ProductionOrchestrator:
             raise RuntimeError("authenticated non-trading cash did not complete classification")
         return count
 
+    def _event_ticker_for_symbol(self, symbol: str) -> str:
+        target = canonical_symbol(symbol)
+        matches = {
+            item.event_ticker for item in self.universe
+            if item.rules.symbol == target
+        }
+        matches.update(
+            event_ticker for event_ticker, sticky_symbol in self._sticky_markets.values()
+            if canonical_symbol(sticky_symbol) == target
+        )
+        if len(matches) != 1:
+            raise RuntimeError("settled position lacks one exact event identity")
+        return next(iter(matches))
+
+    @staticmethod
+    def _parse_authenticated_settlement(
+        row: dict[str, Any], *, symbol: str, signed_quantity: Decimal,
+    ) -> AuthenticatedSettlement | None:
+        row_symbol = canonical_symbol(str(row.get("instrumentSymbol", row.get("symbol", ""))))
+        if row_symbol != symbol:
+            return None
+        try:
+            outcome = str(row["outcome"]).upper()
+            quantity = Decimal(str(row["positionQuantity"]))
+            position = Decimal(str(row["position"]))
+            payout = Decimal(str(row["payout"]))
+            settled_at = history_timestamp(row["settledAt"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("authenticated settled-position row is invalid") from exc
+        derived = quantity if outcome == "YES" else -quantity if outcome == "NO" else None
+        if (
+            derived is None
+            or not all(value.is_finite() for value in (quantity, position, payout))
+            or quantity <= 0
+            or position != derived
+            or position != signed_quantity
+            or payout < 0
+            or payout > quantity
+        ):
+            raise RuntimeError("authenticated settlement disagrees with owned inventory")
+        return AuthenticatedSettlement(symbol, position, payout, settled_at)
+
+    async def _reconcile_missed_settlements(
+        self, snapshot: AccountSnapshot | None = None,
+    ) -> int:
+        """Close positions absent from live state only with exact settled REST proof."""
+        if self.account.expected_positions is None:
+            raise RuntimeError("settlement reconciliation lacks expected positions")
+        expected = dict(self.account.expected_positions)
+        actual = dict(self.account.reducer.positions)
+        missing = {
+            symbol: quantity for symbol, quantity in expected.items()
+            if actual.get(symbol, Decimal("0")) == 0
+        }
+        if not missing:
+            return 0
+        if any(actual.get(symbol) != quantity for symbol, quantity in expected.items() if symbol in actual):
+            raise RuntimeError("position change is not an exact settlement candidate")
+        if set(actual) - set(expected):
+            raise RuntimeError("unexpected position cannot be settlement-reconciled")
+
+        before = snapshot or build_account_snapshot(
+            await self.rest.positions(), await self.rest.active_orders(),
+        )
+        if before.signed_positions != actual:
+            raise RuntimeError("settlement reconciliation lacks matching REST/stream state")
+        plans: list[AuthenticatedSettlement] = []
+        for symbol, signed in sorted(missing.items()):
+            if any(order.symbol == symbol for order in before.active_orders):
+                raise RuntimeError("settlement candidate still has an active order")
+            ticker = self._event_ticker_for_symbol(symbol)
+            rows = await self.rest.settled_positions(event_ticker=ticker)
+            matches = [
+                parsed for row in rows
+                if (parsed := self._parse_authenticated_settlement(
+                    row, symbol=symbol, signed_quantity=signed,
+                )) is not None
+            ]
+            if len(matches) != 1:
+                raise RuntimeError("settled-position history lacks one exact owned match")
+            plans.append(matches[0])
+
+        after = build_account_snapshot(
+            await self.rest.positions(), await self.rest.active_orders(),
+        )
+        assert_stable_account_bracket(before, after)
+        assert_position_consistency(after, self.account.reducer.positions)
+        observed_at = _utc_now()
+        count = 0
+        for settlement in plans:
+            count += int(self.account.reconcile_authenticated_settlement(
+                settlement, observed_at=observed_at,
+            ))
+            self._inventory_catalog_holds.discard(settlement.symbol)
+            self._exit_uncertain.discard(settlement.symbol)
+            self._exit_rejected.discard(settlement.symbol)
+            self._exit_residual_limits.pop(settlement.symbol, None)
+            self._exit_round_deadlines.pop(settlement.symbol, None)
+            self._position_proof_wait_started.pop(settlement.symbol, None)
+        return count
+
     def _resolve_prior_intents(self, history: list[dict[str, Any]], active: list[dict[str, Any]] | None = None) -> None:
         by_client = {str(row.get("clientOrderId", "")): row for row in history}
         working = {str(row.get("clientOrderId", "")): row for row in active or []}
@@ -1360,6 +1497,11 @@ class ProductionOrchestrator:
             assert_stable_account_bracket(before, after)
             assert_position_consistency(after, self.account.reducer.positions)
             repair_flat = manual_flat_repair and not after.positions and not after.active_orders
+            if (
+                self.account.expected_positions != self.account.reducer.positions
+                and not repair_flat
+            ):
+                await self._reconcile_missed_settlements(after)
             if not self.account.equity_classification_complete and not repair_flat:
                 targets: dict[str, set[str]] = {}
                 for oid, symbol in self.journal.connection.execute('SELECT order_id,symbol FROM account_order'):
@@ -2621,6 +2763,8 @@ class ProductionOrchestrator:
         unmatched_since: float | None = None
         last_cash_reconcile_at = 0.0
         last_cash_reconcile_error: BaseException | None = None
+        last_settlement_reconcile_error: BaseException | None = None
+        settlement_reconcile_attempted = False
         while self.gate.state is EngineState.QUOTING:
             now = _utc_now()
             clock = asyncio.get_running_loop().time()
@@ -2647,6 +2791,39 @@ class ProductionOrchestrator:
                 continue
             if not self.account.equity_classification_complete:
                 unmatched_since = clock if unmatched_since is None else unmatched_since
+                expected_positions = self.account.expected_positions or {}
+                actual_positions = self.account.reducer.positions
+                settlement_candidate = (
+                    expected_positions != actual_positions
+                    and set(actual_positions) <= set(expected_positions)
+                    and all(
+                        actual_positions.get(symbol, Decimal("0")) in {quantity, Decimal("0")}
+                        for symbol, quantity in expected_positions.items()
+                    )
+                )
+                if settlement_candidate:
+                    for symbol, quantity in expected_positions.items():
+                        if quantity and not actual_positions.get(symbol):
+                            self.account.block_entries(symbol, fill=True)
+                    if (
+                        self._settlement_reconciliation_task is None
+                        and not settlement_reconcile_attempted
+                    ):
+                        self._settlement_reconciliation_task = asyncio.create_task(
+                            self._reconcile_missed_settlements(),
+                            name="gemini-settlement-reconciliation",
+                        )
+                        settlement_reconcile_attempted = True
+                if (
+                    self._settlement_reconciliation_task is not None
+                    and self._settlement_reconciliation_task.done()
+                ):
+                    try:
+                        self._settlement_reconciliation_task.result()
+                    except BaseException as exc:
+                        last_settlement_reconcile_error = exc
+                    finally:
+                        self._settlement_reconciliation_task = None
                 positions_match = (
                     self.account.expected_positions == self.account.reducer.positions
                     and not self.account.unowned_order_seen
@@ -2669,13 +2846,16 @@ class ProductionOrchestrator:
                         last_cash_reconcile_error = exc
                     finally:
                         self._cash_reconciliation_task = None
-                if not self.account.equity_classification_complete and clock - unmatched_since > 10:
+                grace = 65 if settlement_candidate else 10
+                if not self.account.equity_classification_complete and clock - unmatched_since > grace:
                     self.gate.halt()
                     raise RuntimeError(
                         "cash/position changes remain unmatched; reconciliation required"
-                    ) from last_cash_reconcile_error
+                    ) from (last_settlement_reconcile_error or last_cash_reconcile_error)
             if self.account.equity_classification_complete:
                 unmatched_since = None
+                settlement_reconcile_attempted = False
+                last_settlement_reconcile_error = None
                 self._mark_live_risk()
                 if self.account.reducer.pending_order_count() > self._dynamic_pending_cap:
                     await self._enforce_pending_cap(self._dynamic_pending_cap)
@@ -3115,7 +3295,11 @@ class ProductionOrchestrator:
                         )
                     reward_check = None
                 if reward_check is None and any(
-                    not item.pool.active or not self._entry_time_valid(item.rules.symbol)
+                    (
+                        not item.pool.active
+                        or not self._entry_time_valid(item.rules.symbol)
+                    )
+                    and item.rules.symbol not in self.account.blocked_entries
                     for item in self.universe
                 ):
                     self._reward_refresh_requested = True
@@ -3523,6 +3707,10 @@ class ProductionOrchestrator:
             self._cash_reconciliation_task.cancel()
             await asyncio.gather(self._cash_reconciliation_task, return_exceptions=True)
             self._cash_reconciliation_task = None
+        if self._settlement_reconciliation_task is not None:
+            self._settlement_reconciliation_task.cancel()
+            await asyncio.gather(self._settlement_reconciliation_task, return_exceptions=True)
+            self._settlement_reconciliation_task = None
         try:
             await asyncio.gather(self.private.close(), self.public.close(), return_exceptions=True)
         finally:

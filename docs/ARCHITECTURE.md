@@ -24,15 +24,15 @@ All outbound work passes through one priority admission governor. Cancellation a
 ## WebSocket-first boundaries
 
 - Public socket: differential depth with an initial snapshot, book ticker/trade/status only where they add evidence. Sequence gaps discard the affected local book and trigger bounded resubscription.
-- Authenticated socket: startup uses `orders@account` plus complete one-second balance/position snapshots; after reconciliation it switches to event-driven `balances@account` and `positions@account` deltas for lower CPU/network load. The same socket owns `order.place` and `order.cancel` and uses `cancelOnDisconnect=true`.
+- Authenticated socket: startup and live operation use `orders@account` plus complete one-second balance/position snapshots. The same socket owns `order.place` and `order.cancel` and uses `cancelOnDisconnect=true`.
 - REST: active reward pools, event/contract discovery, program config, terms, initial active orders/positions/balances, daily reward summaries, and bounded recovery proof.
 - A stale or disconnected stream removes permission to quote. REST may prove state during recovery; it does not become an uncontrolled substitute streaming loop.
 
-## Reward ranking at 10 contracts
+## Reward ranking at 20 contracts
 
-Each candidate constructs two maker-only BUY legs: YES and NO, 10 contracts each. Prices begin two ticks behind the corresponding touch. The ranker then:
+Each candidate constructs two maker-only BUY legs: YES and NO, 20 contracts each. Prices begin two ticks behind the corresponding touch. The ranker then:
 
-1. rejects inactive pools/contracts, post-only-mode exclusions, stale books, off-increment quantities, invalid prices, quotes over 10 cents from midpoint, and impossible 50% uptime;
+1. rejects inactive pools/contracts, post-only-mode exclusions, stale books, off-increment quantities, invalid prices, and quotes over 10 cents from midpoint; the uncertain local 50% reachability estimate is reporting-only;
 2. caps counted size at 250 and applies the published 1.5 two-sided factor;
 3. applies a labeled quadratic distance proxy and a conservative competitor prior from the coarse qualifying-maker count;
 4. estimates reward share, subtracts maker-entry/taker-exit fees, applicable maker rebate, adverse movement and haircut-adjusted exit-depth costs;
@@ -59,7 +59,7 @@ Startup and drain look up only unresolved intents missing from active orders, us
 
 ### Verified entry-to-close lifecycle
 
-1. Create and durably record two 10-contract BUY intents only after risk, reward, market, book, and capacity gates pass.
+1. Create and durably record two 20-contract BUY intents only after risk, reward, market, book, and capacity gates pass.
 2. Submit each as `LIMIT` + `MOC`; an accepted `NEW` is not treated as a fill.
 3. Reduce order events by server order ID and deduplicate executions by trade ID. On `FILLED`/`PARTIALLY_FILLED`, `Z` is the last execution; on terminal events it is cumulative. The reducer handles those meanings separately.
 4. On any entry execution, prioritize cancellation of every still-working BUY order for that symbol. Do not declare cancellation from a request acknowledgment; wait for terminal order evidence.
@@ -67,7 +67,13 @@ Startup and drain look up only unresolved intents missing from active orders, us
 6. Price an exact SELL outcome reducer against synchronized full depth. YES exits consume YES bids; NO exits consume the complementary prices represented by YES asks. Apply the configured depth haircut.
 7. If haircut-adjusted depth is insufficient, do not truncate the position or claim it is closed. Continue the passive/safety path and retry only from fresh evidence.
 8. Submit the exact reducer as `LIMIT` + `IOC`. A terminal `CANCELED` does not mean zero fill; use its executed quantity and then reconcile the remaining authenticated position.
-9. Flat is proven only by a fresh zero/absent position snapshot plus terminal owned orders. Settlement is confirmed separately.
+9. Flat is proven only by fresh authenticated account evidence. Normal exits require a zero/absent position plus terminal owned orders. Venue settlement instead requires a terminal zero-position/payout frame or one exact bounded settled-position REST row.
+
+### Market-local settlement accounting
+
+When a contract changes lifecycle with exact owned inventory, the bot blocks that symbol and preserves its original deadline/exposure/pool ownership while unrelated markets continue. A terminal private position frame carrying both `position=0` and `settlement_payout` is committed directly. If that detail was missed across a disconnect or restart, the bot brackets current positions/orders with stable authenticated REST reads and accepts exactly one event-filtered settled row matching the durable symbol, outcome and signed quantity.
+
+The settlement is not a synthetic trade. Its payout advances expected cash, its exact position is removed, its deadline is cleared, and `entry fill cash basis + payout` becomes realized trading P&L in the existing six-hour risk window. Any concurrent authenticated reward/rebate/transfer remains a separate non-trading cash adjustment. Duplicate identical evidence is idempotent; changed or incomplete evidence cannot advance accounting. The settled symbol keeps an entry hold and consumes no pending-order slot.
 
 ## Time-aware inventory exit
 

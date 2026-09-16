@@ -11,7 +11,13 @@ param(
 # back to Start-Process. The production script still exercises its validation,
 # quoting, confirmation, and metadata paths.
 $ErrorActionPreference = "Stop"
-$global:LauncherHarnessRuntime = [System.IO.Path]::GetFullPath($RuntimeDirectory)
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$RuntimeInput = if ([System.IO.Path]::IsPathRooted($RuntimeDirectory)) {
+    $RuntimeDirectory
+} else {
+    Join-Path $ProjectRoot $RuntimeDirectory
+}
+$global:LauncherHarnessRuntime = [System.IO.Path]::GetFullPath($RuntimeInput)
 $global:LauncherHarnessRegistered = $false
 $global:LauncherHarnessStarted = $false
 $global:LauncherHarnessAction = $null
@@ -81,7 +87,6 @@ function Start-ScheduledTask {
         (Join-Path $global:LauncherHarnessRuntime "supervisor-status.json") -Encoding utf8
 }
 
-$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Output = & (Join-Path $ProjectRoot "scripts\start_production.ps1") `
     -Mode Live -EnvironmentFile $EnvironmentFile -RuntimeDirectory $RuntimeDirectory `
     -ActivationPermit $PermitFile

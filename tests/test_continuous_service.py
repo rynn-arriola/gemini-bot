@@ -89,12 +89,14 @@ class RestingRetentionTests(unittest.IsolatedAsyncioTestCase):
         self.r._continuous_service = True
         self.r._cancel_symbol_entries = AsyncMock()
         self.r._quote_pair_locked = AsyncMock()
-        self.c = fixtures.candidate()
+        self.c = fixtures.candidate(self.r.config.strategy.quote_quantity)
         for leg in (self.c.quote.yes, self.c.quote.no):
             intent = self.r.ledger.prepare(leg, fixtures.OrderPurpose.ENTRY)
             self.r.ledger.mark_sent(intent.client_order_id)
             self.r.account.apply({'e': 'orderUpdate', 'i': leg.outcome.value, 'c': intent.client_order_id,
-                's': 'X', 'S': 'BUY', 'O': leg.outcome.value, 'q': '10', 'z': '10', 'p': str(leg.price), 'X': 'NEW'})
+                's': 'X', 'S': 'BUY', 'O': leg.outcome.value,
+                'q': str(leg.quantity), 'z': str(leg.quantity),
+                'p': str(leg.price), 'X': 'NEW'})
 
     async def asyncTearDown(self):
         await self.fixture.asyncTearDown()

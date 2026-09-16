@@ -173,13 +173,13 @@ class MaintenanceFlowTests(unittest.IsolatedAsyncioTestCase):
         r.ledger.mark_sent(intent.client_order_id)
         r.ledger.acknowledge(intent.client_order_id,'o')
         r.account.reducer.orders['o'] = OwnedOrder('o',intent.client_order_id,'X',Side.BUY,Outcome.YES,
-                                                   leg.price,D(10),D(0),D(0),'CANCELED',1)
+                                                   leg.price,leg.quantity,D(0),D(0),'CANCELED',1)
         r._private_recovery_orders.add('o')
         r.account.reducer.positions={'X':D(1)}
         r.account.confirmed_usd = r.account.expected_confirmed_usd - leg.price
         r.rest.positions.return_value=[{'symbol':'X','outcome':'yes','totalQuantity':'1','avgPrice':str(leg.price),'marketValue':str(leg.price)}]
         r.rest.recent_order_history.return_value=[dict(orderId='o',clientOrderId=intent.client_order_id,
-            symbol='X',side='buy',outcome='yes',quantity='10',filledQuantity='1',status='cancelled',
+            symbol='X',side='buy',outcome='yes',quantity=str(leg.quantity),filledQuantity='1',status='cancelled',
             price=str(leg.price),avgExecutionPrice=str(leg.price),timeInForce='maker-or-cancel',
             createdAt=(now-timedelta(hours=1)).isoformat(),updatedAt=now.isoformat())]
         r.rest.recent_account_trades = AsyncMock(return_value=[dict(tid='actual-fill',order_id='o',

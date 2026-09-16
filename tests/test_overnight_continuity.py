@@ -179,7 +179,8 @@ class MidnightRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.r.ledger.mark_sent(intent.client_order_id)
             self.r.account.apply({"e": "orderUpdate", "i": leg.outcome.value, "c": intent.client_order_id,
                                   "s": "X", "S": "BUY", "O": leg.outcome.value,
-                                  "q": "10", "z": "10", "p": str(leg.price), "X": "NEW"})
+                                  "q": str(leg.quantity), "z": str(leg.quantity),
+                                  "p": str(leg.price), "X": "NEW"})
         self.r._cancel_symbol_entries = AsyncMock()
         self.r._quote_pair_locked = AsyncMock()
         with patch("gemini_bot.orchestrator._utc_now", return_value=MIDNIGHT):

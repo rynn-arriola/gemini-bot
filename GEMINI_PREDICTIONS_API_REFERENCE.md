@@ -254,7 +254,7 @@ Order-history recovery details verified September 15, 2026:
 
 - `from` is inclusive and `to` is exclusive, both Unix epoch milliseconds. With either time bound, Gemini ignores `offset`; a response at the requested limit must therefore be treated as potentially incomplete and split or rejected.
 - Filled history supplies `filledQuantity`, `remainingQuantity`, `avgExecutionPrice`, server order identity and close timestamps. It does not publish an execution-fee field.
-- `positions/settled` documents opt-in `withCashOuts=true` fields, but the live account response did not return that sibling array during this repair. The bot therefore does not rely on it for restart safety.
+- `positions/settled` documents opt-in `withCashOuts=true` fields, but settlement recovery does not depend on that sibling array. Restart recovery uses the ordinary event-filtered `positions[]` rows only after stable current position/order brackets and requires one exact instrument/outcome/signed-quantity match. The private WebSocket terminal zero-position plus `settlement_payout` remains primary live evidence.
 
 Use REST snapshots at startup, after reconnects, after suspected message gaps, and around settlement. Do not infer positions solely from the order-status stream.
 

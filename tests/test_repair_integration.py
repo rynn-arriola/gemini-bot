@@ -94,6 +94,50 @@ class AccountRepairTests(unittest.TestCase):
         self.assertEqual(self.store.get_deadline("X", "YES"), deadline)
         self.assertIn("X", self.account.blocked_entries)
 
+    def test_terminal_settlement_closes_owned_position_without_releasing_lifecycle_hold(self):
+        self.fill()
+        self.position(3)
+        self.account.block_entries("X", reason="lifecycle")
+        self.account.apply({
+            "e": "positionReport", "u": 3,
+            "E": int((NOW + timedelta(minutes=1)).timestamp() * 1000),
+            "P": [{"t": "ec", "s": "X", "a": [
+                {"t": "position", "v": "0"},
+                {"t": "settlement_payout", "v": "3"},
+            ]}],
+        })
+        self.assertEqual(self.account.expected_positions, {})
+        self.assertEqual(self.account.expected_confirmed_usd, D("101.79"))
+        self.assertNotIn("X", self.account.fill_blocked_entries)
+        self.assertIn("X", self.account.blocked_entries)
+        self.assertIsNone(self.store.get_deadline("X", "YES"))
+        start, end = RiskWindowPolicy(D("30")).bounds(NOW)
+        self.assertEqual(self.store.realized_pnl_for_window(start, end), (D("1.79"), True))
+
+        # Exact stream repeats are idempotent and cannot double-credit cash.
+        self.account.apply({
+            "e": "positionReport", "u": 3,
+            "E": int((NOW + timedelta(minutes=1)).timestamp() * 1000),
+            "P": [{"t": "ec", "s": "X", "a": [
+                {"t": "position", "v": "0"},
+                {"t": "settlement_payout", "v": "3"},
+            ]}],
+        })
+        self.assertEqual(self.account.expected_confirmed_usd, D("101.79"))
+
+    def test_terminal_settlement_must_match_owned_quantity_and_payout_bounds(self):
+        self.fill()
+        self.position(3)
+        with self.assertRaisesRegex(RuntimeError, "economics are invalid"):
+            self.account.apply({
+                "e": "positionReport", "u": 3,
+                "E": int((NOW + timedelta(minutes=1)).timestamp() * 1000),
+                "P": [{"t": "ec", "s": "X", "a": [
+                    {"t": "position", "v": "0"},
+                    {"t": "settlement_payout", "v": "4"},
+                ]}],
+            })
+
     def test_fill_deadline_honors_earlier_sports_flat_cutoff(self):
         self.account.hard_exit_cutoff["X"] = NOW + timedelta(seconds=60)
         self.fill()
@@ -235,7 +279,10 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def payload(self):
-        intent = self.runtime.ledger.prepare(candidate().quote.yes, OrderPurpose.ENTRY)
+        intent = self.runtime.ledger.prepare(
+            candidate(self.runtime.config.strategy.quote_quantity).quote.yes,
+            OrderPurpose.ENTRY,
+        )
         return place_request(1, intent)
 
     async def test_send_guard_rejects_state_change_during_pacing(self):
@@ -481,10 +528,60 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime._reward_refresh_requested)
         self.assertTrue(self.runtime.gate.may_submit)
 
-    async def test_contract_closure_with_inventory_halts(self):
+    async def test_contract_closure_with_proven_inventory_is_market_local(self):
+        self.runtime._continuous_service = True
+        self.runtime.account.last_balance_at = time.monotonic()
+        self.runtime.account.last_position_at = time.monotonic()
         self.runtime.account.reducer.positions["X"] = D("10")
-        with self.assertRaises(RuntimeError):
+        self.runtime.account.expected_positions = {"X": D("10")}
+        self.runtime.journal.persist_deadline(
+            "X", "YES", NOW, NOW + timedelta(minutes=5), D("10")
+        )
+        self.runtime._handle_contract_status({"e": "contractStatus", "s": "x", "n": "Closed"})
+        self.assertTrue(self.runtime.gate.may_submit)
+        self.assertIn("X", self.runtime.account.fill_blocked_entries)
+        self.assertIn("X", self.runtime.account.blocked_entries)
+
+    async def test_contract_closure_with_unproven_inventory_halts(self):
+        self.runtime._continuous_service = True
+        self.runtime.account.reducer.positions["X"] = D("10")
+        with self.assertRaisesRegex(RuntimeError, "scoped inventory proof"):
             self.runtime._handle_contract_status({"e": "contractStatus", "s": "x", "n": "Closed"})
+
+    async def test_missed_terminal_position_event_recovers_from_exact_settled_history(self):
+        intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.BUY, D(".4"), D("3")),
+            OrderPurpose.ENTRY,
+        )
+        self.runtime.ledger.mark_sent(intent.client_order_id)
+        self.runtime.account.apply({
+            "e": "orderUpdate", "i": "entry", "c": intent.client_order_id,
+            "s": "X", "S": "BUY", "O": "YES", "q": "3", "z": "0",
+            "X": "FILLED", "Z": "3", "t": "trade", "L": ".4", "n": "0",
+            "T": int(NOW.timestamp() * 1000),
+        })
+        self.runtime.account.apply({
+            "e": "positionReport", "u": 2,
+            "P": [{"t": "ec", "s": "X", "a": [{"t": "position", "v": "3"}]}],
+        })
+        self.runtime.account.reducer.positions.clear()  # complete stream snapshot missed terminal detail
+        self.runtime.account.block_entries("X", reason="lifecycle")
+        self.runtime.rest.positions = AsyncMock(side_effect=[[], []])
+        self.runtime.rest.active_orders = AsyncMock(side_effect=[[], []])
+        self.runtime.rest.settled_positions = AsyncMock(return_value=[{
+            "instrumentSymbol": "X", "outcome": "YES", "positionQuantity": "3",
+            "position": "3", "payout": "3",
+            "settledAt": (NOW + timedelta(minutes=1)).isoformat(),
+        }])
+
+        count = await self.runtime._reconcile_missed_settlements()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(self.runtime.account.expected_positions, {})
+        self.assertEqual(self.runtime.account.expected_confirmed_usd, D("101.8"))
+        self.assertTrue(self.runtime.gate.may_submit)
+        self.assertIn("X", self.runtime.account.blocked_entries)
+        self.runtime.rest.settled_positions.assert_awaited_once_with(event_ticker="E")
 
     async def test_one_sided_market_does_not_block_initialized_cohort(self):
         one_sided = LocalBook("Y")

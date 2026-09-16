@@ -381,6 +381,32 @@ class GeminiReadRestClient:
     async def positions(self, *, ceiling: int = 1000) -> list[dict[str, Any]]:
         return await self._private_pages("/v1/prediction-markets/positions", "positions", ceiling)
 
+    async def settled_positions(
+        self, *, event_ticker: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read one exact event's bounded authenticated settlement history."""
+        if not event_ticker or event_ticker != event_ticker.upper():
+            raise ValueError("settled positions require an uppercase event ticker")
+        if not 1 <= limit <= 1000:
+            raise ValueError("settled-position limit must be between 1 and 1000")
+        page = await self.private_read(
+            "/v1/prediction-markets/positions/settled",
+            method="POST",
+            query_params={"eventTicker": event_ticker, "limit": limit, "offset": 0},
+        )
+        values = page.get("positions")
+        if not isinstance(values, list):
+            raise ApiError(200, "invalid_settled_positions_shape")
+        if any(not isinstance(value, dict) for value in values):
+            raise ApiError(200, "invalid_settled_positions_row")
+        total = page.get("total")
+        pagination = page.get("pagination")
+        if isinstance(pagination, dict):
+            total = pagination.get("total", total)
+        if len(values) >= limit or (total is not None and int(total) > len(values)):
+            raise ApiError(200, "settled_positions_window_ceiling_exceeded")
+        return values
+
     async def recent_account_trades(self, *, symbol: str, since_ms: int) -> list[dict[str, Any]]:
         """Bounded diagnostic trade history; availability for Predictions is venue-dependent."""
         if not symbol or symbol != symbol.upper() or since_ms <= 0:

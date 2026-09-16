@@ -33,6 +33,14 @@ class AuthenticatedCashAdjustment:
     occurred_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class AuthenticatedSettlement:
+    symbol: str
+    signed_quantity: Decimal
+    payout: Decimal
+    settled_at: datetime
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS order_intent (
     client_order_id TEXT PRIMARY KEY,
@@ -92,6 +100,13 @@ CREATE TABLE IF NOT EXISTS execution_fill (
     price TEXT NOT NULL,
     fee TEXT NOT NULL,
     event_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prediction_settlement (
+    symbol TEXT PRIMARY KEY,
+    signed_quantity TEXT NOT NULL,
+    payout TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    reconciled_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS authenticated_cash_adjustment (
     source TEXT NOT NULL,
@@ -335,6 +350,101 @@ class SQLiteJournal:
             "DELETE FROM position_deadline WHERE symbol=? AND outcome=?", (symbol, outcome)
         )
 
+    def record_authenticated_settlement(
+        self,
+        settlement: AuthenticatedSettlement,
+        *,
+        expected_positions: dict[str, Decimal],
+        expected_cash: Decimal,
+        observed_at: datetime,
+    ) -> bool:
+        """Close one exact owned position from authenticated settlement truth."""
+        if observed_at.tzinfo is None or settlement.settled_at.tzinfo is None:
+            raise ValueError("settlement timestamps must be timezone-aware")
+        if (
+            not settlement.symbol
+            or settlement.signed_quantity == 0
+            or not settlement.signed_quantity.is_finite()
+            or not settlement.payout.is_finite()
+            or settlement.payout < 0
+            or settlement.payout > abs(settlement.signed_quantity)
+            or not expected_cash.is_finite()
+        ):
+            raise RuntimeError("authenticated settlement economics are invalid")
+        existing = self.connection.execute(
+            "SELECT signed_quantity,payout,settled_at FROM prediction_settlement WHERE symbol=?",
+            (settlement.symbol,),
+        ).fetchone()
+        identity = (
+            str(settlement.signed_quantity), str(settlement.payout),
+            settlement.settled_at.isoformat(),
+        )
+        if existing is not None:
+            if tuple(str(value) for value in existing) != identity:
+                raise RuntimeError("authenticated settlement identity changed")
+            return False
+        if expected_positions.get(settlement.symbol) != settlement.signed_quantity:
+            raise RuntimeError("authenticated settlement quantity does not match owned inventory")
+        deadline = self.connection.execute(
+            "SELECT opened_at FROM position_deadline WHERE symbol=? AND outcome=?",
+            (settlement.symbol, "YES" if settlement.signed_quantity > 0 else "NO"),
+        ).fetchone()
+        if deadline is None:
+            raise RuntimeError("authenticated settlement lacks an owned position deadline")
+        opened_at = datetime.fromisoformat(str(deadline[0]))
+        if opened_at.tzinfo is None or settlement.settled_at < opened_at:
+            raise RuntimeError("authenticated settlement predates the owned position")
+        durable_positions = self.get_runtime_state("expected_positions")
+        durable_cash = self.get_runtime_state("expected_confirmed_usd")
+        if durable_positions is None or durable_cash is None:
+            raise RuntimeError("authenticated settlement lacks a durable account baseline")
+        parsed_positions = {
+            str(key): Decimal(str(value))
+            for key, value in json.loads(durable_positions).items()
+        }
+        if parsed_positions != expected_positions or Decimal(durable_cash) != expected_cash:
+            raise RuntimeError("durable account baseline changed during settlement")
+        updated_positions = dict(expected_positions)
+        updated_positions.pop(settlement.symbol)
+        updated_cash = expected_cash + settlement.payout
+        with self.transaction():
+            self.connection.execute(
+                """INSERT INTO prediction_settlement
+                   (symbol,signed_quantity,payout,settled_at,reconciled_at)
+                   VALUES(?,?,?,?,?)""",
+                (
+                    settlement.symbol, str(settlement.signed_quantity),
+                    str(settlement.payout), settlement.settled_at.isoformat(),
+                    observed_at.isoformat(),
+                ),
+            )
+            self.connection.execute(
+                "UPDATE runtime_state SET value=?,updated_at=? WHERE key='expected_positions'",
+                (
+                    json.dumps(
+                        {key: str(value) for key, value in updated_positions.items()},
+                        separators=(",", ":"), sort_keys=True,
+                    ),
+                    observed_at.isoformat(),
+                ),
+            )
+            self.connection.execute(
+                "UPDATE runtime_state SET value=?,updated_at=? WHERE key='expected_confirmed_usd'",
+                (str(updated_cash), observed_at.isoformat()),
+            )
+            self.connection.execute(
+                "DELETE FROM position_deadline WHERE symbol=?",
+                (settlement.symbol,),
+            )
+            self.connection.execute(
+                "INSERT INTO audit_event(occurred_at,kind,details_json) VALUES(?,?,?)",
+                (
+                    observed_at.isoformat(), "prediction_settlement_reconciled",
+                    json.dumps({"symbol": settlement.symbol}, separators=(",", ":")),
+                ),
+            )
+        return True
+
     def deadline_symbols(self) -> set[str]:
         return {str(row[0]) for row in self.connection.execute(
             "SELECT DISTINCT symbol FROM position_deadline"
@@ -560,6 +670,13 @@ class SQLiteJournal:
             occurred = parsed_utc(row[1])
             if occurred < window_end:
                 events.append((occurred, 0, tuple(row)))
+        for row in self.connection.execute(
+            """SELECT symbol,signed_quantity,settled_at
+               FROM prediction_settlement ORDER BY settled_at,symbol"""
+        ):
+            occurred = parsed_utc(row[2])
+            if occurred < window_end:
+                events.append((occurred, 2, tuple(row)))
         events.sort(key=lambda item: (item[0], item[1], str(item[2][0])))
 
         positions: dict[str, tuple[Decimal, datetime]] = {}
@@ -573,6 +690,12 @@ class SQLiteJournal:
                                 int(row[0]), occurred, opened_at, symbol, quantity,
                             ))
                 positions.clear()
+                continue
+            if kind == 2:
+                symbol, signed_quantity, _ = row
+                current = positions.get(str(symbol))
+                if current is not None and current[0] == Decimal(str(signed_quantity)):
+                    positions.pop(str(symbol), None)
                 continue
             _, symbol, side, outcome, quantity, _ = row
             qty = Decimal(str(quantity))
@@ -618,6 +741,13 @@ class SQLiteJournal:
             occurred = parsed_utc(row[1])
             if occurred < window_end:
                 events.append((occurred, 0, tuple(row)))
+        for row in self.connection.execute(
+            """SELECT symbol,signed_quantity,payout,settled_at
+               FROM prediction_settlement ORDER BY settled_at,symbol"""
+        ):
+            occurred = parsed_utc(row[3])
+            if occurred < window_end:
+                events.append((occurred, 2, tuple(row)))
         events.sort(key=lambda item: (item[0], item[1], str(item[2][0])))
 
         positions: dict[str, tuple[Decimal, Decimal]] = {}
@@ -630,6 +760,15 @@ class SQLiteJournal:
                 if positions and window_start <= occurred < window_end:
                     complete = False
                 positions.clear()
+                continue
+            if kind == 2:
+                symbol, signed_quantity, payout, _ = row
+                prior = positions.pop(str(symbol), None)
+                if prior is None or prior[0] != Decimal(str(signed_quantity)):
+                    complete = False
+                    continue
+                if window_start <= occurred < window_end:
+                    realized += prior[1] + Decimal(str(payout))
                 continue
             _, symbol, side, outcome, quantity, price, fee, _ = row
             qty = Decimal(str(quantity))

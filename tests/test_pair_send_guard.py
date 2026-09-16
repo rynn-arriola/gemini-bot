@@ -36,7 +36,8 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 raise ConnectionError('fake send outcome unknown')
             p = payload['params']
             frame = {'e': 'orderUpdate', 'i': p['eventOutcome'], 'c': p['clientOrderId'],
-                's': 'X', 'S': 'BUY', 'O': p['eventOutcome'], 'q': '10', 'z': '10',
+                's': 'X', 'S': 'BUY', 'O': p['eventOutcome'],
+                'q': p['quantity'], 'z': p['quantity'],
                 'p': p['price'], 'X': 'NEW'}
             self.frames[p['eventOutcome']] = frame
             self.r.account.apply(frame)
@@ -91,7 +92,7 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_fill_blocks_second_and_preserves_deadline(self):
         def fill():
-            self.r.account.apply({**self.frames['YES'], 'X': 'PARTIALLY_FILLED', 'z': '9',
+            self.r.account.apply({**self.frames['YES'], 'X': 'PARTIALLY_FILLED', 'z': '19',
                 'Z': '1', 't': 'fake-fill', 'L': '.46', 'n': '.00',
                 'T': int(fixtures.NOW.timestamp() * 1000)})
         self.at_second_admission = fill
@@ -101,7 +102,7 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_fill_blocks_second_and_preserves_deadline(self):
         def fill():
             self.r.account.apply({**self.frames['YES'], 'X': 'FILLED', 'z': '0',
-                'Z': '10', 't': 'fake-fill', 'L': '.46', 'n': '.00',
+                'Z': '20', 't': 'fake-fill', 'L': '.46', 'n': '.00',
                 'T': int(fixtures.NOW.timestamp() * 1000)})
         self.at_second_admission = fill
         await self.assert_second_blocked()

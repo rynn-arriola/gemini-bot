@@ -1,7 +1,7 @@
 {
   "policy_version": 2,
   "platform": "windows",
-  "quote_quantity": "10",
+  "quote_quantity": "20",
   "quote_offset_ticks": 2,
   "target_uptime": "0.75",
   "max_pending_orders": 30,

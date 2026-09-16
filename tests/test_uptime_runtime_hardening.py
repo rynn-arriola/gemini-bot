@@ -106,7 +106,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         await self.fixture.asyncTearDown()
 
     async def test_second_leg_full_or_partial_fill_cancels_only_its_symbol(self):
-        for filled in ("3", "10"):
+        for filled in ("3", "20"):
             with self.subTest(filled=filled):
                 self.runtime.account.reducer.orders.clear()
                 self.runtime.account.blocked_entries.clear()
@@ -117,12 +117,14 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
                     self.runtime.ledger.mark_sent(intent.client_order_id)
                     frame = {
                         "e": "orderUpdate", "i": leg.outcome.value + filled, "c": intent.client_order_id,
-                        "s": "X", "S": "BUY", "O": leg.outcome.value, "q": "10",
-                        "p": str(leg.price), "z": "10", "X": "OPEN",
+                        "s": "X", "S": "BUY", "O": leg.outcome.value,
+                        "q": str(leg.quantity), "p": str(leg.price),
+                        "z": str(leg.quantity), "X": "OPEN",
                     }
                     if leg.outcome.value == "NO":
-                        frame.update(z=str(10 - D(filled)), Z=filled, L=str(leg.price), n="0",
-                                     t="fill-" + filled, X="FILLED" if filled == "10" else "PARTIALLY_FILLED")
+                        frame.update(z=str(leg.quantity - D(filled)), Z=filled,
+                                     L=str(leg.price), n="0", t="fill-" + filled,
+                                     X="FILLED" if D(filled) == leg.quantity else "PARTIALLY_FILLED")
                     self.runtime.account.apply(frame)
                     return intent.client_order_id
                 self.runtime.private.place_maker = AsyncMock(side_effect=place)
@@ -305,8 +307,9 @@ class LoggingHardeningTests(unittest.TestCase):
                     "-EnvironmentFile", environment_argument,
                     "-PermitFile", permit_argument,
                 ],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True,
             )
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
             row = json.loads(result.stdout)
             self.assertTrue(row["registered"])
             self.assertTrue(row["started"])

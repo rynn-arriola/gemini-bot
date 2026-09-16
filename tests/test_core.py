@@ -77,7 +77,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_approved_policy_has_one_stop_and_expected_caps(self) -> None:
         strategy, risk = load_policy()
-        self.assertEqual(strategy.quote_quantity, Decimal("10"))
+        self.assertEqual(strategy.quote_quantity, Decimal("20"))
         self.assertEqual(risk.max_gross_reservation_usd, Decimal("300"))
         self.assertEqual(risk.max_market_exposure_usd, Decimal("90"))
         self.assertEqual(risk.max_stressed_exit_loss_usd, Decimal("40"))
@@ -96,6 +96,21 @@ class ConfigTests(unittest.TestCase):
             stressed_exit_loss_usd=Decimal("5"), opens_new_owner=True,
         )
         self.assertTrue(result.allowed)
+
+    def test_approved_twenty_contract_size_respects_unchanged_gross_cap(self) -> None:
+        strategy, risk = load_policy()
+        candidate = rank_candidate(
+            RankInput(RewardPool("p", Decimal("50")), rules(), book()), now=NOW,
+            quantity=strategy.quote_quantity, offset_ticks=strategy.quote_offset_ticks,
+        )
+        self.assertEqual(candidate.quote.yes.quantity, Decimal("20"))
+        self.assertEqual(candidate.quote.no.quantity, Decimal("20"))
+        state = ExposureState(gross_reservation_usd=Decimal("290"))
+        result = admit_quote_pair(
+            risk, state, candidate.quote,
+            stressed_exit_loss_usd=Decimal("5"), opens_new_owner=True,
+        )
+        self.assertIn("gross exposure cap", result.reasons)
 
     def test_approved_exposure_gate_blocks_gross_and_stressed_loss(self) -> None:
         strategy, risk = load_policy()

@@ -13,8 +13,9 @@ from copy import deepcopy
 from collections.abc import Callable
 
 from .account_state import AccountReducer, OrderTransition, OwnedOrder
+from .domain import canonical_symbol
 from .execution import IntentLedger, IntentState
-from .storage import AuthenticatedCashAdjustment, SQLiteJournal
+from .storage import AuthenticatedCashAdjustment, AuthenticatedSettlement, SQLiteJournal
 
 
 class MissingExecutionEvidence(RuntimeError):
@@ -198,6 +199,69 @@ class AccountRuntime:
         self.expected_confirmed_usd = self.confirmed_usd
         return count
 
+    def reconcile_authenticated_settlement(
+        self,
+        settlement: AuthenticatedSettlement,
+        *,
+        observed_at: datetime,
+    ) -> bool:
+        """Apply one exact venue settlement without treating it as a trade fill."""
+        if self.expected_positions is None or self.expected_confirmed_usd is None:
+            raise RuntimeError("settlement reconciliation requires a durable account baseline")
+        if self.reducer.positions.get(settlement.symbol, Decimal("0")) != 0:
+            raise RuntimeError("settlement reconciliation requires an authenticated flat position")
+        # Settlement is stronger position/cash evidence than a locally stale
+        # working-order view: the contract can no longer create inventory.
+        # Keep the symbol quarantined while its delayed terminal order event is
+        # reconciled, but do not stop unrelated markets.
+        self.block_entries(settlement.symbol, reason="settlement")
+        inserted = self.journal.record_authenticated_settlement(
+            settlement,
+            expected_positions=dict(self.expected_positions),
+            expected_cash=self.expected_confirmed_usd,
+            observed_at=observed_at,
+        )
+        if inserted:
+            self.expected_positions.pop(settlement.symbol)
+            self.expected_confirmed_usd += settlement.payout
+            self.release_fill_block(settlement.symbol)
+            self.fill_version += 1
+            self._known_account_activity()
+        return inserted
+
+    @staticmethod
+    def _frame_settlements(frame: dict[str, Any]) -> tuple[tuple[str, Decimal], ...]:
+        """Return terminal symbol/payout pairs; reject ambiguous settlement rows."""
+        result: list[tuple[str, Decimal]] = []
+        seen: set[str] = set()
+        for row in frame.get("P", []):
+            if not isinstance(row, dict) or row.get("t") != "ec":
+                continue
+            amounts: dict[str, Decimal] = {}
+            for amount in row.get("a", []):
+                if not isinstance(amount, dict):
+                    raise RuntimeError("settlement position amount is invalid")
+                kind = str(amount.get("t", ""))
+                if kind in amounts:
+                    raise RuntimeError("settlement position amount is duplicated")
+                try:
+                    value = Decimal(str(amount.get("v", "0")))
+                except Exception as exc:
+                    raise RuntimeError("settlement position amount is invalid") from exc
+                if not value.is_finite():
+                    raise RuntimeError("settlement position amount is invalid")
+                amounts[kind] = value
+            if "settlement_payout" not in amounts:
+                continue
+            if amounts.get("position") != 0:
+                raise RuntimeError("settlement payout did not close the position")
+            symbol = canonical_symbol(str(row.get("s", "")))
+            if symbol in seen:
+                raise RuntimeError("settlement position row is duplicated")
+            seen.add(symbol)
+            result.append((symbol, amounts["settlement_payout"]))
+        return tuple(result)
+
     def _signal(self, client_order_id: str) -> None:
         self.events.setdefault(client_order_id, asyncio.Event()).set()
 
@@ -238,12 +302,8 @@ class AccountRuntime:
             return
         if event_type == "positionReport":
             self.last_position_at = time.monotonic()
-            if any(
-                isinstance(amount, dict) and amount.get("t") == "settlement_payout"
-                for row in frame.get("P", []) if isinstance(row, dict)
-                for amount in row.get("a", [])
-            ):
-                self._known_account_activity()
+            settlements = self._frame_settlements(frame)
+            prior_positions = dict(self.reducer.positions)
             self.reducer.apply_position_report(
                 frame,
                 complete_snapshot=self.complete_position_snapshots,
@@ -251,6 +311,30 @@ class AccountRuntime:
             if self.expected_positions is None:
                 self.expected_positions = dict(self.reducer.positions)
                 self._persist_expected_positions()
+            for symbol, payout in settlements:
+                signed = prior_positions.get(symbol)
+                if signed is None:
+                    signed = self.expected_positions.get(symbol)
+                if signed is None or signed == 0:
+                    # A complete snapshot may repeat a terminal row after its
+                    # exact settlement was already committed. It cannot create
+                    # a second cash credit.
+                    existing = self.journal.connection.execute(
+                        "SELECT payout FROM prediction_settlement WHERE symbol=?",
+                        (symbol,),
+                    ).fetchone()
+                    if existing is None or Decimal(str(existing[0])) != payout:
+                        raise RuntimeError("settlement has no matching owned inventory")
+                    continue
+                self.reconcile_authenticated_settlement(
+                    AuthenticatedSettlement(
+                        symbol=symbol,
+                        signed_quantity=signed,
+                        payout=payout,
+                        settled_at=_event_time(frame),
+                    ),
+                    observed_at=datetime.now(timezone.utc),
+                )
             self.positions_seen = True
             return
         if event_type != "orderUpdate":

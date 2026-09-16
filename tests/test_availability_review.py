@@ -358,9 +358,25 @@ class AvailabilityTests(unittest.IsolatedAsyncioTestCase):
         await self.r._release_recovered_market("X", version)
         self.assertIn("X", self.r.account.blocked_entries)
 
-    async def test_inventory_lifecycle_change_still_requires_attention(self):
+    async def test_inventory_lifecycle_change_is_scoped_with_complete_proof(self):
+        self.r.account.last_balance_at = time.monotonic()
+        self.r.account.last_position_at = time.monotonic()
         self.r.account.reducer.positions["X"] = D(1)
-        with self.assertRaises(RuntimeError):
+        self.r.account.expected_positions = {"X": D(1)}
+        self.r.journal.persist_deadline(
+            "X", "YES", fixtures.NOW,
+            fixtures.NOW + fixtures.timedelta(minutes=5), D(1),
+        )
+        self.r._handle_contract_status({"s": "X", "n": "paused"})
+        self.assertTrue(self.r.gate.may_submit)
+        self.assertIn("X", self.r.account.fill_blocked_entries)
+
+    async def test_inventory_lifecycle_change_without_deadline_still_requires_attention(self):
+        self.r.account.last_balance_at = time.monotonic()
+        self.r.account.last_position_at = time.monotonic()
+        self.r.account.reducer.positions["X"] = D(1)
+        self.r.account.expected_positions = {"X": D(1)}
+        with self.assertRaisesRegex(RuntimeError, "scoped inventory proof"):
             self.r._handle_contract_status({"s": "X", "n": "paused"})
 
     async def test_temporarily_unrewarded_owner_is_kept_for_recovery(self):
