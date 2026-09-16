@@ -12,7 +12,7 @@ Owner explicitly approved the September 16 incident exception. This is a policy 
 
 ## Current outcome
 
-The owner canceled the external working SELL. Stable REST and private-stream proof then showed zero active orders, unchanged position/fill evidence and both cash surfaces stable. The exception was applied once and consumed. A subsequent full read-only production preparation passed with 21 tracked markets, 18 ranked and 13 eligible. Separate REST evidence showed one position and zero active orders; SQLite integrity passed. No order, permit, activation or restart.
+The owner canceled the external working SELL. Stable REST and private-stream proof then showed zero active orders, unchanged position/fill evidence and both cash surfaces stable. The exception was applied once and consumed. A subsequent full read-only production preparation passed with 21 tracked markets, 18 ranked and 13 eligible. Exact authenticated history cleanup imported zero executions and used the existing flat-lifecycle proof to remove one unrelated stale deadline. Final evidence showed one position, zero active orders and one matching deadline market; SQLite integrity passed. No order, permit, activation or restart.
 
 The consumed command was:
 
