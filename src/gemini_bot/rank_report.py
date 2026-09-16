@@ -30,6 +30,8 @@ def rank_live_universe(
     profitability: ProfitabilityTracker | None = None,
     target_uptime: Decimal = Decimal(".75"),
     maker_rebate_fractions: dict[str, Decimal] | None = None,
+    preferred_symbols: dict[str, str] | None = None,
+    allow_uptime_override: bool = False,
 ) -> list[RankedCandidate]:
     inputs: list[RankInput] = []
     progress = uptime or {}
@@ -100,6 +102,8 @@ def rank_live_universe(
         ))
     return rank_unique_pools(
         inputs,
+        preferred_symbols=preferred_symbols,
+        allow_uptime_override=allow_uptime_override,
         quantity=quantity,
         offset_ticks=offset_ticks,
         now=now,

@@ -75,12 +75,15 @@ def load_activation_permit(
         5: (required - {"symbols"}) | {
             "uptime_override_until", "universe_scope", "supervised_restart_limit",
         },
+        6: (required - {"symbols"}) | {
+            "uptime_override_until", "universe_scope", "supervised_restart_limit",
+        },
     }
     if version not in schemas or set(raw) != schemas[version]:
         raise ValueError("activation permit schema/version mismatch")
     override = (
         datetime.fromisoformat(str(raw["uptime_override_until"]))
-        if version in {3, 4, 5} else None
+        if version in {3, 4, 5, 6} and not (version == 6 and raw["uptime_override_until"] is None) else None
     )
     permit = ActivationPermit(
         permit_id=str(raw["permit_id"]),
@@ -92,7 +95,7 @@ def load_activation_permit(
         build_sha256=str(raw["build_sha256"]),
         symbols=tuple(raw["symbols"]) if isinstance(raw.get("symbols"), list) else (),
         uptime_override_until=override,
-        universe_scope=str(raw["universe_scope"]) if version in {4, 5} else None,
+        universe_scope=str(raw["universe_scope"]) if version in {4, 5, 6} else None,
         permit_version=int(version),
         supervised_restart_limit=int(raw.get("supervised_restart_limit", 0)),
     )
@@ -104,7 +107,8 @@ def load_activation_permit(
         raise ValueError("activation permit validity cannot exceed 24 hours")
     if permit.uptime_override_until is not None and (
         permit.uptime_override_until.tzinfo is None
-        or permit.uptime_override_until <= current
+        or (permit.permit_version != 6 and permit.uptime_override_until <= current)
+        or (permit.permit_version == 6 and permit.uptime_override_until < permit.approved_at)
         or permit.uptime_override_until > permit.expires_at
     ):
         raise ValueError("uptime override must be timezone-aware, active, and within permit validity")
@@ -123,11 +127,11 @@ def load_activation_permit(
             raise ValueError("activation permit requires exact unique uppercase symbols within pool breadth")
     elif permit.universe_scope != "reward_catalog":
         raise ValueError("activation permit universe scope is not approved")
-    if permit.permit_version == 5 and not 1 <= permit.supervised_restart_limit <= 2:
+    if permit.permit_version in {5, 6} and not 1 <= permit.supervised_restart_limit <= 2:
         raise ValueError("supervised permit restart limit must be between one and two")
     consumed = store.get_runtime_state(f"consumed_permit:{permit.permit_id}")
     if consumed is not None:
-        if permit.permit_version != 5:
+        if permit.permit_version not in {5, 6}:
             raise ValueError("activation permit has already been consumed")
         try:
             session = json.loads(consumed)
@@ -153,7 +157,7 @@ def consume_activation_permit(
     supervisor_session_id: str | None = None,
 ) -> None:
     current = now or datetime.now(timezone.utc)
-    if permit.permit_version == 5:
+    if permit.permit_version in {5, 6}:
         if not supervisor_session_id:
             raise ValueError("supervised permit requires a supervisor session identity")
         key = f"consumed_permit:{permit.permit_id}"
@@ -197,8 +201,8 @@ def finish_supervised_activation(
     outcome: str,
     now: datetime | None = None,
 ) -> None:
-    """Close or release a v5 session only from an active matching runner."""
-    if permit.permit_version != 5:
+    """Close or release a supervised session only from its active runner."""
+    if permit.permit_version not in {5, 6}:
         return
     if outcome not in {"recoverable_flat", "closed", "attention"}:
         raise ValueError("unknown supervised activation outcome")

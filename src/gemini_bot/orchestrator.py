@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -61,7 +62,7 @@ from .storage import (
     WindowsOwnerLock,
     shared_control_directory,
 )
-from .uptime import sample_and_load_progress
+from .uptime import sample_and_load_progress, eastern_day_window
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
@@ -130,6 +131,7 @@ class ProductionOrchestrator:
         self._closed = False
         self._activated_pool_ids: set[str] = set()
         self._sticky_pool_ids: set[str] = set()
+        self._sticky_markets: dict[str, tuple[str, str]] = {}
         self._expiry: dict[str, datetime] = {}
         self._trade_start: dict[str, datetime] = {}
         self._sports_start: dict[str, datetime] = {}
@@ -144,6 +146,9 @@ class ProductionOrchestrator:
         self._maker_ack_count = 0
         self._commissioning_ignore_uptime_proxy = False
         self._uptime_override_until: datetime | None = None
+        self._continue_after_override = False
+        self._reward_epoch: tuple[str, bool] | None = None
+        self._catalog_scope = False
         self._commissioning_expected_yes_price: Decimal | None = None
         self._commissioning_expected_no_price: Decimal | None = None
         self._quote_cooldown_until: dict[str, float] = {}
@@ -207,15 +212,76 @@ class ProductionOrchestrator:
                 },
             ), "exchange_reward_uptime": self.exchange_reward_uptime.metadata(now=_utc_now()),
              "entry_read_holds": sorted(self._read_recovery_attempts),
-             "stream_recovery_holds": sorted(self._stream_holds)},
+             "stream_recovery_holds": sorted(self._stream_holds),
+             "session_expires_at": self._permit_expires_at.isoformat() if self._permit_expires_at else None,
+             "uptime_override_active": self._override_active(),
+             "uptime_override_until": self._uptime_override_until.isoformat() if self._uptime_override_until else None,
+             "continue_after_override": self._continue_after_override,
+             "reward_epoch": self._reward_epoch},
         )
+
+    def _override_active(self, now: datetime | None = None) -> bool:
+        return self._commissioning_ignore_uptime_proxy and (
+            self._uptime_override_until is None or (now or _utc_now()) < self._uptime_override_until
+        )
+
+    def _current_reward_epoch(self, now: datetime) -> tuple[str, bool]:
+        return eastern_day_window(now)[0].isoformat(), self._override_active(now)
+
+    def _advance_reward_epoch(self, now: datetime) -> bool:
+        """Rebuild day-specific eligibility before admitting any new-day entry."""
+        epoch = self._current_reward_epoch(now)
+        if epoch == self._reward_epoch:
+            return False
+        self._uptime = sample_and_load_progress(
+            self.journal, self.universe, self.account.reducer, now=now,
+            books=self.public.books, market_data_verified_at=self._market_data_verified_at(),
+            exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
+            sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
+        )
+        self.ranked = rank_live_universe(
+            self.universe, self.public.books, now=now,
+            quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
+            uptime=self._uptime, account=self.account.reducer,
+            market_data_verified_at=self._market_data_verified_at(), profitability=self.profitability,
+            target_uptime=self.config.strategy.target_uptime, maker_rebate_fractions=self._maker_rebate_fractions,
+            preferred_symbols={pool: pair[1] for pool, pair in self._sticky_markets.items()},
+            allow_uptime_override=self._override_active(now),
+        )
+        self._reward_epoch = epoch
+        self.log.event(logging.INFO, "reward_epoch_changed", eastern_day_start=epoch[0],
+                       uptime_override_active=epoch[1], same_process=True)
+        return True
+
+    def _load_sticky_markets(self) -> None:
+        raw = self.journal.get_runtime_state("sticky_markets_v1")
+        if raw is None:
+            return
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or len(value) > 15
+                or any(not isinstance(pool, str) or not isinstance(pair, list) or len(pair) != 2
+                       or any(not isinstance(s, str) or not s for s in pair)
+                       for pool, pair in value.items())):
+            raise RuntimeError("persisted market cohort is malformed")
+        self._sticky_markets = {pool: tuple(pair) for pool, pair in value.items()}
+        self._sticky_pool_ids = set(self._sticky_markets)
+
+    def _save_sticky_markets(self, desired: list[Any], locked_pools: set[str]) -> None:
+        markets = {c.pool_id: (c.event_ticker, c.symbol) for c in desired}
+        for c in self.universe:
+            if c.pool.pool_id in locked_pools:
+                markets[c.pool.pool_id] = (c.event_ticker, c.rules.symbol)
+        if markets != self._sticky_markets:
+            self.journal.set_runtime_state("sticky_markets_v1", json.dumps(markets, sort_keys=True), updated_at=_utc_now())
+            self._sticky_markets = markets
 
     def _recovery_stop_requested(self) -> bool:
         now = _utc_now()
         return (self._closed or (self.directory / "STOP").exists()
                 or self.gate.state not in {EngineState.QUOTING, EngineState.READY}
                 or (self._permit_expires_at is not None and now >= self._permit_expires_at)
-                or (self._uptime_override_until is not None and now >= self._uptime_override_until))
+                or (not self._continue_after_override and self._uptime_override_until is not None
+                    and now >= self._uptime_override_until))
 
     def _check_stream_recovery(self) -> None:
         if self._stream_recovery_task is not None and self._stream_recovery_task.done():
@@ -491,7 +557,8 @@ class ProductionOrchestrator:
                 observed_at = _utc_now()
                 if frame.get("e") == "contractStatus":
                     self._handle_contract_status(frame)
-                if all(key in frame for key in ("s", "t", "p", "q", "m")):
+                if (all(key in frame for key in ("s", "t", "p", "q", "m"))
+                        and str(frame["s"]).upper() in self.public.books):
                     self.profitability.observe_trade(frame, observed_at=observed_at)
                 updated_symbol = self.public.apply_frame(frame)
                 if (
@@ -801,8 +868,10 @@ class ProductionOrchestrator:
                 if not order.client_order_id or not self.journal.knows_client_order_id(order.client_order_id):
                     raise RuntimeError("an unowned active order blocks production startup")
 
+            self._load_sticky_markets()
             self.universe = await RewardUniverseLoader(self.rest).load(
-                maximum_pools=self.config.risk.max_tracked_markets
+                maximum_pools=self.config.risk.max_tracked_markets,
+                preferred=self._sticky_markets, now=_utc_now(),
             )
             if not self.universe:
                 raise RuntimeError("no active reward pools passed discovery")
@@ -1039,6 +1108,12 @@ class ProductionOrchestrator:
         if not self._book_fresh(symbol):
             raise QuoteChangedBeforeSend("market became stale while waiting to send")
         if params["side"] == "BUY":
+            if self._continue_after_override:
+                if self._reward_epoch != self._current_reward_epoch(_utc_now()):
+                    raise EntryStateChangedBeforeSend("reward day/override changed; fresh ranking required")
+                current = next((c for c in self.ranked if c.symbol == symbol), None)
+                if current is None or not self._candidate_actionable(current):
+                    raise EntryStateChangedBeforeSend("fresh reward eligibility is required")
             if self._read_recovery_attempts or self._stream_holds:
                 raise EntryStateChangedBeforeSend("read recovery pauses new entries")
             if params.get("timeInForce") == "MOC":
@@ -1117,7 +1192,7 @@ class ProductionOrchestrator:
         solely for testing maker behavior and measuring live outcomes.
         """
         reward_or_proxy_ok = candidate.eligible_now or bool(
-            self._commissioning_ignore_uptime_proxy
+            self._override_active()
             and candidate.quote is not None
             and tuple(candidate.reasons) == (_UPTIME_PROXY_REJECTION,)
         )
@@ -1689,7 +1764,8 @@ class ProductionOrchestrator:
             if self._permit_expires_at is not None and now >= self._permit_expires_at:
                 self.gate.state = EngineState.DRAINING
                 return
-            if self._uptime_override_until is not None and now >= self._uptime_override_until:
+            if (not self._continue_after_override and self._uptime_override_until is not None
+                    and now >= self._uptime_override_until):
                 self.gate.state = EngineState.DRAINING
                 return
             if not self.account.snapshots_fresh and not self._stream_holds:
@@ -1846,15 +1922,102 @@ class ProductionOrchestrator:
             ):
                 usable_permitted_symbol = True
         self.universe = refreshed
+        if self._continue_after_override and self._catalog_scope:
+            await self._rollover_flat_markets(list(active_rows.values()))
+            usable_permitted_symbol = any(
+                c.pool.active and self._entry_time_valid(c.rules.symbol)
+                and c.rules.symbol not in self.account.blocked_entries for c in self.universe
+            )
         self._uptime = sample_and_load_progress(
             self.journal, self.universe, self.account.reducer, now=_utc_now(), books=self.public.books,
             market_data_verified_at=self._market_data_verified_at(),
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
         )
-        self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(refreshed),
-                       usable_permitted_symbol=usable_permitted_symbol, new_symbols_admitted=0)
-        return usable_permitted_symbol
+        self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
+                       usable_permitted_symbol=usable_permitted_symbol)
+        # A v6 catalog session can wait safely for the next discovery interval.
+        return usable_permitted_symbol or (self._continue_after_override and self._catalog_scope)
+
+    async def _rollover_flat_markets(self, rewards: list[dict[str, Any]]) -> None:
+        """Replace only expired/inactive owners after terminal and flat proof."""
+        if self._stream_holds or self._read_recovery_attempts or self._recovery_stop_requested():
+            return
+        retiring = [c for c in self.universe if not c.pool.active or not self._entry_time_valid(c.rules.symbol)]
+        if not retiring and len(self.universe) >= self.config.risk.max_tracked_markets:
+            return
+        preferred = {c.pool.pool_id: (c.event_ticker, c.rules.symbol) for c in self.universe if c not in retiring}
+        proposed = await RewardUniverseLoader(self.rest).load(
+            maximum_pools=self.config.risk.max_tracked_markets, preferred=preferred,
+            now=_utc_now(), rewards=rewards,
+        )
+        async with self._lifecycle_lock:
+            if self._stream_holds or self._read_recovery_attempts or self._recovery_stop_requested():
+                return
+            removable = []
+            for contract in retiring:
+                symbol = contract.rules.symbol
+                # Inventory retains its owner and original exit deadline.
+                if self.account.reducer.positions.get(symbol, Decimal("0")):
+                    continue
+                await self._cancel_symbol_entries(symbol)
+                if (self.account.reducer.positions.get(symbol, Decimal("0"))
+                        or symbol in self._exit_uncertain
+                        or any(s == symbol for _, s in self.journal.nonterminal_sent_intents())
+                        or any(self.journal.get_deadline(symbol, outcome) is not None for outcome in ("YES", "NO"))):
+                    continue
+                removable.append(contract)
+            if removable:
+                snapshot = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
+                if not self.account.snapshots_fresh or not self.account.equity_classification_complete:
+                    return
+                assert_position_consistency(snapshot, self.account.reducer.positions)
+                if any(not row.client_order_id or not self.journal.knows_client_order_id(row.client_order_id)
+                       for row in snapshot.active_orders):
+                    raise RuntimeError("catalog rollover found unowned orders")
+                removable = [c for c in removable
+                             if not any(p.symbol == c.rules.symbol for p in snapshot.positions)
+                             and not any(o.symbol == c.rules.symbol for o in snapshot.active_orders)
+                             and not self.account.reducer.positions.get(c.rules.symbol, Decimal("0"))]
+            symbols = tuple(c.rules.symbol for c in removable)
+            if symbols:
+                await self.public.unsubscribe(symbols)
+                self.universe = [c for c in self.universe if c.rules.symbol not in symbols]
+                self._permitted_symbols.difference_update(symbols)
+                for c in removable:
+                    self._sticky_pool_ids.discard(c.pool.pool_id)
+                    self._sticky_markets.pop(c.pool.pool_id, None)
+            if self._stream_holds or self._recovery_stop_requested():
+                return
+            pools = {c.pool.pool_id for c in self.universe}
+            additions = []
+            for c in proposed:
+                if len(self.universe) + len(additions) >= self.config.risk.max_tracked_markets:
+                    break
+                if c.pool.pool_id in pools or c.rules.symbol in self.account.blocked_entries:
+                    continue
+                pools.add(c.pool.pool_id)
+                additions.append(c)
+            # Establish identities before subscriptions can deliver snapshots.
+            for c in additions:
+                symbol = c.rules.symbol
+                self._expiry[symbol] = _parse_time(c.expiry)
+                if c.trade_starts_at:
+                    self._trade_start[symbol] = _parse_time(c.trade_starts_at)
+                if c.event_category.casefold() == "sports" and c.event_starts_at:
+                    self._sports_start[symbol] = _parse_time(c.event_starts_at)
+                    self.account.hard_exit_cutoff[symbol] = self._sports_start[symbol] - timedelta(
+                        seconds=self.config.risk.sports_exit_before_start_seconds)
+                self.public.books[symbol] = LocalBook(symbol)
+            self.universe.extend(additions)
+            self.account.expiry = self._expiry
+            self._permitted_symbols.update(c.rules.symbol for c in additions)
+            if additions:
+                await self.public.subscribe(tuple(c.rules.symbol for c in additions))
+            if removable or additions:
+                self.journal.set_runtime_state("sticky_markets_v1", json.dumps(self._sticky_markets, sort_keys=True), updated_at=_utc_now())
+                self._reward_epoch = None  # New identities require freshly computed eligibility.
+                self.log.event(logging.INFO, "catalog_owners_refreshed", retired=len(removable), added=len(additions))
 
     async def activate(
         self,
@@ -1911,6 +2074,8 @@ class ProductionOrchestrator:
         self._commissioning_single_leg = single_leg
         self._commissioning_ignore_uptime_proxy = ignore_uptime_proxy
         self._uptime_override_until = permit.uptime_override_until if ignore_uptime_proxy else None
+        self._continue_after_override = permit.permit_version == 6
+        self._catalog_scope = permit.universe_scope == "reward_catalog"
         self._commissioning_expected_yes_price = expected_yes_price
         self._commissioning_expected_no_price = expected_no_price
         start, end = RiskWindowPolicy(self.config.risk.risk_window_loss_usd).bounds(_utc_now())
@@ -1942,10 +2107,10 @@ class ProductionOrchestrator:
                 )
             activation_reason = (
                 f"bounded supervised permit {permit.permit_id} active"
-                if permit.permit_version == 5
+                if permit.permit_version in {5, 6}
                 else f"one-use permit {permit.permit_id} consumed"
             )
-            if ignore_uptime_proxy:
+            if self._override_active():
                 activation_reason += "; uptime proxy exception active; no reward eligibility claim"
             self._write_status("quoting", True, activation_reason)
             safety = asyncio.create_task(self._safety_loop(), name="gemini-fill-safety")
@@ -1960,6 +2125,8 @@ class ProductionOrchestrator:
             next_reward_check_at = asyncio.get_running_loop().time() + 300
             stop_at = None if commissioning_seconds is None else asyncio.get_running_loop().time() + commissioning_seconds
             while self.gate.state is EngineState.QUOTING:
+                if self._continue_after_override and self._advance_reward_epoch(_utc_now()):
+                    next_rank_at = next_stale_check_at = next_uptime_at = 0.0
                 self._check_stream_recovery()
                 if safety is not None and safety.done():
                     safety.result()
@@ -2037,6 +2204,8 @@ class ProductionOrchestrator:
                         profitability=self.profitability,
                         target_uptime=self.config.strategy.target_uptime,
                         maker_rebate_fractions=self._maker_rebate_fractions,
+                        preferred_symbols={pool: pair[1] for pool, pair in self._sticky_markets.items()},
+                        allow_uptime_override=self._override_active(),
                     )
                     if clock >= getattr(self, "_next_report_at", 0.0):
                         self._write_rank_report(_utc_now())
@@ -2065,6 +2234,7 @@ class ProductionOrchestrator:
                         entry_time_valid=self._entry_time_valid,
                     )
                     self._sticky_pool_ids = set(desired_pools)
+                    self._save_sticky_markets(desired, locked_pools)
                     candidates_by_symbol = {item.symbol: item for item in desired}
                     await self._cancel_ineligible_working_entries(candidates_by_symbol)
                     self._activated_pool_ids = set(locked_pools)

@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026 overnight continuity: owner requested fixing the midnight interruption so no restart is needed at midnight. Deploy after offline verification using one controlled pre-midnight restart and a fresh, at-most-24-hour version-6 supervised permit. The September 15 uptime exception ends at midnight Eastern; continue in the same process with normal 50% admission, fresh day-specific ranking, preserved market ownership, and unchanged risk/exit limits. Permit expiry remains a hard drain; this does not authorize indefinite operation or extending the uptime exception. Preserve healthy market identities across restart and safely replace expired flat owners within the approved reward catalog.
+
 - September 15, 2026 repository workflow: after changes are complete and proportionately verified, commit them and push the verified commit to the configured GitHub remote. Keep credentials and ignored runtime data out of Git, and report any push or remote-verification failure instead of claiming publication.
 
 - September 15, 2026 restart instruction: owner explicitly asked to restart the Gemini bot. A fresh final-build/account/policy-bound version-5 permit may run through the remainder of the existing Eastern-day authorization, including the existing reward-catalog scope and uptime-proxy override, with at most two same-supervisor recoveries after durable flat proof. Preserve every standing risk, breadth, timing, exit and fail-closed limit; this instruction raises none of them.

@@ -1,5 +1,7 @@
 # Gemini findings
 
+- September 15 overnight continuity: 302 production and 28 script tests passed, including 25 new midnight/identity/rollover cases. Version 6 can end the override without stopping the session; stale-day sends fail closed, unchanged healthy orders survive the day transition, and inventory/deadlines/loss history remain intact. The earlier same-pool switch reproduction concerns the generic ranker; production discovery already selects one representative per pool per load. Durable identity now also protects rediscovery across restart. [Release evidence](docs/OVERNIGHT_CONTINUITY_2026-09-15.md); see STATUS.md for actual deployment, which is separate from these offline results.
+
 - September 15 restart-readiness follow-up: 19:59:45–20:04:45 ET read-only preflight passed. Authenticated account flat at start/finish; all 29 books fresh in 17 samples, matched cash/positions, two eligible candidates, verified public/private WS quotas, no mutations/gaps/dropped work. Observer CPU averaged 0.38% of one core, not a live-trading CPU benchmark. Final source: 277 production/28 script tests. Recovery faults remain synthetic; process disappearance remains unproven. [Report](data/preflight-20260915-stream-recovery/preflight-report.json).
 
 - September 15 runtime follow-up: both old processes are absent, the saved 18:29 ET heartbeat is stale and no durable result/log explains termination. New conservative windows, scoped recovery and logging are prepared, not deployed. [Evidence and remaining uncertainty](docs/RUNTIME_HARDENING_2026-09-15.md).

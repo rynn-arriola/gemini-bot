@@ -42,6 +42,7 @@ class PublicMarketSocket:
         self._request_id = 0
         self._initial_frames: list[dict[str, Any]] = []
         self.books: dict[str, LocalBook] = {}
+        self._subscribed_symbols: set[str] | None = None
         self.dirty = DirtySymbolScheduler(queue_capacity)
         self.adverse_dirty = DirtySymbolScheduler(queue_capacity)
         self.depth_changed = asyncio.Event()
@@ -121,6 +122,9 @@ class PublicMarketSocket:
     async def subscribe(self, symbols: tuple[str, ...]) -> None:
         await self._send("SUBSCRIBE", ["contractStatus"], Priority.MARKET_RESYNC)
         symbols = tuple(canonical_symbol(symbol) for symbol in symbols)
+        if self._subscribed_symbols is None:
+            self._subscribed_symbols = set()
+        self._subscribed_symbols.update(symbols)
         for start in range(0, len(symbols), 20):
             batch = symbols[start:start + 20]
             for symbol in batch:
@@ -139,6 +143,18 @@ class PublicMarketSocket:
                 Priority.MARKET_RESYNC,
             )
 
+    async def unsubscribe(self, symbols: tuple[str, ...]) -> None:
+        """Retire proven-flat owners; late frames cannot recreate their books."""
+        symbols = tuple(canonical_symbol(symbol) for symbol in symbols)
+        if self._subscribed_symbols is not None:
+            self._subscribed_symbols.difference_update(symbols)
+        for symbol in symbols:
+            self.books.pop(symbol, None)
+            self.resync_required.discard(symbol)
+        for start in range(0, len(symbols), 10):
+            await self._send("UNSUBSCRIBE", [stream for symbol in symbols[start:start + 10]
+                             for stream in (f"{symbol}@depth@100ms", f"{symbol}@trade")], Priority.MARKET_RESYNC)
+
     async def resync(self, symbol: str) -> None:
         symbol = canonical_symbol(symbol)
         book = self.books.setdefault(symbol, LocalBook(symbol))
@@ -155,6 +171,8 @@ class PublicMarketSocket:
         if frame.get("e") != "depthUpdate":
             return None
         symbol = canonical_symbol(str(frame["s"]))
+        if self._subscribed_symbols is not None and symbol not in self._subscribed_symbols:
+            return None
         if symbol in self.resync_required:
             return symbol
         local = self.books.setdefault(symbol, LocalBook(symbol))

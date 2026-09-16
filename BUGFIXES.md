@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 15, 2026 — overnight continuity
+
+Version 6 separates session expiry from the one-day uptime exception: midnight ends the exception and refreshes the local day/ranking in the same process. The final send guard rejects stale day/override decisions. Versions 3–5 retain their drain behavior, and all permits still expire within 24 hours. Healthy quotes need not be canceled simply because the day changes.
+
+Persist selected pool/event/symbol identities and prefer them during rediscovery/ranking. Bounded recurring discovery may replace expired/inactive owners only after authenticated flat and terminal-intent proof; filled owners retain their original deadlines. New subscriptions require fresh depth before quoting. This improves continuity but cannot recover missed snapshots or certify the exchange denominator. See [overnight release evidence](docs/OVERNIGHT_CONTINUITY_2026-09-15.md) and STATUS.md for deployment state.
+
 ## September 15, 2026 — bounded WebSocket recovery, not yet activated
 
 Transport EOF/errors, depth sequence gaps and stale account snapshots now initiate bounded reconnect/reconciliation instead of an unconditional process stop. Added generation deduplication, no-replay guards, exact terminal-history checks and cancel-on-disconnect handling without duplicate cancellation. Storage/protocol/ownership/unknown-fill failures remain fatal. Original deadlines and 50%-uptime history survive; lost quoting time is not forgiven. Offline fault tests passed; natural live recovery remains unverified. [Boundaries and evidence](docs/RUNTIME_HARDENING_2026-09-15.md).

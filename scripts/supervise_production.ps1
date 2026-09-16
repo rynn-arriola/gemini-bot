@@ -77,8 +77,8 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "Project virtual-environment Python was not found."
 }
 $PermitDocument = Get-Content -LiteralPath $PermitPath -Raw | ConvertFrom-Json
-if ($PermitDocument.permit_version -ne 5) {
-    throw "Windows supervision requires a version-5 bounded-session permit."
+if ($PermitDocument.permit_version -notin @(5, 6)) {
+    throw "Windows supervision requires a version-5 or version-6 bounded-session permit."
 }
 $MaximumRestarts = [int]$PermitDocument.supervised_restart_limit
 if ($MaximumRestarts -lt 1 -or $MaximumRestarts -gt 2) {

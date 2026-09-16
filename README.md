@@ -70,6 +70,8 @@ does not assert that Gemini's 50% reward threshold will be met.
 
 The Windows launcher is `scripts\start_production.ps1`; `-Mode Prepare` remains non-ordering and `-Mode Live` requires the permit. Live mode starts `scripts\supervise_production.ps1`, which owns one runner. A version-5 bounded session may restart it at most twice, with backoff, only after the runner durably proves flat; otherwise the supervisor performs one read-only reconciliation and enters `ATTENTION_REQUIRED`. `scripts\stop_production.ps1` disables supervisor recovery and writes a graceful drain request. Confirm `status.json` reaches `stopped_flat`; do not kill the process first.
 
+Version 6 keeps those supervision bounds and the 24-hour permit maximum, while allowing an uptime exception to end before session expiry. At midnight the runner refreshes day-specific eligibility and continues without the exception; session expiry still drains. Persisted market identities and flat-only recurring rollover preserve continuity. See [overnight continuity](docs/OVERNIGHT_CONTINUITY_2026-09-15.md).
+
 After the owner manually closes all bot inventory, adopt the new baseline only with fresh authenticated proof:
 
 ```powershell

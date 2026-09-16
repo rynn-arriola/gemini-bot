@@ -238,13 +238,25 @@ def rank_candidate(
     )
 
 
-def rank_unique_pools(items: list[RankInput], **kwargs: object) -> list[RankedCandidate]:
+def rank_unique_pools(
+    items: list[RankInput], *, preferred_symbols: dict[str, str] | None = None,
+    allow_uptime_override: bool = False, **kwargs: object,
+) -> list[RankedCandidate]:
     """Return only the best contract per unique reward budget."""
     best: dict[str, RankedCandidate] = {}
+    def pinned(candidate: RankedCandidate) -> bool:
+        actionable = candidate.eligible_now or (
+            allow_uptime_override and candidate.reasons == (
+                "50% uptime is no longer reachable in the estimated window",
+            )
+        )
+        return actionable and (preferred_symbols or {}).get(candidate.pool_id) == candidate.symbol
+
     for item in items:
         ranked = rank_candidate(item, **kwargs)
         current = best.get(ranked.pool_id)
         candidate_key = (
+            pinned(ranked),
             ranked.eligible_now,
             ranked.priority_score,
             ranked.potential_priority_score,
@@ -253,6 +265,7 @@ def rank_unique_pools(items: list[RankInput], **kwargs: object) -> list[RankedCa
             ranked.symbol,
         )
         current_key = None if current is None else (
+            pinned(current),
             current.eligible_now,
             current.priority_score,
             current.potential_priority_score,
