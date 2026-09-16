@@ -11,6 +11,8 @@ Updated September 15, 2026. Current handoff, not venue proof.
 
 ## Prepared and verified
 
+- **Continuous-service/quote-retention source is prepared but NOT deployed.** Owner explicitly prohibited restart. No live process, permit, order or shared trading journal was changed by this implementation. V7 adds standing same-session authority, safe/economically eligible quote retention, maintenance standby, extended transport recovery and local resting-gap telemetry. **349 production + 28 script tests passed**, including 47 new cases; compilation, PowerShell parsing and offline release checks passed. Existing v6 remains bounded as stated above. [Scope and release evidence](docs/CONTINUOUS_SERVICE_2026-09-15.md).
+
 - Conservative estimated venue window is separate from local crypto/sports exit cutoff. Exiting early reduces earning opportunities, never the denominator. Unknown reward activation, exact snapshot phase and maintenance deductions are not invented.
 - Exchange daily-summary counts remain separate five-minute reporting, not guaranteed live counters or admission authority. Prior 18:41 ET read returned no rows; nonempty calibration is pending.
 - Fixed second-leg immediate fills, periodic cash-event race, atomic fill/expected-state/deadline writes, explicit read-only manual-flat preparation and current-owner reward metadata refresh.

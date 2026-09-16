@@ -7,7 +7,7 @@ from .catalog import RewardedContract
 from .domain import UptimeProgress, uptime_progress_key
 from .market_state import LocalBook
 from .account_state import AccountReducer
-from .domain import Outcome
+from .domain import Outcome, QuotePair
 from .profitability import ProfitabilityEvidence, ProfitabilityTracker
 from .reward_ranking import (
     RANKING_VERSION,
@@ -32,6 +32,7 @@ def rank_live_universe(
     maker_rebate_fractions: dict[str, Decimal] | None = None,
     preferred_symbols: dict[str, str] | None = None,
     allow_uptime_override: bool = False,
+    resting_quotes: dict[str, QuotePair] | None = None,
 ) -> list[RankedCandidate]:
     inputs: list[RankInput] = []
     progress = uptime or {}
@@ -62,7 +63,7 @@ def rank_live_universe(
         evidence = ProfitabilityEvidence()
         if profitability is not None:
             try:
-                quote = build_two_sided_quote(top, contract.rules, quantity, offset_ticks)
+                quote = (resting_quotes or {}).get(contract.rules.symbol) or build_two_sided_quote(top, contract.rules, quantity, offset_ticks)
             except ValueError:
                 quote = None
             if quote is not None:
@@ -99,6 +100,7 @@ def rank_live_universe(
             pool_event_count=contract.pool_event_count,
             recurring_duration_value=contract.recurring_duration_value,
             recurring_duration_unit=contract.recurring_duration_unit,
+            resting_quote=(resting_quotes or {}).get(contract.rules.symbol),
         ))
     return rank_unique_pools(
         inputs,

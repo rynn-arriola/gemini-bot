@@ -34,6 +34,7 @@ class RankInput:
     pool_event_count: int | None = None
     recurring_duration_value: int | None = None
     recurring_duration_unit: str = ""
+    resting_quote: QuotePair | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +134,16 @@ def rank_candidate(
             reasons.append("stale market data")
     try:
         quote = build_two_sided_quote(item.book, item.rules, quantity, offset_ticks)
+        if item.resting_quote is not None:
+            target = quote
+            quote = item.resting_quote
+            for leg, wanted in ((quote.yes, target.yes), (quote.no, target.no)):
+                if (leg.symbol != wanted.symbol or leg.outcome != wanted.outcome or leg.side != wanted.side
+                        or leg.quantity != quantity or not Decimal("0") < leg.price <= wanted.price
+                        or leg.price % item.rules.tick_size != 0):
+                    raise ValueError("resting quote does not meet approved size/price safety")
     except ValueError as exc:
+        quote = None
         reasons.append(str(exc))
 
     quality = Decimal("0")

@@ -8,9 +8,9 @@ param(
     [switch]$IgnoreUptimeProxy
 )
 
-# Windows-native process supervision. Version-5 approval is reusable only by
-# this supervisor session after the prior runner durably proves a recoverable
-# flat exit. Every other outcome enters ATTENTION_REQUIRED.
+# Windows-native supervision. V5/6 retain bounded-session behavior. V7 waits
+# through explicit read-only startup outages and allows paced transient-flat
+# recovery in this same session; integrity/unknown/HARD stays in attention.
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -42,6 +42,8 @@ function Write-SupervisorStatus([string]$State, [string]$Reason, [int]$RunnerExi
         reason = $Reason
         runner_exit_code = $RunnerExitCode
         restart_count = $RestartCount
+        consecutive_live_restarts = $RestartBurst
+        continuous_service = $ContinuousService
         automatic_live_restart = $State -in @("STARTING", "RUNNING", "BACKOFF")
         supervisor_pid = $PID
         runner_pid = if ($null -eq $Runner) { $null } else { $Runner.Id }
@@ -77,15 +79,17 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "Project virtual-environment Python was not found."
 }
 $PermitDocument = Get-Content -LiteralPath $PermitPath -Raw | ConvertFrom-Json
-if ($PermitDocument.permit_version -notin @(5, 6)) {
-    throw "Windows supervision requires a version-5 or version-6 bounded-session permit."
+if ($PermitDocument.permit_version -notin @(5, 6, 7)) {
+    throw "Windows supervision requires a version-5/6 bounded or version-7 continuous permit."
 }
+$ContinuousService = $PermitDocument.permit_version -eq 7
 $MaximumRestarts = [int]$PermitDocument.supervised_restart_limit
 if ($MaximumRestarts -lt 1 -or $MaximumRestarts -gt 2) {
     throw "Bounded-session restart limit must be one or two."
 }
 $SessionId = [Guid]::NewGuid().ToString()
 $RestartCount = 0
+$RestartBurst = 0
 $FastCrashCount = 0
 $BackoffSeconds = 10
 $FastCrashSeconds = 120
@@ -94,9 +98,11 @@ Write-SupervisorStatus "STARTING" "launching approved live runner" -1
 
 $LastRunnerExitCode = -1
 while ($true) {
+    $RetryNotBefore = [DateTimeOffset]::MinValue
     $AttemptNumber = $RestartCount + 1
-    $RunnerOut = Join-Path $RuntimePath ("runner-{0:D2}.stdout.log" -f $AttemptNumber)
-    $RunnerErr = Join-Path $RuntimePath ("runner-{0:D2}.stderr.log" -f $AttemptNumber)
+    $LogSlot = if ($ContinuousService) { (($AttemptNumber - 1) % 3) + 1 } else { $AttemptNumber }
+    $RunnerOut = Join-Path $RuntimePath ("runner-{0:D2}.stdout.log" -f $LogSlot)
+    $RunnerErr = Join-Path $RuntimePath ("runner-{0:D2}.stderr.log" -f $LogSlot)
     Remove-Item -LiteralPath $RunnerResult -Force -ErrorAction SilentlyContinue
     $Arguments = @(
         "-m", "gemini_bot", "run-live", "--env", $EnvironmentPath,
@@ -130,12 +136,16 @@ while ($true) {
             $ValidOutcome = (
                 ($RecordedExitCode -eq 0 -and $RecordedOutcome -eq "closed") -or
                 ($RecordedExitCode -eq 5 -and $RecordedOutcome -eq "recoverable_flat") -or
+                ($ContinuousService -and $RecordedExitCode -eq 6 -and $RecordedOutcome -eq "startup_wait") -or
                 ($RecordedExitCode -in @(2, 3) -and $RecordedOutcome -in @("failed", "startup_or_unclassified_failure"))
             )
             if ($RecordedSession -ne $SessionId -or -not $ValidOutcome) {
                 $LastRunnerExitCode = 4
             } else {
                 $LastRunnerExitCode = $RecordedExitCode
+                if ($RunnerResultDocument.retry_not_before) {
+                    $RetryNotBefore = [DateTimeOffset]::Parse([string]$RunnerResultDocument.retry_not_before)
+                }
             }
         } catch {
             $LastRunnerExitCode = 4
@@ -148,27 +158,35 @@ while ($true) {
         exit 0
     }
     if ($LastRunnerExitCode -eq 0) {
+        if ($ContinuousService) { break } # HARD/other drain stays online for attention, never auto-clears.
         Write-SupervisorStatus "STOPPED" "runner exited clean and flat" $LastRunnerExitCode
         exit 0
     }
-    if ($LastRunnerExitCode -ne 5) { break }
+    if ($LastRunnerExitCode -ne 5 -and -not ($ContinuousService -and $LastRunnerExitCode -eq 6)) { break }
 
-    if ($RanSeconds -lt $FastCrashSeconds) {
+    if ($LastRunnerExitCode -eq 6) {
+        # Explicit read-only venue/catalog wait, not a crashing live runner.
+    } elseif ($RanSeconds -lt $FastCrashSeconds) {
         $FastCrashCount += 1
     } else {
         $FastCrashCount = 0
+        $RestartBurst = 0
         $BackoffSeconds = 10
     }
     if ($FastCrashCount -ge 3) { break }
-    if ($RestartCount -ge $MaximumRestarts) { break }
+    if (-not $ContinuousService -and $RestartCount -ge $MaximumRestarts) { break }
+    if ($ContinuousService -and $LastRunnerExitCode -eq 5 -and $RestartBurst -ge $MaximumRestarts) { break }
+    if ($LastRunnerExitCode -eq 5) { $RestartBurst += 1 }
     $RestartCount += 1
-    Write-SupervisorStatus "BACKOFF" "recoverable flat failure; bounded restart pending" $LastRunnerExitCode
-    for ($Waited = 0; $Waited -lt $BackoffSeconds; $Waited += 1) {
+    $WaitReason = if ($LastRunnerExitCode -eq 6) { "read-only startup waiting for venue/catalog; no trading" } else { "verified transient flat exit; paced recovery pending" }
+    Write-SupervisorStatus "BACKOFF" $WaitReason $LastRunnerExitCode
+    for ($Waited = 0; $Waited -lt $BackoffSeconds -or [DateTimeOffset]::UtcNow -lt $RetryNotBefore; $Waited += 1) {
         if (Test-Path -LiteralPath $SupervisorStop) {
             Write-SupervisorStatus "STOPPED" "operator stop during recovery backoff" $LastRunnerExitCode
             exit 0
         }
         Start-Sleep -Seconds 1
+        if (($Waited % 10) -eq 0) { Write-SupervisorStatus "BACKOFF" $WaitReason $LastRunnerExitCode }
     }
     $BackoffSeconds = [Math]::Min(60, $BackoffSeconds * 2)
 }
@@ -185,7 +203,11 @@ $RecoveryArguments = @(
 $Recovery = Start-Process -FilePath $Python -ArgumentList (Join-QuotedArguments $RecoveryArguments) `
     -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $RecoveryDirectory "prepare.stdout.log") `
-    -RedirectStandardError (Join-Path $RecoveryDirectory "prepare.stderr.log") -PassThru -Wait
+    -RedirectStandardError (Join-Path $RecoveryDirectory "prepare.stderr.log") -PassThru
+while (-not $Recovery.WaitForExit(10000)) {
+    Write-SupervisorStatus "RECONCILING" "read-only account check; trading remains blocked" $LastRunnerExitCode
+}
+$Recovery.Refresh()
 $Reason = if ($Recovery.ExitCode -eq 0) {
     "automatic restart blocked or exhausted; read-only reconciliation passed; fresh approval required"
 } else {

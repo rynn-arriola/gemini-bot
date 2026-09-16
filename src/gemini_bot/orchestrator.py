@@ -21,9 +21,11 @@ from .activation import (
     policy_digest,
 )
 from .config import DEFAULT_POLICY_PATH, LiveConfig
+from .continuity import RestingObservation
+from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
 from .discovery import RewardUniverseLoader
 from .catalog import join_reward_contracts
-from .domain import EngineState, Outcome, canonical_symbol
+from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .exit_pricing import exact_crossing_exit
@@ -62,7 +64,7 @@ from .storage import (
     WindowsOwnerLock,
     shared_control_directory,
 )
-from .uptime import sample_and_load_progress, eastern_day_window
+from .uptime import sample_and_load_progress, eastern_day_window, locally_qualifying
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
@@ -147,6 +149,12 @@ class ProductionOrchestrator:
         self._commissioning_ignore_uptime_proxy = False
         self._uptime_override_until: datetime | None = None
         self._continue_after_override = False
+        self._continuous_service = False
+        self._reward_program_paused = False
+        self._resting_observations: dict[str, RestingObservation] = {}
+        self._retained_pairs = 0
+        self._replaced_pairs = 0
+        self._recoverable_exit = False
         self._reward_epoch: tuple[str, bool] | None = None
         self._catalog_scope = False
         self._commissioning_expected_yes_price: Decimal | None = None
@@ -217,8 +225,33 @@ class ProductionOrchestrator:
              "uptime_override_active": self._override_active(),
              "uptime_override_until": self._uptime_override_until.isoformat() if self._uptime_override_until else None,
              "continue_after_override": self._continue_after_override,
+             "continuous_service": self._continuous_service,
+             "reward_program_paused": self._reward_program_paused,
+             "resting_continuity": self._continuity_view(),
              "reward_epoch": self._reward_epoch},
         )
+
+    def _observe_resting(self) -> None:
+        now, clock = _utc_now(), time.monotonic()
+        # Bounded to current owners, with per-run measurements. No historical
+        # event/day counters are replaced and no offline time is credited.
+        symbols = {c.rules.symbol for c in self.universe}
+        self._resting_observations = {s: v for s, v in self._resting_observations.items() if s in symbols}
+        healthy = (not self._stream_holds and not self._reward_program_paused
+                   and self.account.snapshots_fresh and self.account.equity_classification_complete)
+        for c in self.universe:
+            if c.pool.pool_id not in self._sticky_pool_ids and c.rules.symbol not in self._resting_observations:
+                continue
+            qualifies = healthy and self._entry_time_valid(c.rules.symbol) and locally_qualifying(
+                c, self.account.reducer, self.public.books.get(c.rules.symbol), now=now,
+                market_data_verified_at=self._market_data_verified_at(),
+            )
+            self._resting_observations.setdefault(c.rules.symbol, RestingObservation()).observe(clock, qualifies)
+
+    def _continuity_view(self) -> dict[str, Any]:
+        return {"source": "local_per_run_observation_not_exchange_snapshots",
+                "retained_pair_checks": self._retained_pairs, "replaced_pairs": self._replaced_pairs,
+                "symbols": {s: v.view() for s, v in self._resting_observations.items()}}
 
     def _override_active(self, now: datetime | None = None) -> bool:
         return self._commissioning_ignore_uptime_proxy and (
@@ -235,7 +268,8 @@ class ProductionOrchestrator:
             return False
         self._uptime = sample_and_load_progress(
             self.journal, self.universe, self.account.reducer, now=now,
-            books=self.public.books, market_data_verified_at=self._market_data_verified_at(),
+            books={} if self._reward_program_paused else self.public.books,
+            market_data_verified_at=self._market_data_verified_at(),
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
         )
@@ -333,9 +367,11 @@ class ProductionOrchestrator:
 
     async def _reconnect_stream(self, component: str) -> None:
         transport = self.public if component == "public" else self.private
-        for attempt in range(1, 4):
+        attempt = 0
+        while True:
+            attempt += 1
             self._stream_attempts[component] += 1
-            if self._stream_attempts[component] > 3:
+            if not self._continuous_service and self._stream_attempts[component] > 3:
                 raise RuntimeError("stream reconnect attempt budget exhausted")
             if self._recovery_stop_requested():
                 raise RuntimeError("stream recovery interrupted by stop or expiry")
@@ -354,12 +390,23 @@ class ProductionOrchestrator:
                 self.log.event(logging.INFO, "stream_reconnected", component=component, attempt=attempt,
                                trading_resumed=False)
                 return
-            except (ConnectionClosed, ConnectionError, TimeoutError, OSError) as exc:
+            except Exception as exc:
+                if not (transient_failure(exc) or isinstance(exc, OSError)):
+                    raise
+                delay = retry_after_seconds(exc)
+                if delay:
+                    self.governor.apply_server_cooldown(component + "_ws", delay)
                 self.log.exception("stream_reconnect_retry", ErrorClass.TRANSPORT, exc,
                                    component=component, attempt=attempt)
-                if attempt == 3:
+                if not self._continuous_service and attempt == 3:
                     raise
-                await asyncio.sleep(2 ** (attempt - 1))
+                # Bounded attempts, paced indefinitely only for transport loss.
+                # Wake for STOP at most one second later; server cooldowns are
+                # still enforced by the shared transport governor on connect.
+                for _ in range(min(60, 2 ** min(attempt - 1, 6))):
+                    if self._recovery_stop_requested():
+                        raise RuntimeError("stream recovery interrupted by stop or expiry")
+                    await asyncio.sleep(1)
 
     async def _recovery_account_proof(self) -> None:
         before_version = self.account.fill_version
@@ -417,13 +464,29 @@ class ProductionOrchestrator:
 
     async def _prove_stream_recovery(self) -> None:
         try:
-            async with asyncio.timeout(_STREAM_RECOVERY_SECONDS):
+            proof_started: float | None = None
+            quarantined_generation: dict[str, int] | None = None
+            read_failures = 0
+            async with asyncio.timeout(None if self._continuous_service else _STREAM_RECOVERY_SECONDS):
                 while self._stream_holds:
                     if self._recovery_stop_requested():
                         raise RuntimeError("recovery proof interrupted by stop or expiry")
                     for task in self._stream_restarts.values():
                         if task.done():
                             task.result()
+                    if self._continuous_service:
+                        if self._stream_ready != {"public", "private"}:
+                            proof_started = None
+                        elif proof_started is None:
+                            proof_started = time.monotonic()
+                        elif time.monotonic() - proof_started >= _STREAM_RECOVERY_SECONDS:
+                            raise RuntimeError("connected streams did not reconcile within proof budget")
+                        if (quarantined_generation == self._stream_generation
+                                and self._stream_ready != {"public", "private"}):
+                            # Already proved/canceled owned entries while public
+                            # transport is down. Do not poll REST every second.
+                            await asyncio.sleep(1)
+                            continue
                     # REST active-order evidence precedes cancellation: the old
                     # connection's cancel-on-disconnect may already have removed
                     # cached orders. Never blindly cancel that stale cache.
@@ -432,17 +495,26 @@ class ProductionOrchestrator:
                             generation = dict(self._stream_generation)
                             async with self._lifecycle_lock:
                                 await self._recovery_account_proof()
+                            quarantined_generation = generation
+                            read_failures = 0
                         except RecoveryPending:
                             await asyncio.sleep(1)
                             continue
                         except ApiError as exc:
-                            if exc.status not in {429, 500, 502, 503, 504}:
+                            if not transient_failure(exc):
                                 raise
-                            await asyncio.sleep(2)
+                            if self._continuous_service:
+                                proof_started = None  # Explicit venue/read outage, not mismatched truth.
+                            read_failures += 1
+                            for _ in range(min(60, 2 ** min(read_failures, 6))):
+                                if self._recovery_stop_requested():
+                                    raise RuntimeError("recovery proof interrupted by stop or expiry")
+                                await asyncio.sleep(1)
                             continue
                         # No await between the final authority check and resume.
                         if (generation != self._stream_generation or self._stream_ready != {"public", "private"}
-                                or not self.universe or not all(self._book_fresh(item.rules.symbol) for item in self.universe)):
+                                or (not self.universe and not self._continuous_service)
+                                or not all(self._book_fresh(item.rules.symbol) for item in self.universe)):
                             await asyncio.sleep(1)
                             continue
                         if self._recovery_stop_requested() or not self.account.snapshots_fresh or not self.account.equity_classification_complete:
@@ -851,7 +923,7 @@ class ProductionOrchestrator:
                 raise RuntimeError("latest Gemini Predictions terms are not accepted")
             reward_config = await self.rest.reward_config()
             if reward_config.get("enabled") is not True:
-                raise RuntimeError("Gemini liquidity rewards are not currently enabled")
+                raise NoMarketsAvailable("Gemini liquidity rewards are not currently enabled")
             if hasattr(self.rest, "maker_rebate_rates"):
                 try:
                     rebate_rows = await self.rest.maker_rebate_rates()
@@ -874,7 +946,7 @@ class ProductionOrchestrator:
                 preferred=self._sticky_markets, now=_utc_now(),
             )
             if not self.universe:
-                raise RuntimeError("no active reward pools passed discovery")
+                raise NoMarketsAvailable("no active reward pools passed discovery")
             self._expiry = {item.rules.symbol: _parse_time(item.expiry) for item in self.universe}
             self._trade_start = {
                 item.rules.symbol: _parse_time(item.trade_starts_at)
@@ -1114,7 +1186,7 @@ class ProductionOrchestrator:
                 current = next((c for c in self.ranked if c.symbol == symbol), None)
                 if current is None or not self._candidate_actionable(current):
                     raise EntryStateChangedBeforeSend("fresh reward eligibility is required")
-            if self._read_recovery_attempts or self._stream_holds:
+            if self._read_recovery_attempts or self._stream_holds or self._reward_program_paused:
                 raise EntryStateChangedBeforeSend("read recovery pauses new entries")
             if params.get("timeInForce") == "MOC":
                 target = self._current_quote_target(symbol)
@@ -1232,7 +1304,7 @@ class ProductionOrchestrator:
             })
 
     async def _quote_pair_current(self, candidate: Any) -> None:
-        if self._read_recovery_attempts or self._stream_holds:
+        if self._read_recovery_attempts or self._stream_holds or self._reward_program_paused:
             return
         if (not self.gate.may_submit or not self._candidate_actionable(candidate)
                 or candidate.quote is None
@@ -1456,7 +1528,7 @@ class ProductionOrchestrator:
             order for order in self.account.reducer.orders.values()
             if order.symbol == candidate.symbol and order.working and order.side.value == "BUY"
         ]
-        if self._read_recovery_attempts:
+        if self._read_recovery_attempts or self._reward_program_paused:
             # Unknown reward/account audit blocks new risk, but does not kill
             # the process, abandon positions, or reset the 50% uptime history.
             if working:
@@ -1478,11 +1550,56 @@ class ProductionOrchestrator:
         actual = {order.outcome: (order.price, order.remaining_quantity) for order in working}
         if getattr(self, "_commissioning_single_leg", False):
             expected.pop(Outcome.NO)
-        if working and (len(working) != len(expected) or actual != expected):
+        retention_required = self._continuous_service and not getattr(self, "_commissioning_single_leg", False)
+        if retention_required and working and self._retain_resting_pair(candidate, working):
+            self._retained_pairs += 1
+            return
+        if working and (retention_required or len(working) != len(expected) or actual != expected):
+            self._replaced_pairs += 1
+            self.log.event(logging.INFO, "quote_pair_replacement", symbol=candidate.symbol,
+                           reason="target_changed_or_pair_not_retainable")
             await self._cancel_symbol_entries(candidate.symbol)
             working = []
         if not working:
             await self._quote_pair_locked(candidate)
+
+    def _retain_resting_pair(self, candidate: Any, working: list[Any]) -> bool:
+        """Preserve queue/resting time only for intact, safe qualifying pairs.
+
+        Every NEW order still uses the exact two-tick target. Existing orders
+        may be farther away, never closer, and BOTH must remain within the
+        documented reward distance. Fills/partial quantities never qualify.
+        """
+        if (len(working) != 2 or {o.outcome for o in working} != {Outcome.YES, Outcome.NO}
+                or not self.account.snapshots_fresh or not self.account.equity_classification_complete):
+            return False
+        target = self._current_quote_target(candidate.symbol)
+        book = self.public.books.get(candidate.symbol)
+        if target is None or book is None or book.top() is None:
+            return False
+        midpoint = book.top().midpoint
+        targets = {Outcome.YES: target.yes, Outcome.NO: target.no}
+        if not all(
+            o.cumulative_filled == 0 and o.remaining_quantity == targets[o.outcome].quantity
+            and o.price <= targets[o.outcome].price
+            and abs((o.price if o.outcome is Outcome.YES else 1 - o.price) - midpoint) <= Decimal(".10")
+            for o in working
+        ):
+            return False
+        orders = {o.outcome: o for o in working}
+        pair = QuotePair(*(
+            QuoteLeg(candidate.symbol, outcome, Side.BUY, orders[outcome].price, orders[outcome].remaining_quantity)
+            for outcome in (Outcome.YES, Outcome.NO)
+        ))
+        contract = next(c for c in self.universe if c.rules.symbol == candidate.symbol)
+        ranked = rank_live_universe(
+            [contract], self.public.books, now=_utc_now(),
+            quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
+            uptime=self._uptime, account=self.account.reducer, market_data_verified_at=self._market_data_verified_at(),
+            profitability=self.profitability, target_uptime=self.config.strategy.target_uptime,
+            maker_rebate_fractions=self._maker_rebate_fractions, resting_quotes={candidate.symbol: pair},
+        )
+        return bool(ranked and self._candidate_actionable(ranked[0]))
 
     def _websocket_exposure(self) -> ExposureState:
         """Conservative live exposure from authenticated WebSocket truth."""
@@ -1760,6 +1877,7 @@ class ProductionOrchestrator:
         while self.gate.state is EngineState.QUOTING:
             now = _utc_now()
             clock = asyncio.get_running_loop().time()
+            self._observe_resting()
             self._check_stream_recovery()
             if self._permit_expires_at is not None and now >= self._permit_expires_at:
                 self.gate.state = EngineState.DRAINING
@@ -1866,6 +1984,10 @@ class ProductionOrchestrator:
     async def _reward_pools_still_active(self) -> bool:
         config = await self.rest.reward_config()
         if config.get("enabled") is not True:
+            if self._continuous_service:
+                self._reward_program_paused = True
+                self.log.event(logging.WARNING, "reward_program_paused", entries_paused=True)
+                return True
             return False
         rows = await self.rest.reward_events()
         now = _utc_now()
@@ -1936,6 +2058,7 @@ class ProductionOrchestrator:
         )
         self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
                        usable_permitted_symbol=usable_permitted_symbol)
+        self._reward_program_paused = False  # Clear only after complete successful metadata refresh.
         # A v6 catalog session can wait safely for the next discovery interval.
         return usable_permitted_symbol or (self._continue_after_override and self._catalog_scope)
 
@@ -2050,6 +2173,8 @@ class ProductionOrchestrator:
             raise RuntimeError("approved symbols are not in the reconciled universe")
         if commissioning_seconds is not None and (not 2 <= commissioning_seconds <= 30 or permit.maximum_active_pools != 1):
             raise ValueError("commissioning requires 2-30 seconds and a one-pool permit")
+        if permit.permit_version == 7 and commissioning_seconds is not None:
+            raise ValueError("continuous-service permit cannot authorize a commissioning canary")
         if single_leg and commissioning_seconds is None:
             raise ValueError("one-leg mode is restricted to bounded commissioning")
         if (
@@ -2074,7 +2199,8 @@ class ProductionOrchestrator:
         self._commissioning_single_leg = single_leg
         self._commissioning_ignore_uptime_proxy = ignore_uptime_proxy
         self._uptime_override_until = permit.uptime_override_until if ignore_uptime_proxy else None
-        self._continue_after_override = permit.permit_version == 6
+        self._continue_after_override = permit.permit_version in {6, 7}
+        self._continuous_service = permit.permit_version == 7
         self._catalog_scope = permit.universe_scope == "reward_catalog"
         self._commissioning_expected_yes_price = expected_yes_price
         self._commissioning_expected_no_price = expected_no_price
@@ -2106,8 +2232,8 @@ class ProductionOrchestrator:
                     self._reward_reporting_loop(), name="gemini-reward-uptime-reporting",
                 )
             activation_reason = (
-                f"bounded supervised permit {permit.permit_id} active"
-                if permit.permit_version in {5, 6}
+                f"supervised permit {permit.permit_id} active"
+                if permit.permit_version in {5, 6, 7}
                 else f"one-use permit {permit.permit_id} consumed"
             )
             if self._override_active():
@@ -2159,7 +2285,7 @@ class ProductionOrchestrator:
                             self.gate.state = EngineState.DRAINING
                             break
                         self._complete_read_recovery("reward_metadata")
-                        next_reward_check_at = clock + 300
+                        next_reward_check_at = clock + (30 if self._reward_program_paused else 300)
                     reward_check = None
                 if reward_check is None and clock >= next_reward_check_at:
                     reward_check = asyncio.create_task(
@@ -2183,7 +2309,7 @@ class ProductionOrchestrator:
                         now = _utc_now()
                         self._uptime = sample_and_load_progress(
                             self.journal, self.universe, self.account.reducer, now=now,
-                            books=self.public.books,
+                            books={} if self._reward_program_paused else self.public.books,
                             market_data_verified_at=self._market_data_verified_at(),
                             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
                             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
@@ -2209,7 +2335,12 @@ class ProductionOrchestrator:
                     )
                     if clock >= getattr(self, "_next_report_at", 0.0):
                         self._write_rank_report(_utc_now())
-                        self._write_status("quoting", True, "runtime heartbeat; approval active")
+                        standby = self._reward_program_paused or bool(self._read_recovery_attempts) or not any(
+                            self._candidate_actionable(c) and self._entry_time_valid(c.symbol) for c in self.ranked
+                        )
+                        self._write_status("standby" if standby else "quoting", True,
+                                           "entries paused; service and exit safety active" if standby
+                                           else "runtime heartbeat; approval active")
                         self.account.prune_terminal()
                         self._next_report_at = clock + 15
                     while self.public.dirty.pop() is not None:
@@ -2264,8 +2395,9 @@ class ProductionOrchestrator:
             finish_supervised_activation(
                 permit, self.journal,
                 supervisor_session_id=supervisor_session_id,
-                outcome="recoverable_flat" if drained_flat else "attention",
+                outcome="recoverable_flat" if drained_flat and (not self._continuous_service or transient_failure(exc)) else "attention",
             )
+            self._recoverable_exit = drained_flat and (not self._continuous_service or transient_failure(exc))
             raise
         finally:
             if self._reward_reporting_task is not None:

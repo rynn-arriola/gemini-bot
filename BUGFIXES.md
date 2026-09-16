@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 15, 2026 — continuous service and resting-time protection (not deployed)
+
+Normal maintenance previously replaced an entire working pair on any target-price difference. V7 retains intact pairs that are still fresh, safely priced, qualifying and profitable under the existing model evaluated at actual resting prices. It still cancels unsafe/partial/ineligible pairs and places replacements at the exact two-tick target. This reduces avoidable gaps without promising improved rewards; wider retained prices can score less.
+
+New explicit v7 authorization has no daily session-expiry shutdown, while the uptime exception still expires. Reward-program disablement/empty eligibility becomes standby. Transient reconnect/read-only startup outages may wait with paced retries; server retry deadlines survive runner boundaries. Known transient-flat exits may recover within a same-session burst limit; unknown/integrity/HARD remains blocked for attention. Source is offline-tested only and the owner prohibited restart. [Full evidence and limitations](docs/CONTINUOUS_SERVICE_2026-09-15.md).
+
 ## September 15, 2026 — overnight continuity
 
 Version 6 separates session expiry from the one-day uptime exception: midnight ends the exception and refreshes the local day/ranking in the same process. The final send guard rejects stale day/override decisions. Versions 3–5 retain their drain behavior, and all permits still expire within 24 hours. Healthy quotes need not be canceled simply because the day changes.

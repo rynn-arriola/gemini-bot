@@ -6,27 +6,32 @@ import json
 import os
 from pathlib import Path
 import sys
+from datetime import datetime, timedelta, timezone
 
 from .config import ConfigurationError, load_live_config, load_policy, load_preflight_config
 from .orchestrator import ProductionOrchestrator
 from .runtime_files import atomic_write_json
 from .storage import SQLiteJournal
+from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
 
 
 class LiveRunnerExit(RuntimeError):
-    def __init__(self, code: int, message: str) -> None:
+    def __init__(self, code: int, message: str, *, retry_after: float = 0) -> None:
         super().__init__(message)
         self.code = code
+        self.retry_after = retry_after
 
 
 def _write_live_runner_result(
-    directory: Path, *, session_id: str | None, exit_code: int, outcome: str,
+    directory: Path, *, session_id: str | None, exit_code: int, outcome: str, retry_after: float = 0,
 ) -> None:
     """Persist a same-session result for the native Windows supervisor."""
     atomic_write_json(directory / "runner-result.json", {
         "session_id": session_id or "",
         "exit_code": exit_code,
         "outcome": outcome,
+        **({"retry_not_before": (datetime.now(timezone.utc) + timedelta(seconds=retry_after)).isoformat()}
+           if retry_after > 0 else {}),
     })
 
 
@@ -53,6 +58,13 @@ async def _run_live(
 ) -> None:
     config = load_live_config(config_path)
     runtime = ProductionOrchestrator(config, directory)
+    # This flag permits read-only startup retries only. Actual order authority
+    # is still schema/build/policy/account/session validated by activate().
+    continuous_requested = False
+    try:
+        continuous_requested = json.loads(permit.read_text(encoding="utf-8")).get("permit_version") == 7
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        pass
     try:
         try:
             await runtime.prepare()
@@ -61,8 +73,12 @@ async def _run_live(
                 ignore_uptime_proxy=ignore_uptime_proxy,
                 supervisor_session_id=supervisor_session_id,
             )
-        except (ConfigurationError, RuntimeError, ValueError, TimeoutError) as exc:
+        except Exception as exc:
             if runtime._activation_consumed:
+                if not runtime._continuous_service and not isinstance(
+                    exc, (ConfigurationError, RuntimeError, ValueError, TimeoutError)
+                ):
+                    raise  # Preserve legacy unknown-exception no-restart behavior.
                 phase = "unknown"
                 try:
                     phase = str(json.loads(
@@ -71,8 +87,13 @@ async def _run_live(
                 except (OSError, UnicodeError, json.JSONDecodeError):
                     pass
                 raise LiveRunnerExit(
-                    5 if phase == "stopped_flat" else 3, str(exc),
+                    5 if phase == "stopped_flat" and (not runtime._continuous_service or runtime._recoverable_exit) else 3,
+                    type(exc).__name__ + "; inspect redacted runtime logs",
+                    retry_after=retry_after_seconds(exc),
                 ) from exc
+            if continuous_requested and (transient_failure(exc) or isinstance(exc, NoMarketsAvailable)):
+                raise LiveRunnerExit(6, "read-only startup waiting for venue/catalog availability",
+                                     retry_after=retry_after_seconds(exc)) from exc
             raise
     finally:
         await runtime.close()
@@ -114,7 +135,7 @@ def main() -> int:
         choices=("I_CONFIRM_MANUAL_FLAT",),
         help="explicit operator acknowledgement required",
     )
-    live = sub.add_parser("run-live", help="reconcile then activate with a bounded permit")
+    live = sub.add_parser("run-live", help="reconcile then activate with an owner-approved permit")
     live.add_argument("--env", type=Path, default=Path(".env"))
     live.add_argument("--directory", type=Path, default=Path("data/production"))
     live.add_argument("--activation-permit", type=Path, required=True)
@@ -172,7 +193,8 @@ def main() -> int:
             _write_live_runner_result(
                 args.directory, session_id=args.supervisor_session_id,
                 exit_code=exc.code,
-                outcome="recoverable_flat" if exc.code == 5 else "failed",
+                outcome={5: "recoverable_flat", 6: "startup_wait"}.get(exc.code, "failed"),
+                retry_after=exc.retry_after,
             )
             print(f"live runner stopped: {exc}", file=sys.stderr)
             return exc.code

@@ -34,9 +34,9 @@ $SupervisorFresh = Is-Fresh $Supervisor 45
 $RunnerFresh = Is-Fresh $RunnerStatus 90
 $RunnerExists = Process-Exists $Supervisor.runner_pid
 $SupervisorExists = Process-Exists $Supervisor.supervisor_pid
-$Healthy = $SupervisorFresh -and $RunnerFresh -and $RunnerExists -and $SupervisorExists -and $Supervisor.state -eq "RUNNING" -and $RunnerStatus.phase -in @("quoting", "recovering")
+$Healthy = $SupervisorFresh -and $RunnerFresh -and $RunnerExists -and $SupervisorExists -and $Supervisor.state -eq "RUNNING" -and $RunnerStatus.phase -in @("quoting", "recovering", "standby")
 [ordered]@{
-    observation = if ($Healthy -and ($RunnerStatus.phase -eq "recovering" -or @($RunnerStatus.entry_read_holds).Count -gt 0)) { "FRESH_RECOVERY_HOLD" } elseif ($Healthy) { "FRESH_QUOTING_HEARTBEATS" } else { "ATTENTION_REQUIRED_OR_STOPPED" }
+    observation = if ($Healthy -and ($RunnerStatus.phase -eq "recovering" -or @($RunnerStatus.entry_read_holds).Count -gt 0)) { "FRESH_RECOVERY_HOLD" } elseif ($Healthy -and $RunnerStatus.phase -eq "standby") { "FRESH_STANDBY_HEARTBEATS" } elseif ($Healthy) { "FRESH_QUOTING_HEARTBEATS" } elseif ($SupervisorFresh -and $SupervisorExists -and $Supervisor.state -eq "BACKOFF") { "FRESH_SUPERVISED_BACKOFF" } else { "ATTENTION_REQUIRED_OR_STOPPED" }
     entry_read_holds = $RunnerStatus.entry_read_holds
     stream_recovery_holds = $RunnerStatus.stream_recovery_holds
     supervisor_fresh = $SupervisorFresh
