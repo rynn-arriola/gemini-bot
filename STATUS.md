@@ -4,9 +4,10 @@ Updated September 15, 2026. Current handoff, not venue proof.
 
 ## Operational truth
 
-- **Stopped; no restart authorized or performed.** Prior runtime: `data/production-20260915-nontrading-v8`. Last runner heartbeat 18:29:54 ET; recorded runner/supervisor PIDs are absent. Saved RUNNING/quoting labels are stale. Empty logs and missing runner result do not explain termination; root cause remains unconfirmed.
-- Read-only preflight passed at **20:04:45 ET**: authenticated REST/WS confirmed no open positions or orders at start/finish; cash and positions matched persisted expectations. This is point-in-time evidence, not continuing monitoring.
-- Source is ready for an **owner-approved bounded restart**, not activated. Fresh launch reconciliation and a new matching build-bound permit remain mandatory. Do not reuse the old permit. No order, cancel, live fault injection, risk reset or restart occurred.
+- **Active under the bounded Windows supervisor.** The owner explicitly requested restart on September 15, 2026. Runtime `data/production-20260915-nontrading-v8` completed a fresh read-only reconciliation at 20:15 ET, then activated at 20:17 ET with a new final-build/account/policy-bound version-5 permit; the old permit was not reused.
+- Verified at **20:18 ET**: fresh runner and supervisor heartbeats, phase `quoting`, 30 pending orders, zero open positions, 32 tracked symbols, no entry-read or stream-recovery holds, zero dropped log records, and no error/critical log records. This is point-in-time evidence; continue using the runtime checker for current health.
+- The permit and explicit uptime-proxy override expire at 00:00 America/New_York on September 16. The supervisor may make at most two same-session restarts after durable flat proof. All prior limits and fail-closed rules remain unchanged; the unexplained 18:29 ET process disappearance is still unconfirmed.
+- Snapshot impact: the stopped interval and launch reconciliation lost qualifying time. The restart resumes quoting but cannot recover missed snapshots or guarantee Gemini's 50% qualification; safety and exact reconciliation continue to override uptime.
 
 ## Prepared and verified
 

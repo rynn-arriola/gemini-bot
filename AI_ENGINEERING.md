@@ -35,3 +35,4 @@
 - Network smoke tests are read-only until an owner-approved commissioning step explicitly authorizes a bounded mutation.
 - A passing test suite is necessary but not sufficient for activation.
 - Production launches hidden on Windows, has one owner lock, writes atomic status, and recovers without duplicating order intent.
+- After a coherent change set passes proportionate verification, commit it and push it to the configured GitHub remote unless the owner explicitly says not to push. Verify the committed tree and confirm the remote branch resolves to the new commit; never include credentials or ignored runtime data.

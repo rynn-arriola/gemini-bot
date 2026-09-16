@@ -4,6 +4,10 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 15, 2026 repository workflow: after changes are complete and proportionately verified, commit them and push the verified commit to the configured GitHub remote. Keep credentials and ignored runtime data out of Git, and report any push or remote-verification failure instead of claiming publication.
+
+- September 15, 2026 restart instruction: owner explicitly asked to restart the Gemini bot. A fresh final-build/account/policy-bound version-5 permit may run through the remainder of the existing Eastern-day authorization, including the existing reward-catalog scope and uptime-proxy override, with at most two same-supervisor recoveries after durable flat proof. Preserve every standing risk, breadth, timing, exit and fail-closed limit; this instruction raises none of them.
+
 - September 15, 2026 restart-readiness follow-up: owner asked to fix the remaining recovery issue so a restart can follow. Implement bounded in-process stream recovery and run non-ordering readiness checks; no restart, new permit or policy override is authorized by this repair turn.
 
 - September 15, 2026 follow-up: implement recommended conservative reward-window treatment; investigate the stopped bot, add redacted operational logs and improve scoped recovery with Polymarket as reference. Preserve strategy/risk/exit rules. This implementation request does not authorize restart.
