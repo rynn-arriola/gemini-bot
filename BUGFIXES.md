@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 16, 2026 — verified journal recovery and live market isolation
+
+Deployment uncovered a physically malformed canonical SQLite file after the controlled stop. The bot was not started against it. A fail-closed reconstruction combined the last verified backup, 13 exact rows recovered from the damaged file, authenticated per-symbol terminal order history, stable REST/private-stream positions and cash, and the already-consumed one-time cash incident boundary. Independent checks proved one position, zero active orders, one deadline, no nonterminal intents, complete current risk classification and SQLite `quick_check=ok`; the damaged original remains preserved.
+
+The pushed market-local repair then passed read-only preparation and activated. Venue truth showed 22 active orders on 11 healthy markets and none on the held ZEC symbol. Its no-depth exit retries remain symbol-scoped and do not consume pending-order slots; the position still consumes exposure and one pool allocation. Unknown orders, ambiguous sends, account disagreement and storage/integrity failures remain account-wide stops. [Recovery evidence](docs/CONTROL_JOURNAL_RECOVERY_2026-09-16.md).
+
 ## September 16, 2026 — catalog-omitted inventory no longer blocks unrelated markets
 
 The typed catalog-standby repair kept the runner alive but still stopped every market before activation whenever one exact held contract was omitted from a discovery response. That contradicted the approved market-isolation and resting-time objective.
