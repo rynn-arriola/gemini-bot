@@ -24,6 +24,7 @@ from .activation import (
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
+from .reconciliation_errors import ExternalOrderPresent
 from .discovery import RewardUniverseLoader
 from .catalog import join_reward_contracts
 from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
@@ -1231,7 +1232,7 @@ class ProductionOrchestrator:
             before = build_account_snapshot(positions_before, orders_before)
             for order in before.active_orders:
                 if not order.client_order_id or not self.journal.knows_client_order_id(order.client_order_id):
-                    raise RuntimeError("an unowned active order blocks production startup")
+                    raise ExternalOrderPresent("an unowned active order blocks production startup")
 
             self._load_sticky_markets()
             self.universe = await RewardUniverseLoader(self.rest).load(

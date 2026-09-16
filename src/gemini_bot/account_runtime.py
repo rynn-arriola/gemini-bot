@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .reconciliation_errors import UnclassifiedPositions
+
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -186,7 +188,7 @@ class AccountRuntime:
         if self.confirmed_usd is None or self.expected_confirmed_usd is None:
             raise RuntimeError("cash reconciliation requires both cash values")
         if self.expected_positions != self.reducer.positions or self.unowned_order_seen:
-            raise RuntimeError("cash reconciliation requires matched account state")
+            raise UnclassifiedPositions("cash reconciliation requires matched account state")
         count = self.journal.reconcile_authenticated_cash_adjustments(
             expected_cash=self.expected_confirmed_usd,
             confirmed_cash=self.confirmed_usd,

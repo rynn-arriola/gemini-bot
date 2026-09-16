@@ -10,6 +10,8 @@ from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING
 
+from .reconciliation_errors import UnclassifiedCash
+
 if TYPE_CHECKING:
     from .execution import OrderIntent
 
@@ -792,7 +794,7 @@ class SQLiteJournal:
         if observed_at.tzinfo is None:
             raise ValueError("cash reconciliation requires an aware timestamp")
         if not adjustments:
-            raise RuntimeError("cash change has no authenticated non-trading adjustment")
+            raise UnclassifiedCash("cash change has no authenticated non-trading adjustment")
         delta = confirmed_cash - expected_cash
         if delta == 0:
             raise RuntimeError("cash adjustment is unnecessary")
@@ -838,7 +840,7 @@ class SQLiteJournal:
             ).fetchone() is None:
                 eligible.append(adjustment)
         if sum((row.amount for row in eligible), Decimal("0")) != delta:
-            raise RuntimeError(
+            raise UnclassifiedCash(
                 "cash change does not exactly match authenticated non-trading activity"
             )
         with self.transaction():

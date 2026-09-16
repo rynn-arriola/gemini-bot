@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 16 reconciliation follow-up: owner asked that remaining startup issues be handled before restart or while the service stays running, and requested Polymarket/history comparison. Add read-only v7 startup standby for identified external-order and unclassified account evidence, retaining exact accounting, ownership and activation gates. This is not permission to round cash, adopt external orders, replay mutations or automatically forgive a post-activation integrity failure. Resume requires full fresh preparation and normal permit validation; no live restart occurred during implementation.
+
 - September 16 six-WebSocket follow-up: owner approved the recommended five public market-data shards plus one shared authenticated account/execution connection. Implement per-shard market-data isolation and recovery while preserving one mutation owner, shared account/IP rate authority, global account/integrity/HARD gates, all risk/strategy limits and normal 50% admission. Source implementation and offline verification do not themselves activate live trading.
 
 - September 16 maintenance failure: owner requested fixing the observed recovery issues and restarting. This authorizes controlled cancellation of surviving owned entries, authenticated reconstruction of missed execution evidence, exact reducing exits, offline maintenance/reconnect regression tests, verified GitHub publication and one fresh build-bound v7 deployment. Preserve all existing risk, deadline, ownership, price, breadth and normal 50% rules. Unknown evidence remains blocked; no induced live faults, new risk limits or host changes.

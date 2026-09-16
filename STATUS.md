@@ -1,6 +1,6 @@
 # Gemini current status
 
-Updated September 16, 2026, 07:44 ET. Current handoff, not a perpetual venue-state guarantee.
+Updated September 16, 2026, 08:18 ET. Current handoff, not a perpetual venue-state guarantee.
 
 ## Operational truth
 
@@ -11,6 +11,8 @@ Updated September 16, 2026, 07:44 ET. Current handoff, not a perpetual venue-sta
 
 ## Verified release and limits
 
+- **Startup standby follow-up: 522 production + 28 script tests = 550 passed.** V7 waits read-only on typed startup evidence blockers, retains cooldowns/STOP and retries full fresh preparation/permit validation only after proof passes. A STOP during final preparation now prevents activation. Real read-only hold check created zero intents and consumed no authority. This does not repair the cash discrepancy, adopt the external order or make post-activation integrity failures automatically retryable. [Evidence, history/Polymarket comparison and limits](docs/RECONCILIATION_STANDBY_2026-09-16.md).
+
 - **507 production + 28 script tests = 535 passed.** Compilation and offline Windows release checks passed. Two deliberate in-memory safety reversals were caught. No induced live faults/fills or activation.
 - Source repairs: typed handshake-EOF recovery, bounded drain transport restoration, exact missed-fill reconstruction, explicit external-reduction reconciliation, and attempt-bound supervisor preparation results.
 - Offline no-buyer regression retains original inventory deadlines, blocks new exposure on the affected symbol, and waits for fresh executable liquidity in the same runner. Unknown sends/accounting still fail closed; missing bids never prove flat. [Maintenance incident and repair evidence](docs/MAINTENANCE_RECOVERY_2026-09-16.md).
@@ -20,4 +22,4 @@ Updated September 16, 2026, 07:44 ET. Current handoff, not a perpetual venue-sta
 
 ## Operator route
 
-Final read-only `prepare-live` in `data/six-socket-final-readiness-20260916` stopped at **an unowned active order blocks production startup**. The external order must be handled by its owner and reconciled; the unexplained cash difference also remains a blocker. Source is installed but the bot is **not restart-ready**. No fresh live permit was issued. [NEXT.md](NEXT.md) lists pending work and [DECISIONS.md](DECISIONS.md) retains unchanged strategy/risk authority.
+Latest read-only `prepare-live` in `data/reconciliation-wait-check-20260916` produced the typed **external active order hold**. A fresh history comparison found all three incident trades already matched exactly, and REST still showed one order/one position. The detailed transaction endpoint rejected the current account key; a transaction statement or authoritative ledger evidence is requested. V7 source now supports safe startup standby, but the account is **not trading-ready**. External-order handling and exact cash reconciliation remain necessary. No fresh live permit, restart or trading activation. [NEXT.md](NEXT.md) lists pending work and [DECISIONS.md](DECISIONS.md) retains unchanged strategy/risk authority.

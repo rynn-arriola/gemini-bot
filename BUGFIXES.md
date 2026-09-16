@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 16, 2026 — startup evidence standby and STOP race
+
+Known external-order/unclassified-account startup blockers previously terminated the v7 runner immediately. They now enter paced read-only standby without adopting orders or resetting cash. Complete preparation and permit validation still precede any activation; malformed/auth/unknown/post-activation failures are not reclassified as recoverable. A STOP received during final preparation now prevents activation. This repairs service availability, not the unresolved cash evidence. [Scope and reference review](docs/RECONCILIATION_STANDBY_2026-09-16.md).
+
 ## September 16, 2026 — shard isolation and known-inventory startup
 
 - Five public shards now have independent book generation, liveness and recovery. A typed public outage/gap no longer requires canceling healthy groups; unknown/private/account failures still block globally. Shared quotas, cancellation priority, sticky reservations and late-frame rejection remain enforced.

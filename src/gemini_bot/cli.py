@@ -10,9 +10,10 @@ from datetime import datetime, timedelta, timezone
 
 from .config import ConfigurationError, load_live_config, load_policy, load_preflight_config
 from .orchestrator import ProductionOrchestrator
-from .runtime_files import atomic_write_json
+from .runtime_files import atomic_write_json, runtime_status
 from .storage import SQLiteJournal
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
+from .reconciliation_errors import ReconciliationRequired
 
 
 class LiveRunnerExit(RuntimeError):
@@ -54,7 +55,84 @@ async def _prepare(config_path: Path, directory: Path, *, result_token: str | No
         })
 
 
-async def _run_live(
+def _startup_stop_requested(directory: Path) -> bool:
+    return any((directory / name).exists() for name in ('STOP', 'SUPERVISOR_STOP'))
+
+
+async def _wait_reconciliation_delay(directory: Path, reason: str, delay: float) -> bool:
+    """Keep a heartbeat and respond to STOP without claiming flatness."""
+    deadline = asyncio.get_running_loop().time() + max(60.0, delay)
+    next_heartbeat = 0.0
+    while not _startup_stop_requested(directory):
+        now = asyncio.get_running_loop().time()
+        remaining = deadline - now
+        if now >= next_heartbeat:
+            atomic_write_json(directory / 'status.json', runtime_status(
+                phase='waiting_reconciliation', activated=False, reason=reason,
+                counters={'retry_in_seconds': max(0, int(remaining)), 'trading_enabled': 0},
+            ))
+            next_heartbeat = now + 5.0
+        if remaining <= 0:
+            return True
+        await asyncio.sleep(min(1.0, remaining))
+    atomic_write_json(directory / 'status.json', runtime_status(
+        phase='stopped_before_activation', activated=False,
+        reason='operator stop; account flatness is not asserted',
+    ))
+    return False
+
+
+async def _wait_for_reconciliation(config_path: Path, directory: Path,
+                                   blocker: ReconciliationRequired) -> bool:
+    """Recheck evidence only: no adoption, mutation, permit or rounding."""
+    reason, delay = type(blocker).__name__, 60.0
+    while await _wait_reconciliation_delay(directory, reason, delay):
+        runtime = ProductionOrchestrator(load_preflight_config(config_path), directory, read_only=True)
+        try:
+            await runtime.prepare()
+            if _startup_stop_requested(directory):
+                await _wait_reconciliation_delay(directory, reason, 0)
+                return False
+            return True
+        except ReconciliationRequired as exc:
+            reason, delay = type(exc).__name__, 60.0
+        except Exception as exc:
+            if not (transient_failure(exc) or isinstance(exc, NoMarketsAvailable)):
+                raise
+            reason = type(exc).__name__
+            delay = max(60.0, retry_after_seconds(exc))
+        finally:
+            await runtime.close()
+    return False
+
+
+async def _run_live(config_path: Path, directory: Path, permit: Path, *,
+                    ignore_uptime_proxy: bool, supervisor_session_id: str | None) -> None:
+    # A v7 hint allows ONLY read-only waiting. Full permit validation still
+    # occurs on every activation attempt, against fresh complete preparation.
+    continuous_requested = False
+    try:
+        continuous_requested = json.loads(permit.read_text(encoding='utf-8')).get('permit_version') == 7
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        pass
+    while not _startup_stop_requested(directory):
+        try:
+            await _run_live_once(config_path, directory, permit,
+                                 ignore_uptime_proxy=ignore_uptime_proxy,
+                                 supervisor_session_id=supervisor_session_id)
+            return
+        except ReconciliationRequired as exc:
+            if not continuous_requested:
+                raise
+            if not await _wait_for_reconciliation(config_path, directory, exc):
+                return
+    atomic_write_json(directory / 'status.json', runtime_status(
+        phase='stopped_before_activation', activated=False,
+        reason='operator stop; account flatness is not asserted',
+    ))
+
+
+async def _run_live_once(
     config_path: Path,
     directory: Path,
     permit: Path,
@@ -74,6 +152,12 @@ async def _run_live(
     try:
         try:
             await runtime.prepare()
+            if _startup_stop_requested(directory):
+                atomic_write_json(directory / 'status.json', runtime_status(
+                    phase='stopped_before_activation', activated=False,
+                    reason='operator stop; account flatness is not asserted',
+                ))
+                return
             await runtime.activate(
                 permit,
                 ignore_uptime_proxy=ignore_uptime_proxy,
