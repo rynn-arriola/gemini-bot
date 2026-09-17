@@ -27,7 +27,7 @@ from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
 from .capacity import MAX_ACTIVE_MARKETS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
 from .reconciliation_errors import ExternalOrderPresent, InventoryMarketUnavailable
-from .discovery import RewardUniverseLoader
+from .discovery import RewardUniverseLoader, DISCOVERY_RANKING_VERSION
 from .catalog import join_reward_contracts
 from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
 from .engine import LiveEngineGate
@@ -918,6 +918,12 @@ class ProductionOrchestrator:
             row["exchange_reported_uptime"] = views.get(str(row["event_ticker"]))
         atomic_write_json(self.directory / "rank-report.json", {
             "generated_at": now.isoformat(), "candidates": rows,
+            "discovery_ranking": {
+                "version": DISCOVERY_RANKING_VERSION,
+                "method": "daily_budget_divided_by_sqrt_estimated_pool_breadth",
+                "scope": "new_candidates_not_forced_incumbent_rotation",
+                "is_payout_estimate": False,
+            },
             "exchange_reward_uptime": self.exchange_reward_uptime.metadata(now=now),
             "exchange_uptime_by_event": views,
             "selected_portfolio_model": getattr(self, "_selected_portfolio_report", None),

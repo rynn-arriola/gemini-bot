@@ -16,6 +16,76 @@ class DiscoveryRest(Protocol):
     async def event(self, event_ticker: str) -> dict[str, Any]: ...
 
 
+DISCOVERY_RANKING_VERSION = 2
+
+
+def _maker_tiebreak(row: dict[str, Any]) -> tuple[bool, int]:
+    count = row.get("qualifying_maker_count")
+    # Missing/zero historical qualification is not proof of an empty pool.
+    return count is None or int(count) <= 0, max(0, int(count or 0))
+
+
+@dataclass(frozen=True, slots=True)
+class PoolDiscoveryRank:
+    pool_id: str
+    daily_budget_usd: Decimal
+    event_count: int
+    observed_contract_events: int
+    estimated_contract_count: int
+    priority_proxy: Decimal
+    representative: dict[str, Any]
+
+
+def rank_discovery_pools(
+    rows: list[dict[str, Any]],
+    contracts: list[RewardedContract] | None = None,
+) -> list[PoolDiscoveryRank]:
+    """Bounded research priority, NOT a payout estimate or eligibility rule.
+
+    Budget / sqrt(breadth) softly prefers smaller sharing scopes without
+    assuming equal event payouts or banning broad pools. Before event reads,
+    breadth is the larger of published count and distinct catalog events.
+    Afterwards use known active contract counts and a rounded-up sample mean
+    for unseen events. That imputation is uncertainty, not measured liquidity.
+    Final allocation still uses actual book pressure and marginal economics.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    known: dict[str, dict[str, int]] = {}
+    for contract in contracts or []:
+        events = known.setdefault(contract.pool.pool_id, {})
+        events[contract.event_ticker] = max(
+            events.get(contract.event_ticker, 0), contract.event_contract_count,
+        )
+    for row in rows:
+        groups.setdefault(reward_pool_key(row), []).append(row)
+    ranked = []
+    for pool_id, group in groups.items():
+        budgets = {Decimal(str(r.get("daily_pool_usd", "0"))) for r in group}
+        if len(budgets) != 1 or not all(b.is_finite() for b in budgets):
+            raise ValueError("shared pool advertises conflicting or invalid budgets")
+        budget = next(iter(budgets))
+        if budget <= 0:
+            continue
+        published = [int(r["pool_event_count"]) for r in group if r.get("pool_event_count") is not None]
+        if any(n <= 0 for n in published):
+            raise ValueError("invalid pool event count")
+        event_count = max(1, len({str(r["event_ticker"]).upper() for r in group}), max(published, default=1))
+        counts = known.get(pool_id, {})
+        event_count = max(event_count, len(counts))
+        total = sum(counts.values())
+        typical = max(1, (total + len(counts) - 1) // len(counts)) if counts else 1
+        breadth = max(event_count, total + (event_count - len(counts)) * typical)
+        representative = min(group, key=lambda r: (_maker_tiebreak(r), str(r.get("event_ticker", ""))))
+        ranked.append(PoolDiscoveryRank(
+            pool_id, budget, event_count, len(counts), breadth,
+            budget / Decimal(breadth).sqrt(), representative,
+        ))
+    return sorted(ranked, key=lambda p: (
+        -p.priority_proxy, -p.daily_budget_usd, p.estimated_contract_count,
+        _maker_tiebreak(p.representative), p.pool_id,
+    ))
+
+
 def select_pool_representatives(
     rows: list[dict[str, Any]],
     *,
@@ -23,32 +93,7 @@ def select_pool_representatives(
 ) -> list[dict[str, Any]]:
     if not 1 <= maximum_pools <= 32:
         raise ValueError("pool discovery breadth must be between 1 and 32")
-    best: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        key = reward_pool_key(row)
-        budget = Decimal(str(row.get("daily_pool_usd", "0")))
-        makers = max(1, int(row.get("qualifying_maker_count") or 1))
-        if budget <= 0:
-            continue
-        current = best.get(key)
-        score = budget / Decimal(makers)
-        current_score = (
-            Decimal(str(current.get("daily_pool_usd", "0")))
-            / Decimal(max(1, int(current.get("qualifying_maker_count") or 1)))
-            if current is not None else Decimal("-1")
-        )
-        candidate_key = (score, str(row.get("event_ticker", "")))
-        current_key = (current_score, str(current.get("event_ticker", ""))) if current else None
-        if current_key is None or candidate_key > current_key:
-            best[key] = row
-    return sorted(
-        best.values(),
-        key=lambda row: (
-            -(Decimal(str(row["daily_pool_usd"])) / Decimal(max(1, int(row.get("qualifying_maker_count") or 1)))),
-            reward_pool_key(row),
-            str(row.get("event_ticker", "")),
-        ),
-    )[:maximum_pools]
+    return [p.representative for p in rank_discovery_pools(rows)[:maximum_pools]]
 
 
 def _headline_spread(contract: dict[str, Any]) -> Decimal:
@@ -96,7 +141,7 @@ class RewardUniverseLoader:
                     and Decimal(str(r.get("daily_pool_usd", "0"))) > 0]
             rows.sort(key=lambda r: (
                 not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
-                -Decimal(str(r["daily_pool_usd"])) / Decimal(max(1, int(r.get("qualifying_maker_count") or 1))),
+                _maker_tiebreak(r),
                 str(r.get("event_ticker", "")),
             ))
             # Read all pinned events first, then a bounded alternative frontier.
@@ -128,7 +173,12 @@ class RewardUniverseLoader:
                     add(item)
         # Reserve a frontier for alternatives rather than spend every watched
         # slot on one representative of a different pool.
-        frontier = pool_order[:max(1, (maximum_pools + 1) // 2)]
+        # Incumbents were added first. Their pool's low catalog position must
+        # not crowd higher-ranked challengers out of the reserve frontier.
+        candidate_order = [p.pool_id for p in rank_discovery_pools(
+            rewards, [item for choices in buckets.values() for item in choices],
+        ) if buckets.get(p.pool_id)]
+        frontier = candidate_order[:max(1, (maximum_pools + 1) // 2)]
         for index in range(maximum_pools):
             for pool_id in frontier:
                 choices = buckets.get(pool_id, [])
@@ -136,7 +186,7 @@ class RewardUniverseLoader:
                     add(choices[index])
             if len(result) >= maximum_pools:
                 break
-        for pool_id in pool_order:
+        for pool_id in candidate_order:
             for item in buckets.get(pool_id, []):
                 add(item)
         return result
