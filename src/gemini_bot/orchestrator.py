@@ -77,6 +77,7 @@ from .uptime import sample_and_load_progress, eastern_day_window, locally_qualif
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
+from .ws_requests import WebSocketRequestRejected
 from .trade_recovery import import_terminal_trades, timestamp as history_timestamp
 from .public_shards import PublicMarketShards, ShardEvent, PUBLIC_SHARD_COUNT
 
@@ -203,6 +204,7 @@ class ProductionOrchestrator:
         self._quote_cancel_reasons: Counter[str] = Counter()
         self._retention_reason = "not_evaluated"
         self._recoverable_exit = False
+        self._private_request_failure: WebSocketRequestRejected | None = None
         self._reward_epoch: tuple[str, bool] | None = None
         self._catalog_scope = False
         self._commissioning_expected_yes_price: Decimal | None = None
@@ -759,6 +761,11 @@ class ProductionOrchestrator:
             if order.side.value == "SELL":
                 raise RecoveryPending("owned reducer has not yet become terminal")
             await self._cancel_order_and_confirm(order.order_id, timeout=10)
+        # A placement response/NEW may be lost even though Gemini created then
+        # canceled the order. Resolve only an exact zero-fill terminal ENTRY;
+        # missing history, any execution or an EXIT remains unknown/fail-closed.
+        if self.gate.state is EngineState.DRAINING:
+            await self._resolve_zero_fill_unacknowledged_entries()
         # Private disconnect can hide a fill. Check every pre-disconnect working
         # order against exact terminal history; cash equality alone is not proof.
         histories: dict[str, list[dict[str, Any]]] = {}
@@ -800,6 +807,40 @@ class ProductionOrchestrator:
             if self.journal.get_deadline(symbol, outcome) is None:
                 raise RuntimeError("recovered position lacks its original deadline")
         self._last_snapshot = after
+
+    async def _resolve_zero_fill_unacknowledged_entries(self) -> None:
+        histories: dict[str, list[dict[str, Any]]] = {}
+        for client_id in self.journal.unresolved_ids():
+            intent = self.ledger.get(client_id)
+            if intent is None or intent.purpose is not OrderPurpose.ENTRY or intent.leg.side is not Side.BUY:
+                raise RuntimeError('unacknowledged mutation is not a known maker entry')
+            leg = intent.leg
+            if leg.symbol not in histories:
+                histories[leg.symbol] = await self.rest.recent_order_history(symbol=leg.symbol)
+            matches = [row for row in histories[leg.symbol] if str(row.get('clientOrderId', '')) == client_id]
+            if not matches:
+                raise RecoveryPending('unacknowledged maker terminal history not published')
+            if len(matches) != 1:
+                raise RuntimeError('unacknowledged maker history is ambiguous')
+            row = matches[0]
+            identity = (str(row.get('symbol', '')).upper(), str(row.get('side', '')).upper(),
+                        str(row.get('outcome', '')).upper(), Decimal(str(row.get('price'))),
+                        Decimal(str(row.get('quantity'))))
+            if identity != (leg.symbol, leg.side.value, leg.outcome.value, leg.price, leg.quantity):
+                raise RuntimeError('unacknowledged maker history identity disagrees')
+            status = str(row.get('status', '')).upper()
+            if status not in {'CANCELLED', 'CANCELED', 'REJECTED'}:
+                raise RecoveryPending('unacknowledged maker is not proven canceled')
+            if Decimal(str(row.get('filledQuantity'))) != 0:
+                raise RuntimeError('unacknowledged maker has missing execution evidence')
+            order_id = '' if row.get('orderId') is None else str(row['orderId'])
+            if not order_id or (intent.server_order_id is not None and intent.server_order_id != order_id):
+                raise RuntimeError('unacknowledged maker lacks exact server identity')
+            self.ledger.acknowledge(client_id, order_id)
+            self.ledger.mark_terminal(client_id)
+            self.account.events.setdefault(client_id, asyncio.Event()).set()
+            self.log.event(logging.INFO, 'unacknowledged_maker_terminal_proven',
+                           symbol=leg.symbol, executions=0, request_replayed=False)
 
     async def _prove_stream_recovery(self) -> None:
         try:
@@ -1128,8 +1169,12 @@ class ProductionOrchestrator:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if isinstance(exc, WebSocketRequestRejected):
+                self._private_request_failure = exc
             self.gate.halt()
-            self.log.exception("private_stream_failed", ErrorClass.TRANSPORT, exc)
+            details = ({'method': exc.method, 'status': exc.status, 'code': exc.code}
+                       if isinstance(exc, WebSocketRequestRejected) else {})
+            self.log.exception("private_stream_failed", ErrorClass.TRANSPORT, exc, **details)
             self._write_status("halted", False, "account stream lost; orders cancel on disconnect")
             raise
 
@@ -3595,12 +3640,25 @@ class ProductionOrchestrator:
                 self.gate.halt()
                 self.log.exception("emergency_drain_failed", ErrorClass.EXECUTION, drain_exc)
                 self._write_status("halted", False, "emergency drain failed; manual reconciliation required")
+            request_failure = getattr(self, '_private_request_failure', None)
+            # A service response is not evidence that an attempted order failed.
+            # Only the completed exact terminal/flat drain below permits a new
+            # supervised session attempt; no old request is ever replayed.
+            recovered_request = self._request_failure_proven_recoverable(exc, drained_flat=drained_flat)
+            # A secondary acknowledgement timeout must not disguise a permanent
+            # request rejection as a generic transient TimeoutError.
+            can_recover = (recovered_request if self._continuous_service and request_failure is not None
+                           else drained_flat and (not self._continuous_service or transient_failure(exc)))
+            if recovered_request:
+                self.log.event(logging.WARNING, 'request_service_failure_reconciled_flat',
+                               method=request_failure.method, status=request_failure.status,
+                               code=request_failure.code, old_request_replayed=False)
             finish_supervised_activation(
                 permit, self.journal,
                 supervisor_session_id=supervisor_session_id,
-                outcome="recoverable_flat" if drained_flat and (not self._continuous_service or transient_failure(exc)) else "attention",
+                outcome="recoverable_flat" if can_recover else "attention",
             )
-            self._recoverable_exit = drained_flat and (not self._continuous_service or transient_failure(exc))
+            self._recoverable_exit = can_recover
             raise
         finally:
             if self._reward_reporting_task is not None:
@@ -3650,6 +3708,15 @@ class ProductionOrchestrator:
             self.account.block_entries(symbol, fill=True)
         self._last_snapshot = snapshot
 
+    def _request_failure_proven_recoverable(self, exc: BaseException, *, drained_flat: bool) -> bool:
+        failure = self._private_request_failure
+        return bool(drained_flat and self._dynamic_pending_cap > 0
+                    and self.account.snapshots_fresh and self.account.equity_classification_complete
+                    and not self.journal.nonterminal_sent_ids()
+                    and not self.account.reducer.positions and not self.account.reducer.pending_order_count()
+                    and isinstance(failure, WebSocketRequestRejected) and failure.service_failure
+                    and (exc is failure or isinstance(exc, TimeoutError)))
+
     async def drain(self) -> None:
         self.gate.state = EngineState.DRAINING
         async with asyncio.timeout(_DRAIN_SECONDS):
@@ -3659,7 +3726,12 @@ class ProductionOrchestrator:
             self._shard_restarts.clear()
             if isinstance(self.public, PublicMarketShards) and self.public.held:
                 self._stream_holds.add('public')
-            if self._stream_holds:
+            # A fatal pump failure (for example a rejected request) is not a
+            # retryable outage and therefore may never install a recovery hold.
+            # Still restore readers for shutdown proof/cancellation, not trading.
+            # Otherwise every cancel waits for a terminal event on a dead pump
+            # and full-width REST fallback exhausts the drain deadline.
+            if self._stream_holds or any(task.done() for task in self._tasks):
                 await self._restore_drain_streams()
             await self._drain_bounded()
 

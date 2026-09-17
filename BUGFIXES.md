@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 17, 2026 — fatal account reader stalled emergency drain
+
+V16 stopped at 00:00 ET after a correlated WebSocket rejection killed the account reader. Without a transient recovery hold, drain skipped reconnection and cancellation confirmations timed out. Drain now restores failed readers for exact shutdown proof. Lost maker acknowledgements resolve only from unique exact zero-fill terminal history. Rejections retain redacted method/status/code; the original venue reason was not recorded and remains unknown. Confirmed service/rate errors can qualify for the existing bounded supervised restart only after complete terminal/flat/account proof; permanent/auth/unknown errors and HARD remain blocking, including when followed by an acknowledgement timeout. [Evidence and limits](docs/MIDNIGHT_REQUEST_RECOVERY_2026-09-17.md).
+
 ## September 16, 2026 — competition and shared-pool strategy v3 (source only)
 
 The old reward denominator scaled assumed competitor size with our own quantity, so increasing our size could leave estimated share unchanged. It also used event maker headcount as a score denominator and imposed Gemini's account-daily $1 threshold per candidate. V3 uses fresh own-adjusted L2 pressure plus an explicit fixed unseen-contract scenario; maker count breaks economic ties, own size no longer resizes competitors, and the payout floor is reported only at account level.

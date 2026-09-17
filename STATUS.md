@@ -1,8 +1,10 @@
 # Gemini current status
 
-Updated September 16, 2026, 22:18 ET. Current handoff, not a perpetual venue-state guarantee.
+Updated September 17, 2026. Current handoff, not a perpetual venue-state guarantee.
 
 ## Operational truth
+
+- **V16 stopped at midnight; owner authorized repair and restart.** Correlated private request rejection killed its reader, followed by maker-ack timeout and failed cancellation confirmation. The venue reason is unknown because old diagnostics discarded status/code. Fresh authenticated REST is flat/order-free; canonical integrity passes, the attention-only supervisor has stopped, and a verified backup preserves history/cohort. Failed-reader drain, exact zero-fill missing-ACK proof and bounded post-flat service-error restart are repaired; permanent/auth/unknown errors/HARD remain blocked. New v17 preparation is underway. [Incident, tests and deployment](docs/MIDNIGHT_REQUEST_RECOVERY_2026-09-17.md). Do not reuse v16 authority or reset sticky selection.
 
 - **Pool-breadth ranking is deployed with the owner-approved fresh cohort in v16.** Source `4fda10c` plus explicit one-time replacement decision `cee5de3` are remote-verified on main; 683 tests and post-integration focused/offline checks pass. V15 drained flat at 22:10:58 ET; both processes exited and the canonical backup passed integrity. Fresh read-only REST/WS proof preceded one atomic archived/audited reset of the 20 old selection/recovery preferences, preserving economic/risk/uptime history. Fresh preparation with zero incumbent preference found 32 watched/30 ranked/22 actionable markets. Under new exact-build/account/policy v7 authority, supervisor 21580 / runner launcher 19632 began quoting at 22:15:29 ET. REST audit at 22:15:54 proves **40 exact owned size-15 orders across 20 markets, zero positions**, 12 single-event reward pools, 9 new markets/11 independently reselected, five connected public shards, no holds/errors/retries, and matching build/policy/SQLite integrity. All 20 pass concrete rank and marginal economics checks; normal stickiness is restored. No sports timing, monetary cap, HARD or 50% override change. [All-market audit and top five](docs/POOL_SELECTION_AUDIT_2026-09-16.md). The restart gap and changed-event uptime are not credited; reward estimates remain uncalibrated.
 

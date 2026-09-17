@@ -5,6 +5,33 @@ from .rest_client import ApiError
 READ_METHODS = frozenset({"conninfo", "SUBSCRIBE", "UNSUBSCRIBE", "LIST_SUBSCRIPTIONS", "ping", "time"})
 
 
+class WebSocketRequestRejected(RuntimeError):
+    """Safe diagnostic metadata only; never authority to replay a mutation."""
+
+    def __init__(self, frame: dict, method: str | None) -> None:
+        allowed = READ_METHODS | {"order.place", "order.cancel", "order.cancel_all", "order.cancel_session", "depth"}
+        self.method = method if method in allowed else "unknown"
+        status = frame.get("status")
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        error = frame.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        self.code = code if type(code) is int and -100000 <= code <= 100000 else None
+        # Never retain free-form venue text/data or request payloads. These can
+        # contain credentials or sensitive account details, even in an error.
+        super().__init__(
+            "WebSocket request rejected; mutation or protocol reconciliation required "
+            f"(method={self.method}, status={self.status}, code={self.code})"
+        )
+
+    @property
+    def service_failure(self) -> bool:
+        # This classification alone grants no retry. The orchestrator requires
+        # complete terminal/flat proof and the existing supervisor burst budget.
+        return (self.method in {"order.place", "order.cancel", "order.cancel_all"}
+                and ((self.status == 429 and self.code == -1003)
+                     or (self.status in {500, 502, 503, 504} and self.code == -1000)))
+
+
 def check_response(frame: dict, method: str | None) -> None:
     if frame.get("status") == 200:
         return
@@ -21,7 +48,7 @@ def check_response(frame: dict, method: str | None) -> None:
         raise ApiError(status, "WebSocketReadServiceUnavailable", delay)
     # Even a correlated mutation error is not permission to replay. Never put
     # venue text, signed fields or identifiers into an exception message.
-    raise RuntimeError("WebSocket request rejected; mutation or protocol reconciliation required")
+    raise WebSocketRequestRejected(frame, method)
 
 
 class RequestTracker:

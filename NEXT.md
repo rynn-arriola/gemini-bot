@@ -1,5 +1,7 @@
 # Next work
 
+- **September 17 request-recovery release:** verify repaired reader/drain and bounded post-proof service-error restart on natural events. The original venue rejection is unidentified because old logs omitted status/code; new diagnostics address that evidence gap. No induced faults/fills. Keep permanent/auth/unknown errors and HARD blocked; preserve sticky selection. See `docs/MIDNIGHT_REQUEST_RECOVERY_2026-09-17.md` for current deployment outcome.
+
 - **Pool-breadth ranking and fresh selection are deployed in v16.** First quote 22:15:29 ET; authenticated audit 22:15:54 confirms 40 owned size-15 orders/20 markets, zero positions, nine new markets and eleven independently reselected. All chosen markets pass concrete checks. One-time archived cohort reset is consumed; normal stickiness resumes. Preserve `data/production-20260916-pool-breadth-v16`. Measure actual rewards and pool-pressure/window sensitivity; no count ban, sports timing, HARD or monetary change. [All-market audit](docs/POOL_SELECTION_AUDIT_2026-09-16.md).
 
 - **Current runtime is v15 after the explicit unchanged-policy restart.** First quote 21:48:20 ET; REST acceptance at 21:48:43 proves 36 owned size-15 orders/18 markets, zero positions, all 20 owners retained and no holds/errors/retries. Preserve `data/production-20260916-restart-v15`; older runtime references below are historical. Reward-pool/event-count review was read-only and changed no filter. Independent storage and natural long-run/reward verification remain pending.
