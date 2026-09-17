@@ -3906,6 +3906,7 @@ class ProductionOrchestrator:
             # request rejection as a generic transient TimeoutError.
             can_recover = (recovered_request if self._continuous_service and request_failure is not None
                            else drained_flat and (not self._continuous_service or transient_failure(exc)))
+            can_recover = can_recover and self._dynamic_pending_cap > 0
             if recovered_request:
                 self.log.event(logging.WARNING, 'request_service_failure_reconciled_flat',
                                method=request_failure.method, status=request_failure.status,

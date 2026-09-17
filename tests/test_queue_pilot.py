@@ -320,6 +320,12 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(a.client_id not in old_clients for a in self.r.queue_pilot.markets['X'].anchors.values()))
 
     async def test_real_activation_loop_surfaces_worker_halt_before_normal_close(self):
+        await self.activation_worker_failure(hard=False)
+
+    async def test_worker_timeout_at_hard_never_grants_restart(self):
+        await self.activation_worker_failure(hard=True)
+
+    async def activation_worker_failure(self, *, hard):
         # Exercise the actual activation loop, not only the helper. No network.
         self.r.queue_pilot = None
         self.r.config = replace(self.r.config, live_acknowledgement='I_UNDERSTAND_THIS_TRADES_REAL_MONEY',
@@ -333,6 +339,8 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.r._exit_due_positions = AsyncMock()
         self.r._maintain_candidate = AsyncMock()
         async def halted_worker():
+            if hard:
+                self.r._dynamic_pending_cap = 0
             self.r.gate.halt()
             raise TimeoutError('synthetic worker failure between iterations')
         self.r._live_safety_clock = halted_worker
@@ -345,8 +353,8 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
              patch('gemini_bot.orchestrator.finish_supervised_activation') as finish:
             with self.assertRaisesRegex(TimeoutError, 'synthetic worker failure'):
                 await self.r.activate(self.r.directory / 'not-a-real-permit')
-            self.assertEqual(finish.call_args.kwargs['outcome'], 'recoverable_flat')
-            self.assertTrue(self.r._recoverable_exit)
+            self.assertEqual(finish.call_args.kwargs['outcome'], 'attention' if hard else 'recoverable_flat')
+            self.assertEqual(self.r._recoverable_exit, not hard)
 
 
 class PilotConfigTests(unittest.TestCase):
