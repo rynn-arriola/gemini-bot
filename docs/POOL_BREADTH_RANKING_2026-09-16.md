@@ -1,8 +1,8 @@
 # Pool-breadth discovery ranking
 
 The owner approved ranking, not excluding, broad shared reward pools. Source is
-being tested in isolation; live deployment and the incumbent-selection behavior
-are pending clarification of the subsequent instruction about keeping slots.
+verified in isolation. The owner has now explicitly authorized replacement of
+the current cohort with a fresh selection once, followed by normal stickiness.
 
 ## Method and limits
 
@@ -32,15 +32,20 @@ capacity using breadth instead of letting pinned pools dominate the reserve orde
 Read order keeps pinned events first for ownership continuity. Revised reserve
 coverage can change the existing pool-wide economics estimate; any resulting
 concrete failure still uses the existing grace, terminal/flat proof and safe exits.
-No live sticky state is cleared by this source change.
+No automatic sticky reset is added to the source. The separately authorized
+operator transition archives and clears the current selection once after flat
+proof; runtime retains its normal sticky policy thereafter.
 
 ## Continuity and deployment
 
 An authorized deployment requires graceful drain, authenticated account proof,
 preserved economic/risk history, verified backup, and fresh build/policy/account
 v7 authority. The deployment gap earns no resting-time credit. Healthy incumbents
-must not be deliberately rotated without a clear owner decision; that choice is
-currently being clarified. Source changes are not live activation.
+must not be deliberately rotated without a clear owner decision. The owner has
+authorized one transition here; this is not recurring reset authority. Existing
+markets can independently requalify in the fresh selection. Old event uptime
+remains history and never transfers to new events. Source changes alone are not
+live activation.
 
 Official reward rules checked September 16:
 https://developer.gemini.com/prediction-markets/liquidity-rewards-program
@@ -57,5 +62,5 @@ watch allocation with incumbent retention. The two allocation regressions both
 fail behaviorally against prior source and pass with this source. Compilation,
 all PowerShell parse checks, whitespace and offline Windows policy/storage checks
 passed. Tests used the isolated source explicitly; no live fault or fill was induced.
-No deployment or restart occurred. The owner's slot-selection clarification is
-still required before integrating this branch into the active checkout.
+No deployment or restart occurred during these tests. The owner's subsequent
+slot-selection clarification authorizes the controlled deployment separately.
