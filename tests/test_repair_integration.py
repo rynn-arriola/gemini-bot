@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal as D
 import json
@@ -255,6 +256,9 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         strategy, risk = load_policy()
+        # Historical fill/cancel fixtures use explicit 20-contract wire frames.
+        # Current size policy has separate end-to-end coverage.
+        strategy = replace(strategy, quote_quantity=D(20))
         self.runtime = ProductionOrchestrator(LiveConfig("account-fake", "fake-secret", "", True, strategy, risk), Path(self.tmp.name), public_shard_count=1)
         self.runtime.control_directory = Path(self.tmp.name) / "isolated-control"
         self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")

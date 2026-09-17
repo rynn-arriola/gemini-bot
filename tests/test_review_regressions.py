@@ -6,6 +6,7 @@ these assertions describe the required behavior before commissioning.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import base64
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
@@ -47,6 +48,8 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         strategy, risk = load_policy()
+        # Preserve the original size-20 incident fixture independently of policy.
+        strategy = replace(strategy, quote_quantity=D(20))
         self.runtime = ProductionOrchestrator(
             LiveConfig("account-review-fake", "fake-review-secret", "", True, strategy, risk),
             Path(self.temporary.name),
