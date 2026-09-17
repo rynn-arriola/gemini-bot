@@ -460,12 +460,12 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         self.runtime._mark_live_risk()
         self.runtime.public.books["X"].apply_snapshot([(D(".28"), D("100"))], [(D(".32"), D("100"))], 2, 2, NOW)
         self.runtime._mark_live_risk()
-        self.assertEqual(self.runtime._dynamic_pending_cap, 30)
+        self.assertEqual(self.runtime._dynamic_pending_cap, 40)
         self.runtime.public.books["X"] = book()
         self.runtime._mark_live_risk()
         stored = self.runtime.journal.load_realized_risk_window(RiskWindowPolicy(D("90")).bounds(NOW)[0])
         self.assertEqual(stored["loss_high_water"], D("0"))
-        self.assertEqual(self.runtime._dynamic_pending_cap, 30)
+        self.assertEqual(self.runtime._dynamic_pending_cap, 40)
 
     async def test_one_sided_position_does_not_enter_realized_loss_meter(self):
         account = self.runtime.account

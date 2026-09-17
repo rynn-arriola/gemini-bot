@@ -70,8 +70,8 @@ class ConfigTests(unittest.TestCase):
         value.validate()
         self.assertEqual(value.quote_quantity, Decimal("10"))
 
-    def test_pending_cap_cannot_exceed_thirty(self) -> None:
-        risk = RiskConfig(Decimal("100"), Decimal("20"), Decimal("10"), Decimal("5"), max_pending_orders=31)
+    def test_pending_cap_cannot_exceed_forty(self) -> None:
+        risk = RiskConfig(Decimal("100"), Decimal("20"), Decimal("10"), Decimal("5"), max_pending_orders=41)
         with self.assertRaises(ConfigurationError):
             risk.validate()
 
@@ -82,7 +82,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(risk.max_market_exposure_usd, Decimal("90"))
         self.assertEqual(risk.max_stressed_exit_loss_usd, Decimal("40"))
         self.assertEqual(risk.risk_window_loss_usd, Decimal("30"))
-        self.assertEqual(risk.max_two_sided_quotes, 15)
+        self.assertEqual(risk.max_two_sided_quotes, 20)
+        self.assertEqual(risk.max_pending_orders, 40)
         self.assertEqual(risk.max_tracked_markets, 32)
 
     def test_approved_exposure_gate_accepts_base_pair(self) -> None:

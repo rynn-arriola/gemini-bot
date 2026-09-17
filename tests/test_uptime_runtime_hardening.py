@@ -173,7 +173,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
             return []
         self.runtime.rest.positions = AsyncMock(side_effect=positions)
         self.runtime.rest.active_orders = AsyncMock(return_value=[])
-        self.assertEqual(await self.runtime._risk_mark(), 30)
+        self.assertEqual(await self.runtime._risk_mark(), 40)
         self.assertIsNone(self.runtime._last_live_mark)
 
     async def test_manual_flat_flag_never_allowed_on_live_runtime(self):
@@ -198,7 +198,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.account.expected_positions = {}
         self.runtime._complete_read_recovery("account_audit")
         self.runtime._validate_send(self.fixture.payload())
-        self.assertEqual(self.runtime._dynamic_pending_cap, 30)
+        self.assertEqual(self.runtime._dynamic_pending_cap, 40)
 
     async def test_recovery_domains_do_not_clear_each_others_entry_hold(self):
         for component in ("account_audit", "reward_metadata"):

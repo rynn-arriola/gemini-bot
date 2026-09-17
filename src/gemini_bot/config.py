@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 import os
+from .capacity import MAX_PENDING_ORDERS
 
 
 class ConfigurationError(ValueError):
@@ -48,8 +49,8 @@ class RiskConfig:
     def validate(self) -> None:
         if self.max_gross_reservation_usd <= 0:
             raise ConfigurationError("max_gross_reservation_usd must be positive")
-        if not 2 <= self.max_pending_orders <= 30:
-            raise ConfigurationError("max_pending_orders must be between 2 and the approved cap of 30")
+        if not 2 <= self.max_pending_orders <= MAX_PENDING_ORDERS:
+            raise ConfigurationError("max_pending_orders exceeds the approved cap of 40")
         if not Decimal("0") < self.max_market_exposure_usd <= self.max_gross_reservation_usd:
             raise ConfigurationError("market exposure must be positive and no greater than gross exposure")
         if not Decimal("0") < self.max_stressed_exit_loss_usd < self.max_market_exposure_usd:
@@ -139,10 +140,10 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         raise ConfigurationError("policy must contain exactly one monetary stop authority")
     if raw["risk_window_accounting"] != "closed_fill_realized_pnl":
         raise ConfigurationError("risk-window accounting must use closed-fill realized P&L")
-    if raw["risk_window_pending_order_policy"] != "fixed_30_until_stop":
+    if raw["risk_window_pending_order_policy"] != "fixed_40_until_stop":
         raise ConfigurationError("risk-window pending-order policy must remain fixed until stop")
-    if raw["max_pending_orders"] != 30:
-        raise ConfigurationError("fixed pending-order policy requires exactly 30 orders")
+    if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
+        raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
     strategy = StrategyConfig(
         quote_quantity=Decimal(raw["quote_quantity"]),
         quote_offset_ticks=int(raw["quote_offset_ticks"]),

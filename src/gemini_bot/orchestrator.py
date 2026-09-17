@@ -23,6 +23,8 @@ from .activation import (
 )
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
+from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
+from .capacity import MAX_ACTIVE_MARKETS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
 from .reconciliation_errors import ExternalOrderPresent, InventoryMarketUnavailable
 from .discovery import RewardUniverseLoader
@@ -167,6 +169,9 @@ class ProductionOrchestrator:
         self._activated_pool_ids: set[str] = set()
         self._sticky_pool_ids: set[str] = set()
         self._sticky_markets: dict[str, tuple[str, str]] = {}
+        self._sticky_recovery = StickyRecovery()
+        self._sticky_recovery_saved_at = 0.0
+        self._next_owner_release_check = 0.0
         # Exact, previously owned inventory can outlive a transient omission
         # from reward discovery. These symbols remain entry-blocked and count
         # toward exposure/pool ownership, but do not make healthy markets wait.
@@ -281,6 +286,10 @@ class ProductionOrchestrator:
                                      "retry_in_seconds": max(0, w.retry_at - time.monotonic())}
                                for s, w in self._exit_waits.items()},
               "inventory_catalog_holds": sorted(self._inventory_catalog_holds),
+              "sticky_recovery": {owner: {"reason": failure.reason,
+                  "observed_failure_seconds": failure.observed_seconds,
+                  "release_grace_seconds": RECOVERY_GRACE_SECONDS}
+                  for owner, failure in self._sticky_recovery.failures.items()},
               "reward_epoch": self._reward_epoch},
         )
 
@@ -381,7 +390,7 @@ class ProductionOrchestrator:
         if raw is None:
             return
         value = json.loads(raw)
-        if (not isinstance(value, dict) or len(value) > 15
+        if (not isinstance(value, dict) or len(value) > MAX_ACTIVE_MARKETS
                 or any(not isinstance(pool, str) or not isinstance(pair, list) or len(pair) != 2
                        or any(not isinstance(s, str) or not s for s in pair)
                        for pool, pair in value.items())):
@@ -394,6 +403,115 @@ class ProductionOrchestrator:
             raise RuntimeError("duplicate persisted market symbol")
         self._sticky_markets = {owner: tuple(pair) for owner, pair in value.items()}
         self._sticky_pool_ids = set(self._sticky_markets)
+        self._sticky_recovery.restore(self.journal.get_runtime_state("sticky_recovery_v1"), self._sticky_pool_ids)
+
+    def _owner_event(self, event: str, owner: str, symbol: str, reason: str) -> None:
+        fields = {"owner_key": owner, "symbol": symbol, "reason": reason}
+        self.journal.audit(event, fields)
+        self.log.event(logging.INFO, event, **fields)
+
+    def _rank_for_owner_check(self) -> None:
+        self.ranked = rank_live_universe(
+            self.universe, self.public.books, now=_utc_now(),
+            quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
+            uptime=self._uptime, account=self.account.reducer,
+            market_data_verified_at=self._market_data_verified_at(), profitability=self.profitability,
+            target_uptime=self.config.strategy.target_uptime, maker_rebate_fractions=self._maker_rebate_fractions,
+            allow_uptime_override=True, evaluate_working_quotes=True,
+        )
+
+    def _select_with_reserved_owners(self, reserved: set[str], maximum: int):
+        return select_sticky_markets(
+            self.ranked, sticky_pool_ids=self._sticky_pool_ids, locked_pool_ids=reserved,
+            permitted_symbols=self._permitted_symbols, maximum_active_pools=maximum,
+            actionable=self._candidate_actionable, entry_time_valid=self._entry_time_valid,
+        )
+
+    def _owner_failure_reason(self, symbol: str) -> str:
+        candidate = next((c for c in self.ranked if c.symbol == symbol), None)
+        if candidate is None:
+            return "rank_candidate_missing:" + self._quote_target_state(symbol)[1]
+        reasons = tuple(r for r in candidate.reasons if r != _UPTIME_PROXY_REJECTION)
+        if reasons:
+            return "; ".join(reasons)
+        if not self._entry_time_valid(symbol):
+            return "entry_time_unavailable"
+        return "non_positive_marginal_pool_economics"
+
+    async def _select_recovery_cohort(self, locked: set[str], maximum: int):
+        """Cancel unsafe quotes separately; release a slot only after recovery/proof."""
+        if not self._continuous_service:
+            desired, owners = self._select_with_reserved_owners(locked, maximum)
+            return desired, owners, locked
+        reserved = set(locked) | set(self._sticky_pool_ids)
+        desired, _ = self._select_with_reserved_owners(reserved, maximum)
+        healthy = {c.owner_key for c in desired}
+        changed = False
+        for owner, (_, symbol) in tuple(self._sticky_markets.items()):
+            previous = self._sticky_recovery.failures.get(owner)
+            if owner in locked or owner in healthy:
+                if previous is not None:
+                    self._owner_event("sticky_owner_recovered" if owner in healthy else "sticky_owner_protected",
+                                      owner, symbol, "quoting_checks_passed" if owner in healthy else "inventory_or_stream_hold")
+                    changed = True
+                self._sticky_recovery.observe(owner, None, _utc_now())
+                continue
+            reason = self._owner_failure_reason(symbol)
+            available = (not self._stream_holds and not self._read_recovery_attempts
+                         and not self._reward_program_paused and self._book_fresh(symbol)
+                         and self.account.snapshots_fresh and self.account.equity_classification_complete)
+            mature = self._sticky_recovery.observe(owner, reason, _utc_now(), evidence_available=available)
+            if previous is None or previous.reason != reason:
+                self._owner_event("sticky_owner_recovery_hold", owner, symbol, reason)
+                changed = True
+            if not mature or time.monotonic() < self._next_owner_release_check:
+                continue
+            # One proof attempt per minute account-wide; never poll each owner.
+            self._next_owner_release_check = time.monotonic() + 60
+            if (self._recovery_stop_requested() or symbol in self._exit_workers
+                    or symbol in self._exit_uncertain or self.journal.pending_exit(symbol)
+                    or any(self.journal.get_deadline(symbol, o) is not None for o in ("YES", "NO"))):
+                continue
+            await self._cancel_symbol_entries(symbol)
+            try:
+                async with asyncio.timeout(15):
+                    snapshot = await self._exit_account_snapshot(symbol)
+            except Exception as exc:
+                if isinstance(exc, ExitDeferred) or (isinstance(exc, (ApiError, TimeoutError)) and transient_failure(exc)):
+                    continue
+                raise
+            if snapshot.signed_positions.get(symbol) or self._recovery_stop_requested():
+                continue
+            # The book may recover while awaiting cancellation/account proof.
+            # Fresh ranking, not the earlier failed score, decides retirement.
+            self._rank_for_owner_check()
+            refreshed, _ = self._select_with_reserved_owners(reserved, maximum)
+            if owner in {c.owner_key for c in refreshed}:
+                self._sticky_recovery.observe(owner, None, _utc_now())
+                self._owner_event("sticky_owner_recovered", owner, symbol, "fresh_post_proof_checks_passed")
+                changed = True
+                continue
+            if (not self._book_fresh(symbol) or self._stream_holds or self._read_recovery_attempts
+                    or self._reward_program_paused or symbol in self._exit_workers
+                    or symbol in self._exit_uncertain or self.journal.pending_exit(symbol)
+                    or not self.account.snapshots_fresh or not self.account.equity_classification_complete
+                    or self.account.reducer.positions.get(symbol)
+                    or self.journal.has_nonterminal_intents(symbol)
+                    or any(self.journal.get_deadline(symbol, o) is not None for o in ("YES", "NO"))):
+                continue
+            self._owner_event("sticky_owner_released", owner, symbol,
+                              "sustained_600s_failure_terminal_flat:" + self._owner_failure_reason(symbol))
+            self._sticky_pool_ids.discard(owner)
+            self._sticky_markets.pop(owner)
+            reserved.discard(owner)
+            self._sticky_recovery.observe(owner, None, _utc_now())
+            changed = True
+            break  # No stale pre-proof ranking can release a second owner.
+        if changed or time.monotonic() - self._sticky_recovery_saved_at >= 30:
+            self.journal.set_runtime_state("sticky_recovery_v1", self._sticky_recovery.dumps(), updated_at=_utc_now())
+            self._sticky_recovery_saved_at = time.monotonic()
+        desired, owners = self._select_with_reserved_owners(reserved, maximum)
+        return desired, owners, reserved
 
     def _save_sticky_markets(self, desired: list[Any], locked_pools: set[str]) -> None:
         markets = {c.owner_key: (c.event_ticker, c.symbol) for c in desired}
@@ -406,6 +524,9 @@ class ProductionOrchestrator:
             if pool_id in self._sticky_markets:
                 markets.setdefault(pool_id, self._sticky_markets[pool_id])
         if markets != self._sticky_markets or self.journal.get_runtime_state("sticky_markets_v2") is None:
+            for owner, (_, symbol) in markets.items():
+                if owner not in self._sticky_markets:
+                    self._owner_event("sticky_owner_admitted", owner, symbol, "vacant_slot_pool_aware_selection")
             self.journal.set_runtime_state("sticky_markets_v2", json.dumps(markets, sort_keys=True), updated_at=_utc_now())
             self._sticky_markets = markets
 
@@ -2123,6 +2244,7 @@ class ProductionOrchestrator:
             await self._maintain_candidate_locked(candidate)
 
     async def _cancel_ineligible_working_entries(self, candidates_by_symbol: dict[str, Any]) -> None:
+        recorded: set[str] = set()
         for order in tuple(self.account.reducer.orders.values()):
             candidate = candidates_by_symbol.get(order.symbol)
             if (
@@ -2134,6 +2256,9 @@ class ProductionOrchestrator:
                     or not self._entry_time_valid(order.symbol)
                 )
             ):
+                if order.symbol not in recorded:
+                    self._record_quote_cancel(order.symbol, "selection_unquotable:" + self._owner_failure_reason(order.symbol))
+                    recorded.add(order.symbol)
                 await self._cancel_symbol_entries(order.symbol)
 
     def _current_quote_target(self, symbol: str) -> Any | None:
@@ -2762,7 +2887,7 @@ class ProductionOrchestrator:
         fill_version = self.account.fill_version
         snapshot = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
         now = _utc_now()
-        policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd)
+        policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd, self.config.risk.max_pending_orders)
         start, end = policy.bounds(now)
         realized_pnl, history_complete = self.journal.realized_pnl_for_window(start, end)
         if not history_complete:
@@ -2904,7 +3029,7 @@ class ProductionOrchestrator:
         if self.gate.state is not EngineState.QUOTING or not self.account.equity_classification_complete:
             return
         now = _utc_now()
-        policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd)
+        policy = RiskWindowPolicy(self.config.risk.risk_window_loss_usd, self.config.risk.max_pending_orders)
         start, end = policy.bounds(now)
         key = (self.account.fill_version, (start, end))
         if key == self._last_live_mark:
@@ -3133,6 +3258,10 @@ class ProductionOrchestrator:
                 self.universe = [c for c in self.universe if c.rules.symbol not in symbols]
                 self._permitted_symbols.difference_update(symbols)
                 for c in removable:
+                    if c.owner_key in self._sticky_markets:
+                        self._owner_event("sticky_owner_released", c.owner_key, c.rules.symbol,
+                                          "catalog_reward_inactive" if not c.pool.active else "contract_entry_cutoff")
+                        self._sticky_recovery.observe(c.owner_key, None, _utc_now())
                     self._sticky_pool_ids.discard(c.owner_key)
                     self._sticky_markets.pop(c.owner_key, None)
                     self._market_status_versions.pop(c.rules.symbol, None)
@@ -3429,18 +3558,11 @@ class ProductionOrchestrator:
                     # and replacement of unsafe/ineligible pools, but one noisy
                     # minute cannot churn otherwise healthy quotes and destroy
                     # the daily uptime needed for any reward.
-                    desired, desired_pools = select_sticky_markets(
-                        self.ranked,
-                        sticky_pool_ids=self._sticky_pool_ids,
-                        locked_pool_ids=locked_pools,
-                        permitted_symbols=self._permitted_symbols,
-                        maximum_active_pools=permit.maximum_active_pools,
-                        actionable=self._candidate_actionable,
-                        entry_time_valid=self._entry_time_valid,
-                    )
+                    desired, desired_pools, reserved_pools = await self._select_recovery_cohort(
+                        locked_pools, permit.maximum_active_pools)
                     self._sticky_pool_ids = set(desired_pools)
                     self._selected_portfolio_report = portfolio_reward_report(desired)
-                    self._save_sticky_markets(desired, locked_pools)
+                    self._save_sticky_markets(desired, reserved_pools)
                     candidates_by_symbol = {item.symbol: item for item in desired}
                     await self._cancel_ineligible_working_entries(candidates_by_symbol)
                     self._activated_pool_ids = set(locked_pools)
@@ -3715,7 +3837,7 @@ class ProductionOrchestrator:
             self._write_status("ready_paused", False, "flat reconciled; manual-close execution evidence missing; activation blocked")
             raise RuntimeError("manual close is flat but realized P&L requires authenticated closing fills")
         PersistentRiskWindow(
-            RiskWindowPolicy(self.config.risk.risk_window_loss_usd), self.journal,
+            RiskWindowPolicy(self.config.risk.risk_window_loss_usd, self.config.risk.max_pending_orders), self.journal,
         ).update(
             now=now,
             realized_pnl=realized_pnl,

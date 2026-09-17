@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+from .capacity import MAX_PENDING_ORDERS
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -17,8 +18,8 @@ class RiskWindowPolicy:
     def __post_init__(self) -> None:
         if self.stop_loss_usd <= 0:
             raise ValueError("risk-window stop loss must be positive")
-        if not 1 <= self.max_pending_orders <= 30:
-            raise ValueError("pending-order cap must be between 1 and 30")
+        if not 1 <= self.max_pending_orders <= MAX_PENDING_ORDERS:
+            raise ValueError("pending-order cap exceeds the approved ceiling")
 
     def bounds(self, now: datetime) -> tuple[datetime, datetime]:
         if now.tzinfo is None or now.utcoffset() is None:

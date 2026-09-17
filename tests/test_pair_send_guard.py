@@ -159,10 +159,24 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()[0], 0)
 
     async def test_odd_pending_slot_cannot_start_a_pair(self):
-        self.add_working(29, price=D('.1'))
+        self.add_working(39, price=D('.1'))
         await self.r._quote_pair_locked(fixtures.candidate())
         self.assertFalse(self.sent)
         self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_fortieth_order_passes_real_presend_guard(self):
+        self.add_working(38, price=D('.30'))
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(self.r._websocket_exposure().pending_orders, 40)
+        self.assertEqual(self.r._websocket_exposure().two_sided_quotes, 20)
+        self.r._cancel_symbol_entries.assert_not_awaited()
+
+    async def test_full_forty_orders_prevent_another_pair(self):
+        self.add_working(40, price=D('.1'))
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertFalse(self.sent)
+
 
     async def test_pair_over_actual_gross_cap_sends_neither_leg(self):
         self.add_working(28, price=D('.51'))

@@ -260,7 +260,7 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.rest.past_transfers = AsyncMock(return_value=[])
         self.runtime.rest.positions = AsyncMock(return_value=[])
         self.runtime.rest.active_orders = AsyncMock(return_value=[])
-        self.assertEqual(await self.runtime._risk_mark(), 30)
+        self.assertEqual(await self.runtime._risk_mark(), 40)
         self.assertFalse(self.runtime.account.equity_classification_complete)
         with patch(
             "gemini_bot.orchestrator._utc_now",
@@ -270,7 +270,7 @@ class RecentRuntimeFixTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime._reconcile_authenticated_nontrading_cash(), 1,
             )
         self.assertTrue(self.runtime.account.equity_classification_complete)
-        self.assertEqual(await self.runtime._risk_mark(), 30)
+        self.assertEqual(await self.runtime._risk_mark(), 40)
         self.assertEqual(self.runtime.journal.realized_pnl_for_window(
             *RiskWindowPolicy(D("30")).bounds(NOW)
         ), (D("0"), True))

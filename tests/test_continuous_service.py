@@ -36,6 +36,19 @@ class ContinuousPermitTests(unittest.TestCase):
         self.assertIsNone(p.expires_at)
         self.assertEqual(p.uptime_override_until, overnight.MIDNIGHT)
 
+    def test_v7_twenty_owner_ceiling(self):
+        self.fixture.value['maximum_active_pools'] = 20
+        self.assertEqual(self.fixture.load(overnight.MIDNIGHT).maximum_active_pools, 20)
+        self.fixture.value['maximum_active_pools'] = 21
+        with self.assertRaises(ValueError):
+            self.fixture.load(overnight.MIDNIGHT)
+
+    def test_legacy_permit_does_not_gain_twenty_owners(self):
+        self.fixture.value.update(permit_version=6, maximum_active_pools=20,
+                                  expires_at=(overnight.MIDNIGHT+timedelta(hours=1)).isoformat())
+        with self.assertRaises(ValueError):
+            self.fixture.load(overnight.MIDNIGHT)
+
     def test_null_expiry_is_not_accepted_by_legacy_permits(self):
         for version in (5, 6):
             self.fixture.value['permit_version'] = version

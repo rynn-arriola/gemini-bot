@@ -248,3 +248,6 @@
 - **Next work:** read-only pool/book scorer with explicit estimation uncertainty, then an independently authorized bounded trading evaluation. No Gemini live strategy or allocation selected; Polymarket runtime was not touched.
 
 Evidence and full proposal: [Rewards strategy review](docs/REWARDS_STRATEGY_REVIEW_2026-09-14.md). Public data: [snapshot](docs/history/REWARDS_PUBLIC_SNAPSHOT_2026-09-14.json). Stable API surface: [API reference](GEMINI_PREDICTIONS_API_REFERENCE.md).
+# September 16, 2026 — sticky-cohort comparison
+
+At 20:49 ET, read-only comparison with 19:38 found six of 15 market identities changed. The 20:27 cancellation cluster includes Rick Jackson with `external_book_one_sided` and Chris Gallant with `inside_two_tick_distance`; other selection triggers were not stored. Later candidate recovery does not prove the earlier cause. Offline production-selector reproduction shows a single missing candidate cycle can immediately release an owner, admit a challenger and keep the original displaced after recovery. This motivated the owner-approved recovery reservation repair. No fill, warning/error or supervisor restart was present in that observed interval. Neither local order duration nor this comparison proves paid snapshots. [Repair](docs/STICKY_RECOVERY_2026-09-16.md).

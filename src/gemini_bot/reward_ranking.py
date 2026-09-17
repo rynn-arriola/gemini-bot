@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_FLOOR
 from .domain import BookTop, ContractRules, Outcome, QuoteLeg, QuotePair, RewardPool, Side, UptimeProgress, market_owner_key
 from .profitability import ProfitabilityEvidence
 from .competition import CompetitionEvidence, UNSEEN_CONTRACT_SCORE_PRIOR, distance_weight
+from .capacity import MAX_ACTIVE_MARKETS
 
 
 MINIMUM_REWARD_SIZE = Decimal("10")
@@ -350,8 +351,8 @@ Reserve held/recovering owners individually, retain healthy incumbents, then
 greedily allocate vacant pair slots by marginal net per reserved capital-hour.
 No independence/hedging discount is applied to correlated execution costs.
 """
-    if not 1 <= maximum_active_pools <= 15:
-        raise ValueError("active market breadth must be between 1 and 15")
+    if not 1 <= maximum_active_pools <= MAX_ACTIVE_MARKETS:
+        raise ValueError("active market breadth exceeds approved ceiling")
     if len(locked_pool_ids) > maximum_active_pools:
         raise ValueError("locked market owners exceed authorized breadth")
     usable = [c for c in candidates if c.symbol in permitted_symbols

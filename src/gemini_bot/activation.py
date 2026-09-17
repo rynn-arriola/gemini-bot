@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Protocol
+from .capacity import MAX_ACTIVE_MARKETS
 
 
 class PermitStore(Protocol):
@@ -120,8 +121,9 @@ def load_activation_permit(
         or (version == 7 and (permit.uptime_override_until - permit.approved_at).total_seconds() > 86400)
     ):
         raise ValueError("uptime override must be timezone-aware, active, and within permit validity")
-    if not 1 <= permit.maximum_active_pools <= 15:
-        raise ValueError("activation permit pool breadth must be between 1 and 15")
+    maximum = MAX_ACTIVE_MARKETS if permit.permit_version == 7 else 15
+    if not 1 <= permit.maximum_active_pools <= maximum:
+        raise ValueError("activation permit exceeds approved market breadth")
     if permit.policy_sha256 != policy_digest(policy_path):
         raise ValueError("activation permit does not match the approved policy")
     if account_fingerprint is None or permit.account_fingerprint != account_fingerprint:
