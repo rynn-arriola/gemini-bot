@@ -80,7 +80,7 @@ These are current account-owner decisions. Changing one requires a new explicit 
 - Native Windows is the only supported production platform.
 - WebSocket is primary for market data, order mutations, order events, balances, and positions.
 - REST is used only where WebSocket lacks the information, for discovery/config/reward metadata, startup state brackets, and bounded reconciliation/recovery.
-- Base reward quote quantity is 15 contracts per outcome leg (pending controlled deployment; active v13 remains size 20).
+- Base reward quote quantity is 15 contracts per outcome leg (deployed in v14).
 - Maximum pending/open order count is 40. Filled positions do not consume this order-count limit; they remain governed by independent position and gross-exposure limits.
 - Maximum gross reservation/exposure is $300; maximum exposure attributable to one market is $90.
 - Maximum watched markets is 32, with at most 20 active/held market owners consuming or reserving two of the 40 planned quote slots each. A held market stays locked in that allocation until flat even though its position is not falsely reported as a pending exchange order. Multiple markets may share one reward pool, whose budget is counted once.
