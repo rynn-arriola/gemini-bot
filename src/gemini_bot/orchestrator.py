@@ -23,6 +23,7 @@ from .activation import (
 )
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
+from .queue_shadow import QueueShadow, ShadowArchive
 from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
 from .capacity import MAX_ACTIVE_MARKETS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
@@ -243,7 +244,68 @@ class ProductionOrchestrator:
         self.account.event_sink = self._account_event
         self._last_logged_status: tuple[str, bool, str] | None = None
         self._last_status_log_at = 0.0
+        self.queue_shadow = QueueShadow()
+        self._queue_archive = ShadowArchive(self.directory)
+        self._queue_watch_symbols: set[str] = set()
+        self._queue_live_orders: dict[str, Any] = {}
         self.log.event(logging.INFO, "runner_created", read_only=read_only)
+
+    def _observe_queue_shadow(self, symbol: str, *, frame: dict | None = None) -> None:
+        """Diagnostic failure disables only the observer, never trading."""
+        observer = getattr(self, "queue_shadow", None)
+        if observer is None or observer.error:
+            return
+        try:
+            if (symbol not in self._queue_watch_symbols
+                    or not self._public_stream_fresh(symbol)
+                    or self._stream_holds or self._public_shard_held(symbol)
+                    or not self.account.snapshots_fresh):
+                observer.invalidate(symbol)
+                return
+            generation = (self._public_generation(symbol), self._stream_generation["private"])
+            if frame is not None:
+                observer.observe_trade(frame, generation=generation, at=_utc_now())
+            else:
+                book = self.public.books.get(symbol)
+                if book is not None:
+                    observer.observe_book(book, generation=generation, at=_utc_now(),
+                                          orders=tuple(self._queue_live_orders.values()))
+        except Exception as exc:
+            observer.disable(exc)
+
+    def _queue_shadow_report(self, now: datetime, rows: list[dict]) -> dict:
+        observer = getattr(self, "queue_shadow", None)
+        if observer is None:
+            return {"mode": "unavailable", "used_for_trading": False}
+        try:
+            self._queue_watch_symbols = {c.rules.symbol for c in self.universe}
+            observer.retain(self._queue_watch_symbols)
+            self._queue_live_orders = {o.order_id: o for o in self.account.reducer.orders.values() if o.working}
+            if len(self._queue_live_orders) > 40:
+                raise ValueError("shadow working-order bound exceeded")
+            fresh = {s for s in observer.markets if self._public_stream_fresh(s)
+                     and not self._stream_holds and not self._public_shard_held(s)
+                     and self.account.snapshots_fresh
+                     and observer.markets[s].generation == (
+                         self._public_generation(s), self._stream_generation["private"])}
+            report = observer.report(at=now, fresh_symbols=fresh)
+            for symbol in set(observer.markets) - fresh:
+                observer.invalidate(symbol)
+            self._queue_archive.write(at=now, report=report, forecasts=rows)
+            report["archive_error_type"] = self._queue_archive.error
+            return report
+        except Exception as exc:
+            observer.disable(exc)
+            return {"mode": "unavailable", "used_for_trading": False, "error_type": observer.error}
+
+    def _queue_cancel_done(self, started: float, task: asyncio.Task) -> None:
+        observer = getattr(self, "queue_shadow", None)
+        if observer is not None:
+            try:
+                observer.record_cancel(time.monotonic() - started,
+                                       succeeded=not task.cancelled() and task.exception() is None)
+            except Exception as exc:
+                observer.disable(exc)
 
     def _write_status(self, phase: str, activated: bool, reason: str) -> None:
         clock = time.monotonic()
@@ -299,6 +361,22 @@ class ProductionOrchestrator:
         self.log.event(logging.INFO, event, **fields)
         if event == "order_transition":
             symbol = str(fields["symbol"])
+            observer = getattr(self, "queue_shadow", None)
+            if observer is not None and not observer.error:
+                try:
+                    order = self.account.reducer.orders.get(str(fields.get("order_id", "")))
+                    if order is not None:
+                        if order.working:
+                            self._queue_live_orders[order.order_id] = order
+                        else:
+                            self._queue_live_orders.pop(order.order_id, None)
+                        if len(self._queue_live_orders) > 40:
+                            raise ValueError("shadow working-order bound exceeded")
+                        # Private/public publication ordering is uncertain;
+                        # never carry a queue scenario across our own mutation.
+                        observer.invalidate(symbol)
+                except Exception as exc:
+                    observer.disable(exc)
             # Observe every lifecycle event as well as the clock. Otherwise a
             # cancel and replacement inside one 250ms tick can hide a gap.
             self._observe_resting(symbol_filter=symbol)
@@ -959,6 +1037,7 @@ class ProductionOrchestrator:
             row["exchange_reported_uptime"] = views.get(str(row["event_ticker"]))
         atomic_write_json(self.directory / "rank-report.json", {
             "generated_at": now.isoformat(), "candidates": rows,
+            "queue_shadow": self._queue_shadow_report(now, rows),
             "discovery_ranking": {
                 "version": DISCOVERY_RANKING_VERSION,
                 "method": "daily_budget_divided_by_sqrt_estimated_pool_breadth",
@@ -1086,6 +1165,7 @@ class ProductionOrchestrator:
                 if (all(key in frame for key in ("s", "t", "p", "q", "m"))
                         and str(frame["s"]).upper() in self.public.books):
                     self.profitability.observe_trade(frame, observed_at=observed_at)
+                    self._observe_queue_shadow(str(frame["s"]).upper(), frame=frame)
                 updated_symbol = self.public.apply_frame(shard_event if shard_event is not None else frame)
                 if (
                     frame.get("e") == "depthUpdate"
@@ -1096,6 +1176,7 @@ class ProductionOrchestrator:
                     book = self.public.books.get(symbol)
                     if book is not None:
                         self.profitability.observe_book(book, observed_at=observed_at)
+                        self._observe_queue_shadow(symbol)
                 self._mark_live_risk()
                 if updated_symbol is not None and updated_symbol in self.public.resync_required:
                     if shard_event is not None:
@@ -1791,6 +1872,8 @@ class ProductionOrchestrator:
                 name="gemini-cancel-confirm",
             )
             self._cancel_tasks[order_id] = task
+            task.add_done_callback(lambda completed, started=time.monotonic():
+                                   self._queue_cancel_done(started, completed))
         try:
             await asyncio.shield(task)
         finally:
@@ -3967,6 +4050,12 @@ class ProductionOrchestrator:
             await asyncio.gather(self.private.close(), self.public.close(), return_exceptions=True)
         finally:
             try:
+                archive = getattr(self, "_queue_archive", None)
+                if archive is not None:
+                    try:
+                        archive.close()
+                    except Exception:
+                        pass  # Optional diagnostic close must not strand ownership.
                 self._logging.close()
             finally:
                 self.journal.close()
