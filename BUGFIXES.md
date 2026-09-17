@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 17 — failed background worker incorrectly closed the session normally
+
+V17's private venue-restart disconnects and concurrent public-shard cancel-proof timeouts halted the gate between main-loop iterations. The loop then skipped retrieval of the worker exception and recorded `closed` after draining flat, preventing the intended bounded transient recovery. Completed worker failures are now retrieved before normal-close classification. The actual activation-loop regression reproduces the inter-iteration HALT and reaches `recoverable_flat` only after synthetic successful drain. Unknown/permanent errors, incomplete drain and HARD retain existing blocks; this neither retries an ambiguous cancel nor fixes the external venue outage. [Evidence](docs/QUEUE_PILOT_EXECUTION_2026-09-17.md).
+
 ## September 17, 2026 — fatal account reader stalled emergency drain
 
 V16 stopped at 00:00 ET after a correlated WebSocket rejection killed the account reader. Without a transient recovery hold, drain skipped reconnection and cancellation confirmations timed out. Drain now restores failed readers for exact shutdown proof. Lost maker acknowledgements resolve only from unique exact zero-fill terminal history. Rejections retain redacted method/status/code; the original venue reason was not recorded and remains unknown. Confirmed service/rate errors can qualify for the existing bounded supervised restart only after complete terminal/flat/account proof; permanent/auth/unknown errors and HARD remain blocking, including when followed by an acknowledgement timeout. [Evidence and limits](docs/MIDNIGHT_REQUEST_RECOVERY_2026-09-17.md).

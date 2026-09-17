@@ -1,4 +1,12 @@
-# Queue-aware best-bid strategy: measurement stage
+# Queue-aware best-bid strategy
+
+## Completion follow-up
+
+The execution integration described as missing below has now been implemented
+and tested in `queue_pilot.py` and the production orchestrator. The first-release
+sections below are historical. See [live integration and rollout status](QUEUE_PILOT_EXECUTION_2026-09-17.md).
+The checked-in policy still uses two ticks: real calibration and exact pilot
+selection must precede activation; synthetic test thresholds are not live values.
 
 ## Release boundary
 

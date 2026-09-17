@@ -41,6 +41,7 @@ class RankInput:
     event_contract_count: int = 1
     pool_competition_score: Decimal | None = None
     unobserved_competition_units: int = 1
+    quote_offset_ticks: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,8 @@ def rank_candidate(
     stale_after_seconds: Decimal = Decimal("3"),
     target_uptime: Decimal = DEFAULT_TARGET_UPTIME,
 ) -> RankedCandidate:
+    if item.quote_offset_ticks is not None:
+        offset_ticks = item.quote_offset_ticks
     reasons: list[str] = []
     quote: QuotePair | None = None
     if not item.pool.active or item.pool.daily_budget_usd <= 0:

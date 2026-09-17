@@ -24,6 +24,7 @@ from .activation import (
 from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
 from .queue_shadow import QueueShadow, ShadowArchive
+from .queue_pilot import QueuePilot
 from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
 from .capacity import MAX_ACTIVE_MARKETS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
@@ -248,10 +249,112 @@ class ProductionOrchestrator:
         self._queue_archive = ShadowArchive(self.directory)
         self._queue_watch_symbols: set[str] = set()
         self._queue_live_orders: dict[str, Any] = {}
+        self.queue_pilot = QueuePilot(config.strategy.queue_pilot) if config.strategy.queue_pilot else None
+        self._pilot_proof_tasks: dict[str, asyncio.Task] = {}
+        self._pilot_next_proof: dict[str, float] = {}
+        self._pilot_proved: dict[str, tuple] = {}
         self.log.event(logging.INFO, "runner_created", read_only=read_only)
+
+    def _rank_live_universe(self, *args, **kwargs):
+        policy = self.config.strategy.queue_pilot
+        if policy is not None:
+            kwargs["symbol_offsets"] = {s: 0 for s in policy.symbols}
+        return rank_live_universe(*args, **kwargs)
+
+    def _pilot_generation(self, symbol):
+        return self._public_generation(symbol), self._stream_generation["private"]
+
+    def _pilot_safe(self, symbol):
+        return bool(self._book_fresh(symbol) and not self._public_shard_held(symbol)
+                    and not self._stream_holds and not self._read_recovery_attempts
+                    and not self._reward_program_paused and self.account.snapshots_fresh
+                    and self.account.equity_classification_complete
+                    and symbol not in self.account.blocked_entries
+                    and not self.account.reducer.positions.get(symbol)
+                    and not self.journal.pending_exit(symbol) and symbol not in self._exit_workers
+                    and symbol not in self._exit_uncertain and symbol not in self._entry_cancel_symbols)
+
+    def _pilot_advice(self, symbol, *, allow_entry=False):
+        pilot = self.queue_pilot
+        if pilot is None or symbol not in pilot.policy.symbols:
+            return "outside_pilot"
+        try:
+            return pilot.advice(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
+                                orders=tuple(self._queue_live_orders.values()), safe=self._pilot_safe(symbol),
+                                allow_entry=allow_entry)
+        except Exception as exc:
+            pilot.fail(symbol, exc)
+            return "withdraw"
+
+    def _pilot_proof_current(self, symbol):
+        proof = self._pilot_proved.get(symbol)
+        return bool(proof and 0 <= time.monotonic() - proof[0] <= 3
+                    and proof[1] == self._pilot_generation(symbol) and proof[2] == self.account.fill_version)
+
+    def _observe_queue_pilot(self, symbol, *, frame=None):
+        pilot = self.queue_pilot
+        if pilot is None or symbol not in pilot.policy.symbols:
+            return
+        try:
+            if (not self._book_fresh(symbol) or self._public_shard_held(symbol)
+                    or self._stream_holds or not self.account.snapshots_fresh):
+                pilot.invalidate(symbol)
+            elif frame is not None:
+                pilot.observe_trade(frame, generation=self._pilot_generation(symbol), at=_utc_now())
+            else:
+                pilot.observe_book(self.public.books[symbol], generation=self._pilot_generation(symbol),
+                                   at=_utc_now(), orders=tuple(self._queue_live_orders.values()))
+        except Exception as exc:
+            pilot.fail(symbol, exc)  # Local evidence failure never clears risk/account gates.
+        # Trade depletion must wake the guard too, without waiting for a depth tick.
+        self.public.adverse_dirty.mark(symbol)
+        self.public.depth_changed.set()
+
+    async def _pilot_flat_proof(self, symbol):
+        pilot = self.queue_pilot
+        try:
+            generation, version = self._pilot_generation(symbol), self.account.fill_version
+            async with asyncio.timeout(15):
+                snapshot = await self._exit_account_snapshot(symbol)
+            if (snapshot.signed_positions.get(symbol) or generation != self._pilot_generation(symbol)
+                    or version != self.account.fill_version or not self._pilot_safe(symbol)
+                    or self.journal.has_nonterminal_intents(symbol)):
+                return
+            # A missed execution cannot be converted into a zero-fill requeue.
+            # Filled lifecycles are released only by normal exact-flat cleanup.
+            pilot.proof_required.discard(symbol)
+            self._pilot_proved[symbol] = (time.monotonic(), generation, version)
+            self.journal.audit("queue_pilot_flat_proof", {"symbol": symbol})
+        except (ExitDeferred, TimeoutError):
+            return
+        except ApiError as exc:
+            if not transient_failure(exc):
+                raise
+        finally:
+            self._pilot_next_proof[symbol] = time.monotonic() + 60
+
+    def _pilot_entry_ready(self, symbol):
+        pilot = self.queue_pilot
+        if pilot is None or symbol not in pilot.policy.symbols:
+            return True
+        if symbol not in pilot.markets:
+            self._observe_queue_pilot(symbol)
+        task = self._pilot_proof_tasks.get(symbol)
+        if task is not None and task.done():
+            task.result()  # Unknown account/ownership failures remain fatal.
+            self._pilot_proof_tasks.pop(symbol)
+        if not self._pilot_proof_current(symbol):
+            pilot.proof_required.add(symbol)
+        if symbol in pilot.proof_required:
+            if (symbol not in self._pilot_proof_tasks and self._pilot_safe(symbol)
+                    and time.monotonic() >= self._pilot_next_proof.get(symbol, 0)):
+                self._pilot_proof_tasks[symbol] = asyncio.create_task(self._pilot_flat_proof(symbol))
+            return False
+        return self._pilot_advice(symbol, allow_entry=True) == "allow"
 
     def _observe_queue_shadow(self, symbol: str, *, frame: dict | None = None) -> None:
         """Diagnostic failure disables only the observer, never trading."""
+        self._observe_queue_pilot(symbol, frame=frame)
         observer = getattr(self, "queue_shadow", None)
         if observer is None or observer.error:
             return
@@ -283,6 +386,11 @@ class ProductionOrchestrator:
             self._queue_live_orders = {o.order_id: o for o in self.account.reducer.orders.values() if o.working}
             if len(self._queue_live_orders) > 40:
                 raise ValueError("shadow working-order bound exceeded")
+            # Quiet synchronized books are still current when their own stream
+            # is verified. Seed missing observers here, never backfill warmup.
+            for symbol in self._queue_watch_symbols:
+                if symbol not in observer.markets:
+                    self._observe_queue_shadow(symbol)
             fresh = {s for s in observer.markets if self._public_stream_fresh(s)
                      and not self._stream_holds and not self._public_shard_held(s)
                      and self.account.snapshots_fresh
@@ -361,6 +469,22 @@ class ProductionOrchestrator:
         self.log.event(logging.INFO, event, **fields)
         if event == "order_transition":
             symbol = str(fields["symbol"])
+            order = self.account.reducer.orders.get(str(fields.get("order_id", "")))
+            if order is not None:
+                if order.working:
+                    self._queue_live_orders[order.order_id] = order
+                else:
+                    self._queue_live_orders.pop(order.order_id, None)
+                if len(self._queue_live_orders) > 40:
+                    raise RuntimeError("working-order cache exceeds approved capacity")
+                if (self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols
+                        and (not order.working or order.cumulative_filled)):
+                    # Spontaneous MOC cancellation or fill is just as binding
+                    # as an operator/guard cancellation; never reuse old proof.
+                    self.queue_pilot.canceled(symbol, _utc_now())
+                    self._pilot_proved.pop(symbol, None)
+                    self.public.adverse_dirty.mark(symbol)
+                    self.public.depth_changed.set()
             observer = getattr(self, "queue_shadow", None)
             if observer is not None and not observer.error:
                 try:
@@ -445,7 +569,7 @@ class ProductionOrchestrator:
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
         )
-        self.ranked = rank_live_universe(
+        self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=now,
             quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
             uptime=self._uptime, account=self.account.reducer,
@@ -491,7 +615,7 @@ class ProductionOrchestrator:
         self.log.event(logging.INFO, event, **fields)
 
     def _rank_for_owner_check(self) -> None:
-        self.ranked = rank_live_universe(
+        self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=_utc_now(),
             quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
             uptime=self._uptime, account=self.account.reducer,
@@ -626,12 +750,23 @@ class ProductionOrchestrator:
                     and now >= self._uptime_override_until))
 
     def _check_stream_recovery(self) -> None:
+        for task in self._pilot_proof_tasks.values():
+            if task.done() and not task.cancelled():
+                task.result()
         for shard, task in tuple(self._shard_restarts.items()):
             if task.done():
                 task.result()
                 self._shard_restarts.pop(shard)
         if self._stream_recovery_task is not None and self._stream_recovery_task.done():
             self._stream_recovery_task.result()
+
+    def _check_background_failures(self, *workers) -> None:
+        self._check_stream_recovery()
+        tasks = (*workers, *self._tasks, *self._adverse_tasks.values(),
+                 *self._exit_workers.values(), *self._cancel_tasks.values())
+        for task in tasks:
+            if task is not None and task.done() and not task.cancelled():
+                task.result()
 
     def _public_generation(self, symbol: str):
         if isinstance(self.public, PublicMarketShards):
@@ -1038,6 +1173,7 @@ class ProductionOrchestrator:
         atomic_write_json(self.directory / "rank-report.json", {
             "generated_at": now.isoformat(), "candidates": rows,
             "queue_shadow": self._queue_shadow_report(now, rows),
+            "queue_pilot": self.queue_pilot.report() if self.queue_pilot else {"configured": False},
             "discovery_ranking": {
                 "version": DISCOVERY_RANKING_VERSION,
                 "method": "daily_budget_divided_by_sqrt_estimated_pool_breadth",
@@ -1821,7 +1957,7 @@ class ProductionOrchestrator:
                 exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
                 sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
             )
-            self.ranked = rank_live_universe(
+            self.ranked = self._rank_live_universe(
                 self.universe, self.public.books, now=now,
                 quantity=self.config.strategy.quote_quantity,
                 offset_ticks=self.config.strategy.quote_offset_ticks,
@@ -2004,7 +2140,8 @@ class ProductionOrchestrator:
                 if terminal is not None and str(terminal.get("status", "")).upper() in {"CANCELLED", "CANCELED", "FILLED", "REJECTED"}:
                     order = self.account.reducer.orders.get(order_id)
                     status = str(terminal["status"]).upper().replace("CANCELLED", "CANCELED")
-                    if order is not None and not send_cancel:
+                    if order is not None and (not send_cancel or
+                            (self.queue_pilot is not None and order.symbol in self.queue_pilot.policy.symbols)):
                         # No new cancel was sent because disconnect/admission may
                         # already have terminalized it. Require exact history so
                         # a missed partial fill can never be erased as a cancel.
@@ -2021,6 +2158,9 @@ class ProductionOrchestrator:
         raise TimeoutError("order cancellation was not proven terminal") from last_transient
 
     async def _cancel_symbol_entries(self, symbol: str) -> None:
+        if self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+            if self.account.reducer.risk_adding_order_ids(symbol):
+                self.queue_pilot.canceled(symbol, _utc_now())
         self._entry_cancel_symbols[symbol] = self._entry_cancel_symbols.get(symbol, 0) + 1
         try:
             order_ids = self.account.reducer.risk_adding_order_ids(symbol)
@@ -2033,6 +2173,9 @@ class ProductionOrchestrator:
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
+            if order_ids and self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+                self.queue_pilot.canceled(symbol, _utc_now())
+                self._pilot_proved.pop(symbol, None)
         finally:
             self._entry_cancel_symbols[symbol] -= 1
             if self._entry_cancel_symbols[symbol] == 0:
@@ -2140,6 +2283,12 @@ class ProductionOrchestrator:
                 raise EntryStateChangedBeforeSend(
                     "entry exposure changed while waiting to send"
                 )
+            if self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+                if (params.get("timeInForce") != "MOC" or not self._pilot_proof_current(symbol)
+                        or self._pilot_advice(symbol, allow_entry=True) != "allow"):
+                    raise QuoteChangedBeforeSend("queue pilot evidence changed before send")
+                self.queue_pilot.anchor_send(symbol, Outcome(params["eventOutcome"]),
+                    params["clientOrderId"], Decimal(str(params["price"])), _utc_now())
         else:
             round_deadline = self._exit_round_deadlines.get(symbol)
             if round_deadline is not None and time.monotonic() >= round_deadline:
@@ -2256,6 +2405,8 @@ class ProductionOrchestrator:
         if self.account.reducer.positions.get(candidate.symbol, Decimal("0")) != 0:
             return
         if self.account.reducer.risk_adding_order_ids(candidate.symbol):
+            return
+        if not self._pilot_entry_ready(candidate.symbol):
             return
         target = self._current_quote_target(candidate.symbol)
         if target is None:
@@ -2413,7 +2564,7 @@ class ProductionOrchestrator:
             return None, "market_stream_stale"
         if book.top() is None:
             return None, "public_book_one_sided"
-        candidates = rank_live_universe(
+        candidates = self._rank_live_universe(
             [contract], self.public.books, now=_utc_now(),
             quantity=self.config.strategy.quote_quantity,
             offset_ticks=self.config.strategy.quote_offset_ticks,
@@ -2439,6 +2590,12 @@ class ProductionOrchestrator:
             if order.symbol == symbol and order.working and order.side.value == "BUY"
         ]
         if not working:
+            return False
+        if self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+            if self._pilot_advice(symbol) != "keep":
+                self._record_quote_cancel(symbol, "queue_pilot:" + self.queue_pilot.reasons.get(symbol, "evidence"))
+                await self._cancel_symbol_entries(symbol)
+                return True
             return False
         target, target_reason = self._quote_target_state(symbol)
         if target is None:
@@ -2511,6 +2668,10 @@ class ProductionOrchestrator:
             if working:
                 await self._cancel_symbol_entries(candidate.symbol)
             return
+        if (working and self.queue_pilot is not None and candidate.symbol in self.queue_pilot.policy.symbols
+                and self._pilot_advice(candidate.symbol) != "keep"):
+            await self._cancel_symbol_entries(candidate.symbol)
+            return
         expected = {
             Outcome.YES: (candidate.quote.yes.price, candidate.quote.yes.quantity),
             Outcome.NO: (candidate.quote.no.price, candidate.quote.no.quantity),
@@ -2567,7 +2728,7 @@ class ProductionOrchestrator:
         self._retention_reason = "inside_two_tick_distance_or_invalid_price"
         if not resting_quote_safe(pair, target, contract.rules, self.config.strategy.quote_quantity):
             return False
-        ranked = rank_live_universe(
+        ranked = self._rank_live_universe(
             [contract], self.public.books, now=_utc_now(),
             quantity=self.config.strategy.quote_quantity, offset_ticks=self.config.strategy.quote_offset_ticks,
             uptime=self._uptime, account=self.account.reducer, market_data_verified_at=self._market_data_verified_at(),
@@ -3064,6 +3225,10 @@ class ProductionOrchestrator:
             clock = asyncio.get_running_loop().time()
             self._observe_resting()
             self._check_stream_recovery()
+            if self.queue_pilot is not None:
+                for symbol in self.queue_pilot.policy.symbols:
+                    self.public.adverse_dirty.mark(symbol)
+                self.public.depth_changed.set()
             if self._permit_expires_at is not None and now >= self._permit_expires_at:
                 self.gate.state = EngineState.DRAINING
                 return
@@ -3480,6 +3645,13 @@ class ProductionOrchestrator:
             else set(permit.symbols)
         )
         self._permit_policy_digest = permit.policy_sha256
+        if self.queue_pilot is not None:
+            incumbents = {symbol for _, symbol in self._sticky_markets.values()}
+            if (permit.permit_version != 7 or not self.queue_pilot.policy.symbols <= incumbents
+                    or not self.queue_pilot.policy.symbols <= self._permitted_symbols):
+                raise RuntimeError("queue pilot must name exactly two existing permitted owners")
+            if any(_utc_now() >= c.expires_at for _, y, n in self.queue_pilot.policy.markets for c in (y, n)):
+                raise RuntimeError("queue pilot calibration expired before activation")
         if not self._permitted_symbols <= (
             {item.rules.symbol for item in self.universe} | self._inventory_catalog_holds
         ):
@@ -3652,7 +3824,7 @@ class ProductionOrchestrator:
                             updated_at=now,
                         )
                         next_uptime_at = clock + 60
-                    self.ranked = rank_live_universe(
+                    self.ranked = self._rank_live_universe(
                         self.universe, self.public.books, now=_utc_now(),
                         quantity=self.config.strategy.quote_quantity,
                         offset_ticks=self.config.strategy.quote_offset_ticks,
@@ -3706,6 +3878,8 @@ class ProductionOrchestrator:
                     next_stale_check_at = clock + 3
                 await self._exit_due_positions()
                 await asyncio.sleep(1)
+            # Workers may halt the gate between iterations; don't silently close.
+            self._check_background_failures(safety, safety_clock, adverse_guard, reward_check)
             await self.drain()
             if commissioning_seconds is not None and self._maker_ack_count == 0:
                 raise RuntimeError("commissioning did not observe a working maker order; no success claimed")
@@ -4012,6 +4186,10 @@ class ProductionOrchestrator:
         return imported
 
     async def close(self) -> None:
+        for task in self._pilot_proof_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self._pilot_proof_tasks.values(), return_exceptions=True)
+        self._pilot_proof_tasks.clear()
         if self._closed:
             return
         self._closed = True

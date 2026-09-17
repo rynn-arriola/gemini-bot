@@ -39,6 +39,7 @@ def rank_live_universe(
     resting_quotes: dict[str, QuotePair] | None = None,
     pool_competition_scores: dict[str, Decimal] | None = None,
     evaluate_working_quotes: bool = False,
+    symbol_offsets: dict[str, int] | None = None,
 ) -> list[RankedCandidate]:
     inputs: list[RankInput] = []
     progress = uptime or {}
@@ -46,6 +47,7 @@ def rank_live_universe(
     for contract in contracts:
         pool_events.setdefault(contract.pool.pool_id, set()).add(contract.event_ticker)
     for contract in contracts:
+        contract_offset = (symbol_offsets or {}).get(contract.rules.symbol, offset_ticks)
         book = books.get(contract.rules.symbol)
         if book is not None and account is not None:
             book = LocalBook(book.symbol, dict(book.bids), dict(book.asks), book.last_update_id, book.synchronized, book.observed_at)
@@ -84,7 +86,7 @@ def rank_live_universe(
                                             by_outcome[outcome].price, quantity)
                                    for outcome in (Outcome.YES, Outcome.NO)))
                 try:
-                    target = build_two_sided_quote(top, contract.rules, quantity, offset_ticks)
+                    target = build_two_sided_quote(top, contract.rules, quantity, contract_offset)
                 except ValueError:
                     target = None
                 if target is not None and resting_quote_safe(pair, target, contract.rules, quantity):
@@ -92,7 +94,7 @@ def rank_live_universe(
         evidence = ProfitabilityEvidence()
         if profitability is not None:
             try:
-                quote = resting or build_two_sided_quote(top, contract.rules, quantity, offset_ticks)
+                quote = resting or build_two_sided_quote(top, contract.rules, quantity, contract_offset)
             except ValueError:
                 quote = None
             if quote is not None:
@@ -136,6 +138,7 @@ def rank_live_universe(
                 else None
             ),
             event_contract_count=contract.event_contract_count,
+            quote_offset_ticks=contract_offset,
         ))
     candidates = rank_market_candidates(
         inputs,
@@ -157,7 +160,8 @@ def rank_live_universe(
         # still be submitted at the approved current target, never an old price.
         by_symbol = {i.rules.symbol: i for i in inputs}
         candidates = [replace(c, quote=build_two_sided_quote(
-            by_symbol[c.symbol].book, by_symbol[c.symbol].rules, quantity, offset_ticks,
+            by_symbol[c.symbol].book, by_symbol[c.symbol].rules, quantity,
+            by_symbol[c.symbol].quote_offset_ticks,
         )) if by_symbol[c.symbol].resting_quote is not None and c.quote is not None else c
                       for c in candidates]
     return candidates

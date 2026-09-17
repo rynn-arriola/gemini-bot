@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import os
 from .capacity import MAX_PENDING_ORDERS
+from .queue_pilot import PilotPolicy, parse_pilot_policy
 
 
 class ConfigurationError(ValueError):
@@ -21,8 +22,11 @@ class StrategyConfig:
     max_quote_distance: Decimal = Decimal("0.10")
     reward_size_cap: Decimal = Decimal("250")
     stale_book_seconds: Decimal = Decimal("3")
+    queue_pilot: PilotPolicy | None = None
 
     def validate(self) -> None:
+        if self.queue_pilot is not None and (self.quote_quantity != Decimal("15") or self.quote_offset_ticks != 2):
+            raise ConfigurationError("queue pilot requires size 15 and nonpilot offset 2")
         if self.quote_quantity < Decimal("10"):
             raise ConfigurationError("quote_quantity must meet Gemini's 10-contract reward minimum")
         if self.quote_offset_ticks < 0:
@@ -132,7 +136,10 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         "risk_window_pending_order_policy",
         "max_inventory_age_seconds", "force_exit_before_expiry_seconds", "monetary_stop_authorities",
     }
-    if set(raw) != required or raw["policy_version"] != 2 or raw["platform"] != "windows":
+    version = raw.get("policy_version")
+    if version == 3:
+        required.add("queue_pilot")
+    if set(raw) != required or version not in {2, 3} or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
         raise ConfigurationError("risk-window clock does not match approved Eastern windows")
@@ -144,10 +151,15 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         raise ConfigurationError("risk-window pending-order policy must remain fixed until stop")
     if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
         raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
+    try:
+        pilot = parse_pilot_policy(raw.get("queue_pilot"))
+    except (ValueError, TypeError, ArithmeticError, AttributeError) as exc:
+        raise ConfigurationError("invalid queue pilot calibration") from exc
     strategy = StrategyConfig(
         quote_quantity=Decimal(raw["quote_quantity"]),
         quote_offset_ticks=int(raw["quote_offset_ticks"]),
         target_uptime=Decimal(raw["target_uptime"]),
+        queue_pilot=pilot,
     )
     risk = RiskConfig(
         max_gross_reservation_usd=Decimal(raw["max_gross_reservation_usd"]),
