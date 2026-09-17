@@ -64,3 +64,24 @@ all PowerShell parse checks, whitespace and offline Windows policy/storage check
 passed. Tests used the isolated source explicitly; no live fault or fill was induced.
 No deployment or restart occurred during these tests. The owner's subsequent
 slot-selection clarification authorizes the controlled deployment separately.
+
+## Completed deployment
+
+Source/decision `cee5de3` matched origin/main. V15 drained flat at 22:10:58 ET;
+the prior process tree exited and a canonical backup passed SQLite integrity.
+Fresh read-only startup and a second authenticated REST/WS flat proof preceded
+the explicit one-time reset. An atomic archive/audit preserved the exact old
+20-owner cohort and cleared only its active selection/recovery preferences.
+Economic histories and original event uptime were preserved, not reassigned.
+Operator helper offline checks covered cohort mismatch, unresolved intents,
+atomic archive/history preservation and refusal to reuse the approval.
+
+Fresh preparation then found 32 watched/30 ranked/22 actionable markets with
+zero incumbent preference and created a new exact-build/account/policy v7 permit.
+The persistent task's v16 supervisor 21580 / runner launcher 19632 first quoted at
+22:15:29 ET. Authenticated REST at 22:15:54 proved 40 owned size-15 orders across
+20 markets and zero positions. Five public shards connected; no holds, errors or
+retries. Nine markets are new, eleven independently reselected; all belong to
+12 single-event pools and pass concrete economics/quote checks. Normal sticky
+retention resumes. The approximately 271-second stop-to-first-quote interval is
+uncredited. See the full [selection audit](POOL_SELECTION_AUDIT_2026-09-16.md).

@@ -2,6 +2,7 @@
 
 Measurement-only items; none may alter live behavior without a new decision and tested release.
 
+- Calibrate discovery's soft square-root breadth weighting, sample-based unread-event contract counts and final unseen-competition prior against exchange rewards. September 16 v16's top Fed candidates use about 209.775 planned scoring minutes versus 1080 for other single-event pools; that estimated-window difference materially boosts capital-hour efficiency. Measure sensitivity before interpreting rank as superior realized payout. No automatic window/ranking change or portfolio reset.
 - Compare touch, one-tick, and two-tick distance using actual fills, adverse selection, achieved daily reward scores, and net P&L.
 - Measure whether the 75% internal uptime target gives useful recovery margin over Gemini's 50% threshold.
 - Confirm the Eastern reward-day proxy and exact shared-pool uptime/size aggregation from authenticated daily-summary snapshot totals.
