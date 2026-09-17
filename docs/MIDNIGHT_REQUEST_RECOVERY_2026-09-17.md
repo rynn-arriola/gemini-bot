@@ -22,4 +22,10 @@ Official [message format](https://developer.gemini.com/prediction-markets/websoc
 
 670 production tests and 28 script tests pass (698 total), including 15 new focused regressions. Compilation, all PowerShell parse checks, whitespace checks and offline Windows policy/storage validation pass. Replacing the new drain condition in memory with the old one makes the dead-reader regression fail as expected. Fresh authenticated preparation reached ready-paused with zero positions/orders, unchanged historical ledger rows and all 20 sticky identities preserved. The current new six-hour risk window has no stored row yet; exact classified history is checked without manufacturing/resetting one. Activation performs the ordinary current-window update.
 
-Deployment acceptance follows after the new exact-build permit and live launch.
+## Deployment acceptance
+
+Source `2a1efdb98cce3d180a5afe73f66c5dcb9ccc66e7` exactly matched `origin/main`. Final preparation found 32 watched/30 ranked/16 actionable candidates, zero orders/positions, preserved history and all 20 owners, complete current-window classification and no HARD. Fresh v7 authority is `data/production-20260917-request-recovery-v17/activation-permit-request-recovery.json`: exact build/account/policy, 20 owners, two same-supervisor bounded recovery restarts, null expiry and no uptime override.
+
+Persistent supervisor 29360 / runner launcher 26640 started through the existing on-demand task. First NEW was 06:56:31 ET September 17. Authenticated REST at 06:56:40 confirmed **30 canonically owned size-15 orders across 15 markets, zero positions**. All 20 previous owners remain. Five public shards connected, no read/stream holds, zero supervisor restarts and no WARNING/ERROR/CRITICAL log events; SQLite integrity and permit/build/policy agreement passed. The 40-order ceiling is unchanged; this is an initial checkpoint, not sustained uptime/reward or injected-fault recovery proof.
+
+Backup: `data/control-before-midnight-recovery.sqlite`. Preserve v17 and do not reuse the consumed v16 permit. The original unidentified rejection may still require attention; this release proves recovery only for the explicitly classified service-error cases and complete proof boundaries described above.
