@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Stay-best-bid candidate deployment remains pending.** Isolated `feature/stay-best-bid` implements approved v6 zero-tick all-selected placement. Do not hot-edit running main or reuse v25's permit. On an owner-approved controlled restart, preserve the cohort/history, prove terminal/flat readiness and obtain exact fresh authority; verify actual owned best-bid quotes, natural repositioning, fills/exits and unaffected markets. Queue-settings expiry disables optional same-price optimization only in v6; running v25 still has its original one-tick fallback. [Handoff](docs/STAY_BEST_BID_2026-09-18.md).
+- **Stay-best-bid v26 deployment completed.** Continue read-only observation of natural price-change repositioning, useful same-price refresh, fills/exits, economic pauses and unaffected markets. Initial acceptance proved owned best-bid prices at two consecutive archive points, not uninterrupted future presence, exact queue position, reward qualification or profitability. Queue-settings expiry disables optional same-price optimization only; v6 best-bid placement continues under all existing safety gates. [Handoff](docs/STAY_BEST_BID_2026-09-18.md).
 
 - **V25 daily sticky deployment completed.** Continue read-only observation of profitability-only reservations, same-owner recovery and post-midnight fresh grace. Initial acceptance found 32 owned orders/16 markets, zero positions, five healthy public shards and three economic reservations; reserved idle slots grant no uptime or order permission. [Details](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).
 

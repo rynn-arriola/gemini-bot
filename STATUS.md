@@ -4,7 +4,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **Stay-best-bid v6 is an isolated candidate, not deployed.** The owner approved best-bid placement across selected markets, with useful optional repositioning and accepted thin/depleted-queue fill risk. No one-tick fallback in that explicit policy; all fill/exit/accounting/HARD gates remain. Current main/v25 runtime is untouched. Deployment requires a controlled drain, fresh exact build/policy/account authority and restart. [Behavior and verification](docs/STAY_BEST_BID_2026-09-18.md).
+- **Stay-best-bid v26 is deployed and running.** V25 drained to `stopped_flat`; main/GitHub advanced to the verified v6 policy, fresh read-only preparation proved zero orders/positions and created a verified backup, and new exact build/policy/account v7 authority launched with no uptime override. Two consecutive live archives observed 32 then 28 owned size-15 orders across 16 then 14 markets, all exactly at the external best bids with zero mismatches; zero positions, five healthy public shards, no holds/errors/fills and a RUNNING supervisor. Economic reservations explain non-capacity breadth. [Behavior and deployment evidence](docs/STAY_BEST_BID_2026-09-18.md).
 
 - **Daily sticky economics v25 is deployed and running.** V24 drained to `stopped_flat`; fresh preparation proved the venue flat/order-free, verified a new backup, preserved sticky/economic history and created exact build/policy/account authority with no uptime override. Initial authenticated acceptance found 32 owned size-15 orders across 16 markets, zero positions, all five public shards connected, no read/stream holds or stderr errors, and a RUNNING supervisor with zero restarts. Three profitability-only owners were already reserved through Eastern midnight rather than rotated. [Behavior and deployment evidence](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).
 
@@ -36,7 +36,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Active runtime directory: `data/production-20260918-daily-sticky-v25`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
+Active runtime directory: `data/production-20260918-stay-best-v26`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.
