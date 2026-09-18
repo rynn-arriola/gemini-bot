@@ -234,7 +234,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(self.advice(cancellation_pending_or_unknown=True).action, "wait_for_reconciliation")
 
     def test_nonpilot_market_unchanged_and_breadth_bounded(self):
-        self.assertEqual(self.advice(symbol="OTHER").action, "unchanged_two_tick_policy")
+        self.assertEqual(self.advice(symbol="OTHER").action, "unchanged_configured_offset_policy")
         for symbols in (frozenset(), frozenset({"X"}), frozenset({"X", "Y", "Z"})):
             with self.assertRaises(ValueError):
                 recommend_bid(self.o, pilot_symbols=symbols, calibration=self.c)

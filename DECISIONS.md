@@ -4,6 +4,8 @@ These are current account-owner decisions. Changing one requires a new explicit 
 
 ## Approved
 
+- September 17 enable-later preparation: owner asked to build the remaining best-bid pilot compatibility/tooling now while measurements continue, so later work is reviewed configuration and controlled deployment rather than unfinished code. Implement/test/push in an isolated worktree; leave the running checkout, one-tick size-15 policy, orders, permits and measurement process untouched. Support exactly two calibrated incumbent pilot symbols with other markets one tick back, retain legacy two-tick compatibility, and provide an offline non-activating candidate builder with no invented thresholds. No automatic evidence sufficiency decision, pilot enablement, live restart, scheduling or risk change. Later data review, explicit approval, fresh authority and live acceptance remain required.
+
 - September 17 missing-event restart repair: after the user-run preparation failed on a public event 404, owner directed fixing it to restart-ready. Treat only a specific public event's ordinary 404 as unavailable metadata; discovery may skip it while keeping missing incumbents recoverable, and runtime refresh must hold/cancel only affected entries. Preserve exact inventory/deadlines/account proof, sticky ownership, one-tick/size-15 policy and all limits/HARD. Verify, publish and run read-only readiness; no live launch or scheduled review in this repair.
 
 - September 17 clarification: the live strategy will be one tick behind touch; the best-bid/back-of-queue measurement remains separate and observation-only. Owner will return tomorrow for review and explicitly declined scheduling. Do not create an automation or automatically enable the pilot.

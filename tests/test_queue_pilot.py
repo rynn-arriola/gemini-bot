@@ -152,7 +152,8 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.fx = fx.RuntimeRepairTests()
         await self.fx.asyncSetUp()
         self.r = self.fx.runtime
-        self.r.config = replace(self.r.config, strategy=replace(self.r.config.strategy, quote_quantity=D(15), queue_pilot=policy()))
+        self.r.config = replace(self.r.config, strategy=replace(self.r.config.strategy, quote_quantity=D(15),
+            quote_offset_ticks=getattr(self, 'nonpilot_offset', 2), queue_pilot=policy()))
         self.r.queue_pilot = QueuePilot(policy())
         self.r.queue_pilot.observe_book(book(), generation=(0, 0), at=NOW - timedelta(seconds=61))
         self.r.queue_pilot.proof_required.clear()
@@ -171,7 +172,7 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.sent.append(payload)
             p = payload['params']
             server_id = p['eventOutcome'] if len(self.sent) <= 2 else p['eventOutcome'] + str(len(self.sent))
-            self.r.account.apply(dict(e='orderUpdate', i=server_id, c=p['clientOrderId'], s='X',
+            self.r.account.apply(dict(e='orderUpdate', i=server_id, c=p['clientOrderId'], s=p['symbol'],
                                      S='BUY', O=p['eventOutcome'], p=p['price'], q=p['quantity'], z=p['quantity'], X='NEW'))
         self.r.private._connection = SimpleNamespace(send=send, close=AsyncMock())
         self.r.private._governor = SimpleNamespace(admit_websocket=admit)
@@ -275,10 +276,11 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_ranking_offset_and_reward_scoring_are_per_symbol(self):
         contracts = self.r.universe + [replace(self.r.universe[0], rules=replace(self.r.universe[0].rules, symbol='OTHER'))]
         other = book(); other.symbol = 'OTHER'
-        ranked = self.r._rank_live_universe(contracts, {'X': book(), 'OTHER': other}, now=NOW, quantity=D(15), offset_ticks=2)
+        offset = self.r.config.strategy.quote_offset_ticks
+        ranked = self.r._rank_live_universe(contracts, {'X': book(), 'OTHER': other}, now=NOW, quantity=D(15), offset_ticks=offset)
         by_symbol = {c.symbol: c for c in ranked}
         self.assertEqual(by_symbol['X'].quote.yes.price, D('.48'))
-        self.assertEqual(by_symbol['OTHER'].quote.yes.price, D('.46'))
+        self.assertEqual(by_symbol['OTHER'].quote.yes.price, D('.48') - D('.01') * offset)
         self.assertEqual(by_symbol['X'].scoring_yes_price, D('.48'))
 
     async def test_halted_worker_failure_is_not_silently_closed(self):
@@ -355,6 +357,28 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.r.activate(self.r.directory / 'not-a-real-permit')
             self.assertEqual(finish.call_args.kwargs['outcome'], 'attention' if hard else 'recoverable_flat')
             self.assertEqual(self.r._recoverable_exit, not hard)
+
+
+class OneTickPilotIntegrationTests(PilotIntegrationTests):
+    """Repeat the complete real execution/guard suite with nonpilot offset one."""
+    nonpilot_offset = 1
+
+    async def test_nonpilot_pair_uses_one_tick_while_pilot_evidence_is_missing(self):
+        other = replace(self.r.universe[0], rules=replace(self.r.universe[0].rules, symbol='OTHER'))
+        self.r.universe.append(other)
+        other_book = book(); other_book.symbol = 'OTHER'
+        self.r.public.books['OTHER'] = other_book
+        self.r._expiry['OTHER'] = self.r._expiry['X']
+        self.r._permitted_symbols.add('OTHER')
+        self.r.queue_pilot.invalidate('X')
+        target, _ = self.r._quote_target_state('OTHER')
+        candidate = replace(fx.candidate(D(15)), symbol='OTHER', quote=target)
+        await self.r._quote_pair_locked(candidate)
+        self.assertEqual(len(self.sent), 2)
+        self.assertTrue(all(p['params']['price'] == '0.47' for p in self.sent))
+        self.assertNotIn('OTHER', self.r.queue_pilot.markets)
+        self.assertFalse(await self.r._cancel_too_aggressive_quote('OTHER'))
+        self.assertEqual(self.r.gate.state, EngineState.QUOTING)
 
 
 class PilotConfigTests(unittest.TestCase):

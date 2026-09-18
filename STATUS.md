@@ -4,6 +4,12 @@ Updated September 17, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
+- **Running production remains `840813b` on main.** User launched v22 at 21:03 ET; first orders rested at 21:04 ET. The latest read-only acceptance during enable-later work confirmed 40 canonically owned size-15 orders on 20 markets, zero positions, healthy integrity, matching active build/policy and no measurement/archive errors. Normal quotes use one tick; pilot remains disabled. No task, process, permit, configuration or order mutation occurred during this isolated work.
+- **New source is isolated, not deployed:** `feature/pilot-enable-ready` supports one-tick nonpilot markets alongside the exactly-two-incumbent best-bid pilot and adds an offline reviewed-policy draft builder. **827 production + 28 script tests (855 total)**, compilation and offline validation passed. No live thresholds/symbols were chosen. [Enable-later workflow](docs/PILOT_ENABLE_LATER_2026-09-17.md).
+- **Remaining activation work:** collect/review sufficient per-market evidence, provide expiring side-specific calibration, obtain owner approval, then controlled source/policy deployment with fresh authority and user-operated live activation. This is not an automatic enable switch or a deployed pilot. Do not hot-edit the running checkout.
+
+## Prior preparation checkpoints (superseded by the running status above)
+
 - **Latest checkpoint: missing-event repair is restart-ready, bot still stopped.** The user-run 20:47 ET preparation failed before activation on a public event 404. Discovery and runtime refresh now isolate that event without relaxing account/order/inventory proof. **798 production cases + 28 script tests** pass across the full suite and added targeted test. Fresh read-only readiness passed at **20:57:21 ET**: zero positions/orders, unchanged economic history/all 20 owners, 32 watched/30 ranked/12 actionable, healthy integrity/non-HARD risk and successful backup. No permit created or live launch performed. [Repair and evidence](docs/MISSING_REWARD_EVENT_2026-09-17.md).
 
 - **Latest release: one-tick normal quoting, separate observation-only queue measurements.** Owner changed the measurement run from two ticks to one and declined scheduling. Quantity stays 15; best-bid/back-of-queue execution remains disabled. **780 production + 28 script tests (808 total)** and offline release validation pass. Bot has not been started; live activation is a user-operated step. No reminder/review automation was created. [Scope and tests](docs/ONE_TICK_MEASUREMENT_2026-09-17.md).
@@ -18,8 +24,8 @@ Updated September 17, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-One-tick read-only preparation directory: `data/production-20260917-one-tick-measurement-v22`. No v22 activation permit has been created or consumed. V21 and older permits are obsolete for the new source/policy; never launch with them.
-Live startup still requires fresh exact-build/account/policy authority and normal reconciliation, followed by owned resting-order acceptance. User must initiate live trading. Best-bid remains disabled pending the separate calibration/pilot work; the next-day review is user-initiated, not scheduled.
+Active measurement directory: `data/production-20260917-one-tick-measurement-v22`. Its current permit belongs to the active `840813b` run; never reuse it for this candidate branch. Use read-only `scripts/check_runtime.ps1` from the active checkout to inspect that run.
+The enable-later branch is separate source only. Future source/policy deployment still requires fresh exact-build/account/policy authority and normal reconciliation, followed by owned resting-order acceptance. User must initiate live trading. Best-bid remains disabled pending reviewed calibration; the next-day review is user-initiated, not scheduled.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.

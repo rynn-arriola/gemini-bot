@@ -25,8 +25,10 @@ class StrategyConfig:
     queue_pilot: PilotPolicy | None = None
 
     def validate(self) -> None:
-        if self.queue_pilot is not None and (self.quote_quantity != Decimal("15") or self.quote_offset_ticks != 2):
-            raise ConfigurationError("queue pilot requires size 15 and nonpilot offset 2")
+        if self.queue_pilot is not None and (
+            self.quote_quantity != Decimal("15") or self.quote_offset_ticks not in {1, 2}
+        ):
+            raise ConfigurationError("queue pilot requires size 15 and nonpilot offset 1 or 2")
         if self.quote_quantity < Decimal("10"):
             raise ConfigurationError("quote_quantity must meet Gemini's 10-contract reward minimum")
         if self.quote_offset_ticks < 0:

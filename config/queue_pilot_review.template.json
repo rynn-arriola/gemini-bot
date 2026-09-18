@@ -1,0 +1,50 @@
+{
+  "reviewed_at": null,
+  "incumbent_symbols": [],
+  "queue_pilot": {
+    "markets": [
+      {
+        "symbol": "",
+        "YES": {
+          "minimum_depth": null,
+          "warning_ahead": null,
+          "minimum_requeue_gain": null,
+          "maximum_sell_flow_60s": null,
+          "refresh_cooldown_seconds": null,
+          "expires_at": null,
+          "evidence_reference": ""
+        },
+        "NO": {
+          "minimum_depth": null,
+          "warning_ahead": null,
+          "minimum_requeue_gain": null,
+          "maximum_sell_flow_60s": null,
+          "refresh_cooldown_seconds": null,
+          "expires_at": null,
+          "evidence_reference": ""
+        }
+      },
+      {
+        "symbol": "",
+        "YES": {
+          "minimum_depth": null,
+          "warning_ahead": null,
+          "minimum_requeue_gain": null,
+          "maximum_sell_flow_60s": null,
+          "refresh_cooldown_seconds": null,
+          "expires_at": null,
+          "evidence_reference": ""
+        },
+        "NO": {
+          "minimum_depth": null,
+          "warning_ahead": null,
+          "minimum_requeue_gain": null,
+          "maximum_sell_flow_60s": null,
+          "refresh_cooldown_seconds": null,
+          "expires_at": null,
+          "evidence_reference": ""
+        }
+      }
+    ]
+  }
+}

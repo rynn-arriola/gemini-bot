@@ -1,7 +1,7 @@
 """Offline/shadow best-bid planner; deliberately NOT an execution authority.
 
-Thresholds must come from reviewed measurements. There is no live config flag
-or transport path in this release. All intents below are counterfactual advice.
+Thresholds must come from reviewed measurements. This pure function owns no
+transport; the separately configured pilot applies its advice through real guards.
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -68,7 +68,7 @@ def recommend_bid(
     if len(pilot_symbols) != 2 or any(not s or s.strip().upper() != s for s in pilot_symbols):
         raise ValueError("pilot requires exactly two distinct canonical symbols")
     if o.symbol not in pilot_symbols:
-        return BidAdvice("unchanged_two_tick_policy", "outside_pilot")
+        return BidAdvice("unchanged_configured_offset_policy", "outside_pilot")
     for value in (o.external_depth, o.ahead_scenario, o.sell_flow_60s, o.since_last_refresh_seconds):
         nonnegative(value)
     # Lifecycle evidence wins over attractive depth, rate cooldown or ranking.
