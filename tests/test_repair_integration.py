@@ -258,7 +258,7 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
         strategy, risk = load_policy()
         # Historical fill/cancel fixtures use explicit 20-contract wire frames.
         # Current size policy has separate end-to-end coverage.
-        strategy = replace(strategy, quote_quantity=D(20), quote_offset_ticks=2)
+        strategy = replace(strategy, quote_quantity=D(20), quote_offset_ticks=2, queue_pilot=None)
         self.runtime = ProductionOrchestrator(LiveConfig("account-fake", "fake-secret", "", True, strategy, risk), Path(self.tmp.name), public_shard_count=1)
         self.runtime.control_directory = Path(self.tmp.name) / "isolated-control"
         self.runtime.lock = WindowsOwnerLock(self.runtime.control_directory / "mutation-owner.lock")

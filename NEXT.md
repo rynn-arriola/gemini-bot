@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Pending controlled deployment:** verified candidate `fix/adaptive-transition-continuity` repairs self-cancellation warmup reset and quiet-market transition scheduling. Preserve v23 until restart approval; then graceful drain, fresh terminal/flat preparation, exact-build authority and live acceptance. Do not reuse the old permit or extend the unchanged envelope. [Handoff](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
+
 - **All-selected v23 is live under the approved shared envelope.** Initial acceptance passed with exact build/policy/account authority, zero positions, owned resting orders, five healthy public shards and no holds/restarts. Continue read-only observation through natural promotions/demotions, fills/exits and recovery; do not induce fills/faults or edit the active source/configuration.
 
 - **Before the September 19 05:45 ET adaptive expiry:** review live evidence and make a new explicit owner decision only if renewal or changed settings are desired. Without renewal the service remains 24/7 and safely uses its one-tick fallback. Do not infer reward qualification or queue position from local presence.

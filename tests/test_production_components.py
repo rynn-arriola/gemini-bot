@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -852,6 +853,8 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             strategy, risk = load_policy()
+            # Synthetic preparation fixture targets ordinary one-tick startup.
+            strategy = replace(strategy, queue_pilot=None)
             runtime = ProductionOrchestrator(
                 LiveConfig("account-example", "secret", "", True, strategy, risk),
                 Path(directory), read_only=manual_flat_repair,

@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 18 — own cancellation repeatedly reset adaptive promotion
+
+Concurrent checks treated an owned cancellation as lost observation continuity, restarting warmup after withdrawing the fallback pair. Separate evidence health from mutation permission; keep bounded safety-clock observations during quiet cooldowns and wake ranking after flat proof/mode changes. Cancellation still blocks sends and all terminal, freshness, fill, generation, cooldown and HARD safeguards remain. Isolated candidate only; running v23 unchanged. [Regression evidence and restart handoff](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
+
 ## September 18 — all-selected adaptive scope and full-capacity work
 
 The candidate still assumed exactly two fixed symbols despite the intended shared all-market strategy. Explicit v5 all-selected mode now binds to permitted durable owners, handles fresh replacement/readmission, bounds and prunes retired state, preserves shared cancellation breaches and serializes extra account proofs. Optional two-symbol v4 research remains explicit. Full-buffer profiling exposed repeated trade scans; exact incremental rolling totals remove that work with duplicate/window/overflow/clock regressions. This is isolated source, not a fix already active in production. Deployment and quote transitions can create uncredited gaps; no sticky reset, risk/HARD change or live trial was performed. [Tests and release](docs/ALL_SELECTED_ADAPTIVE_2026-09-18.md).

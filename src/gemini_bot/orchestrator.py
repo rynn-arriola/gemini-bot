@@ -316,7 +316,7 @@ class ProductionOrchestrator:
             return None
         try:
             return pilot.desired_mode(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
-                                      safe=self._pilot_safe(symbol))
+                                      safe=self._pilot_evidence_safe(symbol))
         except Exception as exc:
             pilot.fail(symbol, exc)
             return 'fallback'
@@ -328,7 +328,10 @@ class ProductionOrchestrator:
     def _pilot_generation(self, symbol):
         return self._public_generation(symbol), self._stream_generation["private"]
 
-    def _pilot_safe(self, symbol):
+    def _pilot_evidence_safe(self, symbol):
+        # An owned cancellation blocks entry, but does not make a healthy
+        # book/account observation disappear. Actual fills, stale evidence,
+        # recovery and accounting uncertainty still reset adaptive warmup.
         return bool(self._book_fresh(symbol) and not self._public_shard_held(symbol)
                     and not self._stream_holds and not self._read_recovery_attempts
                     and not self._reward_program_paused and self.account.snapshots_fresh
@@ -336,13 +339,27 @@ class ProductionOrchestrator:
                     and symbol not in self.account.blocked_entries
                     and not self.account.reducer.positions.get(symbol)
                     and not self.journal.pending_exit(symbol) and symbol not in self._exit_workers
-                    and symbol not in self._exit_uncertain and symbol not in self._entry_cancel_symbols)
+                    and symbol not in self._exit_uncertain)
+
+    def _pilot_safe(self, symbol):
+        return self._pilot_evidence_safe(symbol) and symbol not in self._entry_cancel_symbols
+
+    def _refresh_adaptive_evidence(self):
+        # Bounded local checks continue while pairs are canceled/cooling down
+        # and while ranking awaits I/O. Quiet books need no new depth tick to
+        # prove transport/account continuity. This grants no order permission.
+        if isinstance(self.queue_pilot, AdaptiveQueuePilot):
+            for symbol in self.queue_pilot.symbols:
+                self._adaptive_desired(symbol)
 
     def _pilot_advice(self, symbol, *, allow_entry=False):
         pilot = self.queue_pilot
         if pilot is None or symbol not in pilot.symbols:
             return "outside_pilot"
         try:
+            if isinstance(pilot, AdaptiveQueuePilot) and not self._pilot_safe(symbol):
+                self._adaptive_desired(symbol)
+                return "withdraw"
             return pilot.advice(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
                                 orders=tuple(self._queue_live_orders.values()), safe=self._pilot_safe(symbol),
                                 allow_entry=allow_entry)
@@ -389,6 +406,7 @@ class ProductionOrchestrator:
             pilot.proof_required.discard(symbol)
             self._pilot_proved[symbol] = (time.monotonic(), generation, version)
             self.journal.audit("queue_pilot_flat_proof", {"symbol": symbol})
+            self.public.dirty.mark(symbol)
         except (ExitDeferred, TimeoutError):
             return
         except ApiError as exc:
@@ -405,6 +423,8 @@ class ProductionOrchestrator:
             self._observe_queue_pilot(symbol)
         adaptive = isinstance(pilot, AdaptiveQueuePilot)
         desired = self._adaptive_desired(symbol) if adaptive else None
+        if symbol in self._entry_cancel_symbols:
+            return False  # Continuous observation is not cancellation proof.
         task = self._pilot_proof_tasks.get(symbol)
         if task is not None and task.done():
             task.result()  # Unknown account/ownership failures remain fatal.
@@ -449,6 +469,7 @@ class ProductionOrchestrator:
                     pilot.modes[symbol] = desired
                     pilot.settling.discard(symbol)
                     self.journal.audit('adaptive_queue_mode', {'symbol': symbol, 'mode': desired})
+                    self.public.dirty.mark(symbol)
                     return False  # Rerank at the new offset; never reuse candidate.
                 pilot.settling.discard(symbol)
                 return True
@@ -3386,6 +3407,7 @@ class ProductionOrchestrator:
             clock = asyncio.get_running_loop().time()
             self._observe_resting()
             self._check_stream_recovery()
+            self._refresh_adaptive_evidence()
             if self.queue_pilot is not None:
                 for symbol in self.queue_pilot.symbols:
                     self.public.adverse_dirty.mark(symbol)

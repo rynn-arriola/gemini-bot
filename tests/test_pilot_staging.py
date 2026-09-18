@@ -29,7 +29,10 @@ class StagingTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.base = self.root / 'config' / 'live_policy.json'
         self.base.parent.mkdir()
-        self.baseline = DEFAULT_POLICY_PATH.read_bytes()
+        baseline = json.loads(DEFAULT_POLICY_PATH.read_text())
+        baseline.pop('queue_pilot', None)
+        baseline['policy_version'] = 2
+        self.baseline = json.dumps(baseline).encode()
         self.base.write_bytes(self.baseline)
         self.source = self.root / 'review.json'
         self.source.write_text(json.dumps(review()))
