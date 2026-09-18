@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Shared settings proposal prepared, not approved:** [September 18 review](docs/ADAPTIVE_SETTINGS_PROPOSAL_2026-09-18.md) proposes a common 250-contract buffer, full-burst reserve, 1.5 depth multiplier, ten-minute warmup, one-minute stable promotion, ten-second cooldown/cancellation budget and 250-contract requeue gain. House/Senate GOP are research samples only. Final scope is all selected markets and replacements, per owner clarification. The current two-symbol assumptions still need bounded all-selected scope integration and full-capacity tests before broad deployment. No live settings, process, orders or permits changed.
+
 - **September 18 adaptive implementation supersedes manual per-market calibration as the candidate approach.** `feature/adaptive-queue-policy` is isolated, disabled and not deployed. The same shared rule computes side-specific thresholds and performs safe one-tick/best-bid transitions for two fixed pilot symbols. No real envelope/symbols have been configured. Existing running main is untouched. [Evidence and acceptance checklist](docs/ADAPTIVE_QUEUE_2026-09-18.md).
 
 - **Enable-later source complete, isolated and not deployed:** one-tick nonpilot compatibility plus an offline candidate builder passed 855 tests. Active v22 remains on `840813b`, one tick, size 15, pilot disabled; recent read-only venue proof found 40 owned orders/20 markets and no positions. No live interruption or configuration change. [Workflow](docs/PILOT_ENABLE_LATER_2026-09-17.md).
