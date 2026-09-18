@@ -30,7 +30,7 @@ from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
 from .capacity import MAX_ACTIVE_MARKETS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
 from .reconciliation_errors import ExternalOrderPresent, InventoryMarketUnavailable
-from .discovery import RewardUniverseLoader, DISCOVERY_RANKING_VERSION
+from .discovery import RewardUniverseLoader, DISCOVERY_RANKING_VERSION, read_reward_event
 from .catalog import join_reward_contracts
 from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
 from .engine import LiveEngineGate
@@ -1829,7 +1829,7 @@ class ProductionOrchestrator:
                 1,
                 self.config.risk.max_tracked_markets - len(before.positions),
             )
-            self.universe = await RewardUniverseLoader(self.rest).load(
+            self.universe = await RewardUniverseLoader(self.rest, self._record_missing_reward_event).load(
                 maximum_pools=discovery_capacity,
                 preferred=self._sticky_markets, now=_utc_now(),
                 quantity=self.config.strategy.quote_quantity,
@@ -3380,6 +3380,10 @@ class ProductionOrchestrator:
             await self._cancel_order_and_confirm(order.order_id)
             remaining -= 1
 
+    def _record_missing_reward_event(self, ticker: str) -> None:
+        self.log.event(logging.WARNING, "reward_event_unavailable", event_ticker=ticker,
+                       http_status=404, reason="event_metadata_missing_not_settlement")
+
     async def _reward_pools_still_active(self) -> bool:
         config = await self.rest.reward_config()
         if config.get("enabled") is not True:
@@ -3409,7 +3413,19 @@ class ProductionOrchestrator:
                 continue
             status_version = self._market_status_versions.get(item.rules.symbol, 0)
             if item.event_ticker not in event_cache:
-                event_cache[item.event_ticker] = await self.rest.event(item.event_ticker)
+                event_cache[item.event_ticker] = await read_reward_event(
+                    self.rest, item.event_ticker, self._record_missing_reward_event,
+                )
+                if event_cache[item.event_ticker] is None:
+                    # Block every sibling before cancellation yields to senders.
+                    for sibling in self.universe:
+                        if sibling.event_ticker == item.event_ticker:
+                            self.account.block_entries(sibling.rules.symbol, reason="reward_metadata")
+            if event_cache[item.event_ticker] is None:
+                self.account.block_entries(item.rules.symbol, reason="reward_metadata")
+                await self._cancel_symbol_entries(item.rules.symbol)
+                refreshed.append(replace(item, pool=replace(item.pool, active=False)))
+                continue
             current = join_reward_contracts([reward], {item.event_ticker: event_cache[item.event_ticker]})
             chosen = next((row for row in current if row.rules.symbol == item.rules.symbol), None)
             invalid = (chosen is None or chosen.rules != item.rules or chosen.expiry != item.expiry
@@ -3520,8 +3536,9 @@ class ProductionOrchestrator:
         preferred.update({
             pool_id: pair for pool_id, pair in self._sticky_markets.items()
             if pair[1] in self._inventory_catalog_holds
+            or pair[1] not in {c.rules.symbol for c in self.universe}
         })
-        proposed = await RewardUniverseLoader(self.rest).load(
+        proposed = await RewardUniverseLoader(self.rest, self._record_missing_reward_event).load(
             maximum_pools=self.config.risk.max_tracked_markets, preferred=preferred,
             now=_utc_now(), rewards=rewards,
             quantity=self.config.strategy.quote_quantity,

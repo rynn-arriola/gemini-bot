@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 17 — one missing public reward event aborted all discovery
+
+The user-run startup failed on a per-event 404 before activation. Discovery now skips only that unavailable public event; saved owners keep recovery space and identity. Live refresh blocks/cancels only affected entries, preserving exact cancellation/account/inventory proof and normal later recovery. Catalog/account/authentication/cooldown/unknown-mutation failures retain their existing boundaries. [Evidence and tests](docs/MISSING_REWARD_EVENT_2026-09-17.md).
+
 ## September 17 — missing automatic journal protection and pre-write integrity guard
 
 Added bounded hourly verified SQLite snapshots, off-loop I/O, safe managed retention and redacted backup health. Startup checks existing authority integrity and required tables read-only before schema/account writes; malformed/empty authority is preserved and blocked. Worker shutdown is joined before ownership release, and late backup exceptions are redacted inside the worker. No automatic restore, trading gate change or accounting/HARD reset. Existing native/packaged path and background-worker repairs remain intact. [Design and evidence](docs/JOURNAL_BACKUPS_2026-09-17.md).

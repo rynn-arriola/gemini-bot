@@ -4,6 +4,8 @@ Updated September 17, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
+- **Latest checkpoint: missing-event repair is restart-ready, bot still stopped.** The user-run 20:47 ET preparation failed before activation on a public event 404. Discovery and runtime refresh now isolate that event without relaxing account/order/inventory proof. **798 production cases + 28 script tests** pass across the full suite and added targeted test. Fresh read-only readiness passed at **20:57:21 ET**: zero positions/orders, unchanged economic history/all 20 owners, 32 watched/30 ranked/12 actionable, healthy integrity/non-HARD risk and successful backup. No permit created or live launch performed. [Repair and evidence](docs/MISSING_REWARD_EVENT_2026-09-17.md).
+
 - **Latest release: one-tick normal quoting, separate observation-only queue measurements.** Owner changed the measurement run from two ticks to one and declined scheduling. Quantity stays 15; best-bid/back-of-queue execution remains disabled. **780 production + 28 script tests (808 total)** and offline release validation pass. Bot has not been started; live activation is a user-operated step. No reminder/review automation was created. [Scope and tests](docs/ONE_TICK_MEASUREMENT_2026-09-17.md).
 - **V22 read-only readiness passed at 20:43:17 ET:** zero positions/orders, complete non-HARD risk and healthy journal; all economic history and 20 saved owners unchanged. 32 watched/30 ranked/13 actionable at that checkpoint; automatic backup successful. Preparation disconnected without activation. These counts are not promised resting breadth.
 

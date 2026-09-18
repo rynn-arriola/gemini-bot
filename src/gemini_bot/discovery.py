@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .catalog import RewardedContract, join_reward_contracts, reward_pool_key
 from .uptime import estimated_reward_window, quote_cutoff
 from .domain import BookTop
 from .reward_ranking import build_two_sided_quote, MAX_DISTANCE, MINIMUM_REWARD_SIZE
+from .rest_client import ApiError
 
 
 class DiscoveryRest(Protocol):
@@ -17,6 +18,24 @@ class DiscoveryRest(Protocol):
 
 
 DISCOVERY_RANKING_VERSION = 2
+
+
+async def read_reward_event(
+    rest: DiscoveryRest, ticker: str, on_missing: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
+    """Only a specific public event's 404 is absent metadata, not account proof.
+
+    Never cache this across refreshes or interpret it as settlement/expiry.
+    Catalog, account, throttling and other errors retain their existing handling.
+    """
+    try:
+        return await rest.event(ticker)
+    except ApiError as exc:
+        if exc.status != 404 or exc.retry_after is not None:
+            raise
+        if on_missing is not None:
+            on_missing(ticker)
+        return None
 
 
 def _maker_tiebreak(row: dict[str, Any]) -> tuple[bool, int]:
@@ -109,6 +128,13 @@ def _headline_spread(contract: dict[str, Any]) -> Decimal:
 @dataclass(slots=True)
 class RewardUniverseLoader:
     rest: DiscoveryRest
+    on_event_missing: Callable[[str], None] | None = None
+    missing_events: set[str] = field(default_factory=set, init=False)
+
+    def _event_missing(self, ticker: str) -> None:
+        self.missing_events.add(ticker)
+        if self.on_event_missing is not None:
+            self.on_event_missing(ticker)
 
     async def load(
         self, *, maximum_pools: int = 32,
@@ -119,6 +145,7 @@ class RewardUniverseLoader:
         offset_ticks: int = 2,
         excluded_symbols: set[str] | None = None,
     ) -> list[RewardedContract]:
+        self.missing_events.clear()
         rewards = await self.rest.reward_events() if rewards is None else rewards
         preferred = preferred or {}
         selected = select_pool_representatives(rewards, maximum_pools=maximum_pools)
@@ -163,8 +190,13 @@ class RewardUniverseLoader:
                 buckets.setdefault(pool_id, []).extend(choices)
         result: list[RewardedContract] = []
         used: set[str] = set()
+        # Leave subscription room for missing incumbents to return on a later
+        # refresh, rather than fill every watched slot with replacements.
+        result_capacity = max(0, maximum_pools - len({
+            symbol for event, symbol in preferred_pairs if event in self.missing_events
+        }))
         def add(item: RewardedContract) -> None:
-            if item.rules.symbol not in used and len(result) < maximum_pools:
+            if item.rules.symbol not in used and len(result) < result_capacity:
                 result.append(item)
                 used.add(item.rules.symbol)
         for choices in buckets.values():
@@ -184,7 +216,7 @@ class RewardUniverseLoader:
                 choices = buckets.get(pool_id, [])
                 if index < len(choices):
                     add(choices[index])
-            if len(result) >= maximum_pools:
+            if len(result) >= result_capacity:
                 break
         for pool_id in candidate_order:
             for item in buckets.get(pool_id, []):
@@ -204,7 +236,9 @@ class RewardUniverseLoader:
         now: datetime | None, quantity: Decimal, offset_ticks: int,
     ) -> list[RewardedContract]:
         ticker = str(reward["event_ticker"]).upper()
-        event_response = await self.rest.event(ticker)
+        event_response = await read_reward_event(self.rest, ticker, self._event_missing)
+        if event_response is None:
+            return []
         event = event_response.get("event", event_response)
         if not isinstance(event, dict):
             return []

@@ -21,6 +21,7 @@ from gemini_bot.activation import (
 from gemini_bot.catalog import RewardedContract
 from gemini_bot.config import DEFAULT_POLICY_PATH, LiveConfig, load_policy
 from gemini_bot.discovery import RewardUniverseLoader, select_pool_representatives
+from gemini_bot.rest_client import ApiError
 from gemini_bot.domain import ContractRules, Outcome, QuoteLeg, RewardPool, Side
 from gemini_bot.execution import IntentLedger, IntentState, OrderPurpose
 from gemini_bot.persistent_risk import PersistentRiskWindow
@@ -675,6 +676,23 @@ class UptimeTests(unittest.TestCase):
 
 
 class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_skips_missing_event_without_mutation(self) -> None:
+        await self._prepare_fixture(manual_flat_repair=False, missing_event=True)
+
+    async def test_missing_held_event_keeps_scoped_inventory_proof(self) -> None:
+        def verify(runtime):
+            self.assertEqual(runtime._inventory_catalog_holds, {"Y"})
+            self.assertIn("Y", runtime.account.blocked_entries)
+            self.assertEqual(runtime.account.reducer.positions, {"Y": Decimal("10")})
+            self.assertIsNotNone(runtime.journal.get_deadline("Y", "YES"))
+        await self._prepare_fixture(manual_flat_repair=False, missing_event=True,
+            outside_inventory=True, scoped_outside_inventory=True, after_prepare=verify)
+
+    async def test_all_event_404s_remain_no_markets_not_ready(self) -> None:
+        from gemini_bot.recovery_policy import NoMarketsAvailable
+        with self.assertRaises(NoMarketsAvailable):
+            await self._prepare_fixture(manual_flat_repair=False, all_events_missing=True)
+
     async def test_prepare_reconciles_and_ranks_without_mutation(self) -> None:
         await self._prepare_fixture(manual_flat_repair=False)
 
@@ -761,6 +779,8 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
         self, *, manual_flat_repair: bool, after_prepare=None,
         outside_inventory: bool = False,
         scoped_outside_inventory: bool = False,
+        missing_event: bool = False,
+        all_events_missing: bool = False,
     ) -> None:
         class Rest:
             async def terms_status(self): return {"hasAcceptedLatest": True}
@@ -775,11 +795,13 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
             async def active_orders(self): return []
             async def order_history(self): return []
             async def reward_events(self, *, ceiling: int = 3000):
-                return [{
+                return ([{"event_ticker": "HELD", "daily_pool_usd": "100"}] if missing_event else []) + [{
                     "event_ticker": "E", "pool_id": 1, "daily_pool_usd": "100",
                     "ends_at": "2027-01-01T00:00:00Z",
                 }]
             async def event(self, event_ticker: str):
+                if event_ticker == "HELD" or all_events_missing:
+                    raise ApiError(404, "unavailable")
                 return {"event": {"status": "active", "contracts": [{
                     "instrumentSymbol": "X", "status": "active", "marketState": "open",
                     "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
