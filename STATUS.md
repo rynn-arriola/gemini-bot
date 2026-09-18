@@ -4,6 +4,8 @@ Updated September 17, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
+- **Latest checkpoint: v21 is restart-prepared for two-tick measurements, not a completed best-bid rollout.** At 20:26:55 ET fresh read-only preparation passed flat/order-free, complete non-HARD risk, unchanged economic history and all 20 sticky identities (32 watched, 30 ranked, 11 actionable). Automatic backup passed without errors. A fresh unconsumed v7 permit matches source `771d524`, the account and unchanged policy. Runner/supervisor remain absent and the persistent task is Ready; no trading restart occurred.
+
 - **Stopped, not restarted.** V18 was deliberately drained flat at 19:58:24 ET after the independent audit found mixed AppData database views. V19 read-only preparation finished at 20:07:38 ET: flat/order-free, all 20 sticky owners and economic history unchanged, 32 watched/30 ranked/12 actionable, permit validated but unconsumed. No runner or supervisor was present at the subsequent check; the persistent task was Ready.
 - **The native ledger was healthy.** Every table was migrated to `%USERPROFILE%\GeminiRewardBot\control`; shared file identity and native/packaged owner-lock rejection passed. Never operate from the legacy AppData/package-cache view. [Evidence](docs/CONTROL_LOCATION_2026-09-17.md).
 - **Code completed and verified:** real two-market best-bid execution integration, failed-worker error propagation and control-path repair were pushed as `5166001`. Automatic verified backup rotation and read-only pre-write startup integrity checks now pass **771 production + 28 script tests (799 total)**, compilation, PowerShell parsing and offline release validation. [Backup design](docs/JOURNAL_BACKUPS_2026-09-17.md).
@@ -13,9 +15,9 @@ Updated September 17, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Latest read-only readiness: `scripts/check_runtime.ps1 -RuntimeDirectory data/production-20260917-backup-readiness-v20`.
-That preparation's permit is bound to the prior build and **cannot activate the new backup build**.
-Before any later launch, obtain/confirm owner continuation, complete fresh final-build/account/policy reconciliation, issue fresh authority and verify exact owned resting orders after startup.
+Latest read-only readiness: `scripts/check_runtime.ps1 -RuntimeDirectory data/production-20260917-restart-ready-v21`.
+Prepared authority: `data/production-20260917-restart-ready-v21/activation-permit-queue-measurement.json`, v7, null expiry/uptime override, two same-supervisor recovery bursts, unconsumed. V20 created no permit; v19 authority is obsolete for this source.
+Only after an explicit restart instruction, use `scripts/start_production.ps1 -Mode Live -RuntimeDirectory data/production-20260917-restart-ready-v21 -ActivationPermit data/production-20260917-restart-ready-v21/activation-permit-queue-measurement.json`. Normal fresh startup reconciliation remains mandatory, followed by exact owned resting-order acceptance. Any source/policy change requires new authority. Best-bid is still disabled pending the separate calibration/pilot work.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.
