@@ -363,6 +363,9 @@ class PilotConfigTests(unittest.TestCase):
         from pathlib import Path
         from dataclasses import asdict
         raw = json.loads(DEFAULT_POLICY_PATH.read_text())
+        # This is the earlier two-tick nonpilot/v3 fixture, not the current
+        # one-tick measurement policy (whose queue pilot remains disabled).
+        raw['quote_offset_ticks'] = 2
         raw['policy_version'] = 3
         c = {k: v.isoformat() if hasattr(v, 'isoformat') else str(v)
              for k, v in asdict(policy().markets[0][1]).items()}

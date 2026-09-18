@@ -2591,7 +2591,7 @@ class ProductionOrchestrator:
         return candidates[0].quote, "available"
 
     async def _cancel_too_aggressive_quote(self, symbol: str) -> bool:
-        """Cancel when a book move leaves our entry closer than two ticks.
+        """Cancel when a book move leaves our entry inside the configured offset.
 
         Moving away from the touch is not canceled here; the normal sticky
         maintenance path can improve it without turning every depth frame into
@@ -2616,11 +2616,12 @@ class ProductionOrchestrator:
             return True
         targets = {Outcome.YES: target.yes.price, Outcome.NO: target.no.price}
         if any(order.price > targets[order.outcome] for order in working):
-            self._record_quote_cancel(symbol, "inside_two_tick_distance")
+            self._record_quote_cancel(symbol, "inside_configured_tick_distance")
             await self._cancel_symbol_entries(symbol)
             self.journal.audit("adverse_move_quote_canceled", {
                 "symbol": symbol,
-                "reason": "inside_approved_two_tick_distance",
+                "reason": "inside_configured_tick_distance",
+                "offset_ticks": self.config.strategy.quote_offset_ticks,
             })
             return True
         return False
@@ -2709,7 +2710,7 @@ class ProductionOrchestrator:
     def _retain_resting_pair(self, candidate: Any, working: list[Any]) -> bool:
         """Preserve queue/resting time only for intact, safe qualifying pairs.
 
-        Every NEW order still uses the exact two-tick target. Existing orders
+        Every NEW order still uses the exact configured target. Existing orders
         may be farther away, never closer, and BOTH must remain within the
         documented reward distance. Fills/partial quantities never qualify.
         """
@@ -2737,7 +2738,7 @@ class ProductionOrchestrator:
             for outcome in (Outcome.YES, Outcome.NO)
         ))
         contract = next(c for c in self.universe if c.rules.symbol == candidate.symbol)
-        self._retention_reason = "inside_two_tick_distance_or_invalid_price"
+        self._retention_reason = "inside_configured_tick_distance_or_invalid_price"
         if not resting_quote_safe(pair, target, contract.rules, self.config.strategy.quote_quantity):
             return False
         ranked = self._rank_live_universe(

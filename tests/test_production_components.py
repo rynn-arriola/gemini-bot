@@ -939,7 +939,7 @@ class OrchestratorWiringTests(unittest.IsolatedAsyncioTestCase):
                         Decimal("100"), 1, NOW,
                     ),
                 ),
-                now=NOW, quantity=strategy.quote_quantity,
+                now=NOW, quantity=strategy.quote_quantity, offset_ticks=strategy.quote_offset_ticks,
             )
             try:
                 with patch("gemini_bot.orchestrator._utc_now", return_value=NOW):

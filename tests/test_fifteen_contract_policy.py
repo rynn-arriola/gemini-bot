@@ -36,6 +36,9 @@ class FifteenContractPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.r = self.fx.r
         strategy, risk = load_policy()
         self.assertEqual(strategy.quote_quantity, D(15))
+        # Historical .46-price incident fixtures; current one-tick policy has
+        # independent full pair/send/fill regressions in test_one_tick_policy.
+        strategy = replace(strategy, quote_offset_ticks=2)
         self.r.config = replace(self.r.config, strategy=strategy, risk=risk)
 
     async def asyncTearDown(self):

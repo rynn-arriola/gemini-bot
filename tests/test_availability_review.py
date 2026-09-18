@@ -463,7 +463,7 @@ class ChurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_adverse_cancellation_is_reason_coded(self):
         self.r.account.reducer.orders["YES"].price += D(".01")
         await self.r._cancel_too_aggressive_quote("X")
-        self.assertEqual(self.r._quote_cancel_reasons["inside_two_tick_distance"], 1)
+        self.assertEqual(self.r._quote_cancel_reasons["inside_configured_tick_distance"], 1)
         self.r._cancel_symbol_entries.assert_awaited_once_with("X")
 
     async def test_unprofitable_retention_still_replaces_with_reason(self):
