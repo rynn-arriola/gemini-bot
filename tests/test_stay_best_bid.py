@@ -24,7 +24,7 @@ NOW = fx.NOW
 
 
 def policy():
-    return AdaptivePolicy((), adaptive.policy().limits, 'all_selected', 'stay_best')
+    return AdaptivePolicy((),adaptive.policy().limits,'all_selected','stay_best',D(300),D(500))
 
 
 class StayBestStateTests(unittest.TestCase):
@@ -59,23 +59,46 @@ class StayBestStateTests(unittest.TestCase):
 
     def test_new_depth_can_trigger_useful_reposition_without_mode_change(self):
         orders = self.pair(age=70)
-        self.p.markets['X'].depths[Outcome.YES] = D(100)
+        self.p.markets['X'].depths[Outcome.YES] = D(600)
         self.assertEqual(self.advice(orders), 'withdraw')
         self.assertEqual(self.p.reasons['X'], 'estimated_queue_refresh_benefit')
         self.assertEqual(self.p.modes['X'], 'best')
 
+    def test_less_than_five_hundred_contract_gain_keeps_pair_resting(self):
+        orders=self.pair(age=70)
+        self.p.markets['X'].depths[Outcome.YES]=D(500)  # 499 new behind one estimated ahead.
+        self.assertEqual(self.advice(orders),'keep')
+        self.p.markets['X'].depths[Outcome.YES]=D(501)
+        self.assertEqual(self.advice(orders),'withdraw')
+
     def test_cooldown_skips_optional_reposition_and_keeps_orders(self):
         orders = self.pair(age=70)
-        self.p.markets['X'].depths[Outcome.YES] = D(100)
+        self.p.markets['X'].depths[Outcome.YES] = D(600)
         self.p.cooldown_at['X'] = NOW
         self.assertEqual(self.advice(orders), 'keep')
+
+    def test_same_price_refresh_waits_five_minutes_without_delaying_price_tracking(self):
+        orders=self.pair(age=70)
+        self.p.markets['X'].depths[Outcome.YES]=D(600)
+        self.assertEqual(self.advice(orders),'withdraw')
+        self.assertEqual(self.advice(orders,at=NOW+timedelta(seconds=299)),'keep')
+        self.p.markets['X'].prices[Outcome.YES]=D('.49')
+        self.assertEqual(self.advice(orders,at=NOW+timedelta(seconds=299)),'withdraw')
+        self.assertEqual(self.p.reasons['X'],'best_price_changed')
+
+    def test_same_price_refresh_can_repeat_after_five_minutes(self):
+        orders=self.pair(age=70)
+        self.p.markets['X'].depths[Outcome.YES]=D(600)
+        self.assertEqual(self.advice(orders),'withdraw')
+        self.assertEqual(self.advice(orders,at=NOW+timedelta(seconds=300)),'withdraw')
+        self.assertEqual(self.p.reasons['X'],'estimated_queue_refresh_benefit')
 
     def test_warmup_uncertain_or_expired_optimization_does_not_withdraw(self):
         for variant in ('cold', 'uncertain', 'expired', 'breach', 'missing_anchor'):
             with self.subTest(variant=variant):
                 self.setUp()
                 orders = self.pair(age=70)
-                self.p.markets['X'].depths[Outcome.YES] = D(100)
+                self.p.markets['X'].depths[Outcome.YES] = D(600)
                 if variant == 'cold': self.p.markets['X'].started_at = NOW
                 if variant == 'uncertain': self.p.markets['X'].uncertain_until = NOW+timedelta(seconds=60)
                 if variant == 'expired': self.p.policy=replace(policy(),limits=replace(policy().limits,expires_at=NOW))
@@ -109,10 +132,12 @@ class StayBestStateTests(unittest.TestCase):
 
     def test_replacement_starts_best_with_proof_and_no_inherited_anchor(self):
         self.pair()
+        self.p.last_optional_refresh_at['X']=NOW
         self.p.sync_selected({'NEW','Y'})
         self.assertEqual(self.p.modes['NEW'],'best')
         self.assertIn('NEW',self.p.proof_required)
         self.assertNotIn('X',self.p.markets)
+        self.assertNotIn('X',self.p.last_optional_refresh_at)
 
     def test_same_envelope_preserves_previous_breach_identity(self):
         self.assertEqual(policy().breach_key,selected.policy().breach_key)
@@ -185,7 +210,7 @@ class StayBestExecutionTests(fx.PilotIntegrationTests):
         await self.r._quote_pair_locked(self.candidate())
         m=self.r.queue_pilot.markets['X']
         m.started_at=NOW-timedelta(seconds=70)
-        m.depths[Outcome.YES]=D(100)
+        m.depths[Outcome.YES]=D(600)
         self.r._cancel_symbol_entries=AsyncMock()
         self.assertTrue(await self.r._cancel_too_aggressive_quote('X'))
         self.r._cancel_symbol_entries.assert_awaited_once_with('X')
@@ -200,7 +225,7 @@ class StayBestExecutionTests(fx.PilotIntegrationTests):
 
 
 class StayBestConfigTests(unittest.TestCase):
-    def test_staging_requires_explicit_zero_offset_and_roundtrips_v6(self):
+    def test_staging_requires_explicit_zero_offset_and_roundtrips_v7(self):
         active=json.loads(DEFAULT_POLICY_PATH.read_text())
         base={k:v for k,v in active.items() if k!='queue_pilot'}
         base['policy_version']=2
@@ -210,7 +235,7 @@ class StayBestConfigTests(unittest.TestCase):
             path=Path(d)/'base.json'
             path.write_text(json.dumps(base))
             candidate=build_candidate(path,review,now=NOW)
-            self.assertEqual(candidate['policy_version'],6)
+            self.assertEqual(candidate['policy_version'],7)
             output=Path(d)/'candidate.json'
             output.write_text(json.dumps(candidate))
             self.assertEqual(load_policy(output)[0].queue_pilot.placement_mode,'stay_best')
@@ -223,6 +248,10 @@ class StayBestConfigTests(unittest.TestCase):
         s,r=load_policy()
         self.assertEqual(s.quote_offset_ticks,0)
         self.assertEqual(s.queue_pilot.placement_mode,'stay_best')
+        self.assertEqual(s.queue_pilot.same_price_refresh_minimum_seconds,D(300))
+        self.assertEqual(s.queue_pilot.same_price_refresh_minimum_gain,D(500))
+        self.assertEqual(s.queue_pilot.limits.minimum_requeue_gain,D(250))
+        self.assertEqual(s.queue_pilot.limits.refresh_cooldown_seconds,D(10))
         self.assertEqual(s.quote_quantity,D(15))
         self.assertEqual(r.max_pending_orders,40)
         self.assertEqual(r.risk_window_loss_usd,D(30))
@@ -231,9 +260,17 @@ class StayBestConfigTests(unittest.TestCase):
         base=json.loads(DEFAULT_POLICY_PATH.read_text())
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'policy.json'
-            for update in ({'policy_version':5},{'quote_offset_ticks':1},{'quote_quantity':'20'}):
+            for update in ({'policy_version':5},{'policy_version':6},
+                           {'quote_offset_ticks':1},{'quote_quantity':'20'}):
                 path.write_text(json.dumps({**base,**update}))
                 with self.assertRaises(ConfigurationError): load_policy(path)
+            legacy=json.loads(DEFAULT_POLICY_PATH.read_text())
+            legacy['policy_version']=6
+            legacy['queue_pilot'].pop('same_price_refresh_minimum_seconds')
+            legacy['queue_pilot'].pop('same_price_refresh_minimum_gain')
+            path.write_text(json.dumps(legacy))
+            self.assertEqual(load_policy(path)[0].queue_pilot.same_price_refresh_minimum_seconds,D(0))
+            base=json.loads(DEFAULT_POLICY_PATH.read_text())
             base['queue_pilot'].pop('placement_mode')
             path.write_text(json.dumps(base))
             with self.assertRaises(ConfigurationError): load_policy(path)

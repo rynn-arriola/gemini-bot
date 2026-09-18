@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 18 — optional same-price refresh churn
+
+V26 correctly rejoined best bid with new order identities, but the only interval was the 10-second safety cooldown shared with mandatory price-change re-entry. It produced repeated 12–26-second unquoted gaps and 35 optional refresh decisions in roughly 35 minutes. Explicit v7 policy adds a separate five-minute per-market optional decision interval and a 500-contract estimated-improvement threshold while retaining the 10-second cancellation/proof path for price tracking. The durable cancellation-breach identity is unchanged. This is an isolated candidate, not deployed behavior. [Evidence](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
+
 ## September 18 — profitability-driven owner churn
 
 The ten-minute recovery timeout could repeatedly release and re-admit owners on fluctuating net-profit scenarios. Exact profitability-only failures now reserve the incumbent until the current Eastern day's end, with durable expiry and fresh failure proof after midnight. Quote safety/economics still cancel or block orders; structural faults keep existing release checks. Failure classifications cannot borrow each other's elapsed grace or stale post-proof decision. Deployed as v25 after terminal/flat v24 drain and fresh exact authority. [Behavior, tests and deployment](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).

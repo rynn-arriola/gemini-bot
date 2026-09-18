@@ -1,5 +1,5 @@
 {
-  "policy_version": 6,
+  "policy_version": 7,
   "platform": "windows",
   "quote_quantity": "15",
   "quote_offset_ticks": 0,
@@ -21,6 +21,8 @@
   "queue_pilot": {
     "scope": "all_selected",
     "placement_mode": "stay_best",
+    "same_price_refresh_minimum_seconds": "300",
+    "same_price_refresh_minimum_gain": "500",
     "adaptive": {
       "warmup_seconds": "600",
       "promotion_seconds": "60",

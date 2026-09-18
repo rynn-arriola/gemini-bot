@@ -59,10 +59,21 @@ class AdaptivePolicy:
     limits: AdaptiveLimits
     scope: str = 'research'
     placement_mode: str = 'adaptive'
+    same_price_refresh_minimum_seconds: D = D(0)
+    same_price_refresh_minimum_gain: D = D(0)
 
     def __post_init__(self):
         if (not isinstance(self.market_symbols, tuple)
                 or self.placement_mode not in {'adaptive', 'stay_best'}
+                or not isinstance(self.same_price_refresh_minimum_seconds, D)
+                or not self.same_price_refresh_minimum_seconds.is_finite()
+                or self.same_price_refresh_minimum_seconds < 0
+                or not isinstance(self.same_price_refresh_minimum_gain, D)
+                or not self.same_price_refresh_minimum_gain.is_finite()
+                or self.same_price_refresh_minimum_gain < 0
+                or (self.placement_mode != 'stay_best'
+                    and (self.same_price_refresh_minimum_seconds != 0
+                         or self.same_price_refresh_minimum_gain != 0))
                 or (self.placement_mode == 'stay_best' and self.scope != 'all_selected')
                 or self.scope not in {'research', 'all_selected'}
                 or (self.scope == 'research' and (len(self.market_symbols) != 2
@@ -96,8 +107,17 @@ class AdaptivePolicy:
 
 def parse_adaptive_policy(raw):
     if (not isinstance(raw, dict) or set(raw) not in ({'symbols', 'adaptive'}, {'scope', 'adaptive'},
-                                                   {'scope', 'adaptive', 'placement_mode'})
+                                                   {'scope', 'adaptive', 'placement_mode'},
+                                                   {'scope', 'adaptive', 'placement_mode',
+                                                    'same_price_refresh_minimum_seconds',
+                                                    'same_price_refresh_minimum_gain'})
             or ('placement_mode' in raw and raw['placement_mode'] != 'stay_best')
+            or ('same_price_refresh_minimum_seconds' in raw
+                and (isinstance(raw['same_price_refresh_minimum_seconds'], bool)
+                     or not isinstance(raw['same_price_refresh_minimum_seconds'], (str, int))))
+            or ('same_price_refresh_minimum_gain' in raw
+                and (isinstance(raw['same_price_refresh_minimum_gain'], bool)
+                     or not isinstance(raw['same_price_refresh_minimum_gain'], (str, int))))
             or ('symbols' in raw and not isinstance(raw['symbols'], list))
             or ('scope' in raw and raw['scope'] != 'all_selected')
             or not isinstance(raw['adaptive'], dict)
@@ -114,7 +134,9 @@ def parse_adaptive_policy(raw):
                 raise ValueError('adaptive decimal must be exact text or integer')
             parsed[key] = D(value)
     return AdaptivePolicy(tuple(raw.get('symbols', ())), AdaptiveLimits(**parsed),
-                          raw.get('scope', 'research'), raw.get('placement_mode', 'adaptive'))
+                          raw.get('scope', 'research'), raw.get('placement_mode', 'adaptive'),
+                          D(raw.get('same_price_refresh_minimum_seconds', 0)),
+                          D(raw.get('same_price_refresh_minimum_gain', 0)))
 
 
 @dataclass
@@ -139,6 +161,7 @@ class AdaptiveQueuePilot(QueuePilot):
         self.cancel_maximum = D(0)
         self.cancel_envelope_breached = False
         self.settling = set()
+        self.last_optional_refresh_at = {}
 
     @property
     def symbols(self):
@@ -160,7 +183,8 @@ class AdaptiveQueuePilot(QueuePilot):
             raise ValueError('invalid selected adaptive scope')
         for s in self.symbols - names:
             for mapping in (self.markets, self.evidence, self.modes, self.cooldown_at,
-                            self.disabled, self.reasons, self.cancel_sequence):
+                            self.disabled, self.reasons, self.cancel_sequence,
+                            self.last_optional_refresh_at):
                 mapping.pop(s, None)
             self.proof_required.discard(s)
             self.settling.discard(s)
@@ -311,6 +335,9 @@ class AdaptiveQueuePilot(QueuePilot):
         optional_ready = (not allow_entry and len(working) == 2
             and now < self.policy.limits.expires_at and not self.cancel_envelope_breached
             and since >= self.policy.limits.refresh_cooldown_seconds
+            and (symbol not in self.last_optional_refresh_at
+                 or D(str((now-self.last_optional_refresh_at[symbol]).total_seconds()))
+                    >= self.policy.same_price_refresh_minimum_seconds)
             and (now-m.started_at).total_seconds() >= float(self.policy.limits.warmup_seconds)
             and (m.uncertain_until is None or now >= m.uncertain_until)
             and (m.flow_clock is None or now >= m.flow_clock)
@@ -324,8 +351,11 @@ class AdaptiveQueuePilot(QueuePilot):
                     continue
                 ahead = a.scenario.ahead_scenario
                 gain = max(D(0), m.depths[order.outcome]-ahead)
+                minimum_gain = (self.policy.same_price_refresh_minimum_gain
+                    or self.policy.limits.minimum_requeue_gain)
                 if (ahead <= self.calibration(symbol, order.outcome).warning_ahead
-                        and gain >= self.policy.limits.minimum_requeue_gain):
+                        and gain >= minimum_gain):
+                    self.last_optional_refresh_at[symbol] = now
                     self.reasons[symbol] = 'estimated_queue_refresh_benefit'
                     return 'withdraw'
         self.reasons[symbol] = 'stay_best_accept_fill_risk'
@@ -334,6 +364,10 @@ class AdaptiveQueuePilot(QueuePilot):
     def report(self):
         return {**super().report(), 'adaptive': True, 'scope': self.policy.scope, 'modes': dict(self.modes),
             'placement_mode': self.policy.placement_mode,
+            'same_price_refresh_minimum_seconds': str(self.policy.same_price_refresh_minimum_seconds),
+            'same_price_refresh_minimum_gain': str(self.policy.same_price_refresh_minimum_gain),
+            'last_optional_refresh_at': {s: v.isoformat()
+                                         for s, v in self.last_optional_refresh_at.items()},
             'queue_settings_expiry_affects_placement': self.policy.placement_mode != 'stay_best',
             'cancel_maximum_seconds': str(self.cancel_maximum),
             'cancel_envelope_breached': self.cancel_envelope_breached,

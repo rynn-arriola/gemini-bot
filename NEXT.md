@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Same-price churn candidate is verified and published; deployment remains.** Full regression and offline release checks pass on the isolated branch. Deployment is not authorized; a later controlled deployment must drain terminal/flat, preserve history, use fresh exact authority and verify price-change responsiveness separately from optional same-price refresh frequency. [Handoff](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
+
 - **Stay-best-bid v26 deployment completed.** Continue read-only observation of natural price-change repositioning, useful same-price refresh, fills/exits, economic pauses and unaffected markets. Initial acceptance proved owned best-bid prices at two consecutive archive points, not uninterrupted future presence, exact queue position, reward qualification or profitability. Queue-settings expiry disables optional same-price optimization only; v6 best-bid placement continues under all existing safety gates. [Handoff](docs/STAY_BEST_BID_2026-09-18.md).
 
 - **V25 daily sticky deployment completed.** Continue read-only observation of profitability-only reservations, same-owner recovery and post-midnight fresh grace. Initial acceptance found 32 owned orders/16 markets, zero positions, five healthy public shards and three economic reservations; reserved idle slots grant no uptime or order permission. [Details](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).

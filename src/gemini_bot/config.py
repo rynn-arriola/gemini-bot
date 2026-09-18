@@ -145,9 +145,9 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         "max_inventory_age_seconds", "force_exit_before_expiry_seconds", "monetary_stop_authorities",
     }
     version = raw.get("policy_version")
-    if version in {3, 4, 5, 6}:
+    if version in {3, 4, 5, 6, 7}:
         required.add("queue_pilot")
-    if set(raw) != required or version not in {2, 3, 4, 5, 6} or raw["platform"] != "windows":
+    if set(raw) != required or version not in {2, 3, 4, 5, 6, 7} or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
         raise ConfigurationError("risk-window clock does not match approved Eastern windows")
@@ -160,12 +160,16 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
     if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
         raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
     try:
-        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version in {4, 5, 6}
+        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version in {4, 5, 6, 7}
                  else parse_pilot_policy(raw.get("queue_pilot")))
-        if version in {4, 5, 6} and pilot.scope != ('all_selected' if version in {5, 6} else 'research'):
+        if version in {4, 5, 6, 7} and pilot.scope != ('all_selected' if version in {5, 6, 7} else 'research'):
             raise ValueError('adaptive scope requires its exact policy version')
-        if version in {4, 5, 6} and pilot.placement_mode != ('stay_best' if version == 6 else 'adaptive'):
+        if version in {4, 5, 6, 7} and pilot.placement_mode != ('stay_best' if version in {6, 7} else 'adaptive'):
             raise ValueError('placement mode requires its exact policy version')
+        if version in {4, 5, 6, 7} and pilot.same_price_refresh_minimum_seconds != (Decimal('300') if version == 7 else 0):
+            raise ValueError('same-price refresh interval requires its exact policy version')
+        if version in {4, 5, 6, 7} and pilot.same_price_refresh_minimum_gain != (Decimal('500') if version == 7 else 0):
+            raise ValueError('same-price refresh gain requires its exact policy version')
     except (ValueError, TypeError, ArithmeticError, AttributeError) as exc:
         raise ConfigurationError("invalid queue pilot calibration") from exc
     strategy = StrategyConfig(
