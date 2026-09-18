@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal as D
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_repair_integration as fx
 from gemini_bot.domain import Outcome, Side, EngineState, QuoteLeg, QuotePair
@@ -152,6 +152,7 @@ class PilotIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.fx = fx.RuntimeRepairTests()
         await self.fx.asyncSetUp()
         self.r = self.fx.runtime
+        self.r.rest._open_json = Mock(side_effect=AssertionError('unexpected network in offline queue test'))
         self.r.config = replace(self.r.config, strategy=replace(self.r.config.strategy, quote_quantity=D(15),
             quote_offset_ticks=getattr(self, 'nonpilot_offset', 2), queue_pilot=policy()))
         self.r.queue_pilot = QueuePilot(policy())

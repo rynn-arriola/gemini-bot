@@ -7,11 +7,13 @@ prove a fill or release a cancellation/reconciliation barrier.
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal as D
 
 from .domain import Outcome, Side
 from .guarded_bid import BidObservation, QueueCalibration, recommend_bid
 from .queue_shadow import QueueScenario, aware
+from .capacity import MAX_ACTIVE_MARKETS
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,17 @@ class PilotMarket:
     trades: deque = field(default_factory=lambda: deque(maxlen=4096))
     last_trade_id: int = -1
     uncertain_until: datetime | None = None
+    flow_totals: dict = field(default_factory=lambda: {o: D(0) for o in Outcome})
+    flow_clock: datetime | None = None
+
+    def sell_flow(self, now):
+        if self.flow_clock is not None and now < self.flow_clock:
+            raise ValueError('queue flow clock reversed')
+        self.flow_clock = now
+        while self.trades and (now - self.trades[0][0]).total_seconds() > 60:
+            _, side, qty = self.trades.popleft()
+            self.flow_totals[side] -= qty
+        return self.flow_totals
 
 
 class QueuePilot:
@@ -93,6 +106,10 @@ class QueuePilot:
         self.reasons = {}
         self.cancel_sequence = {}
 
+    @property
+    def symbols(self):
+        return self.policy.symbols
+
     def calibration(self, symbol, outcome):
         return self.policy.calibration(symbol, outcome)
 
@@ -105,7 +122,7 @@ class QueuePilot:
         self.disabled[symbol] = type(exc).__name__
 
     def observe_book(self, book, *, generation, at, orders=()):
-        if book.symbol not in self.policy.symbols or book.symbol in self.disabled:
+        if book.symbol not in self.symbols or book.symbol in self.disabled:
             return
         aware(at)
         symbol = book.symbol
@@ -151,7 +168,6 @@ class QueuePilot:
         if m is None or m.generation != generation:
             return
         aware(at)
-        from datetime import timedelta
         trade_id = frame["t"]
         price, qty = D(str(frame["p"])), D(str(frame["q"]))
         if (isinstance(trade_id, bool) or not isinstance(trade_id, int) or trade_id < 0
@@ -170,19 +186,21 @@ class QueuePilot:
         event_time = D(stamp) / D(10**9)
         if event_time < D(str(m.started_at.timestamp())):
             return
-        while m.trades and (at - m.trades[0][0]).total_seconds() > 60:
-            m.trades.popleft()
+        m.sell_flow(at)
         if len(m.trades) == m.trades.maxlen:
             m.uncertain_until = at + timedelta(seconds=60)
+            _, old_side, old_qty = m.trades.popleft()
+            m.flow_totals[old_side] -= old_qty
         outcome = Outcome.YES if frame["m"] else Outcome.NO
         m.trades.append((at, outcome, qty))
+        m.flow_totals[outcome] += qty
         a = m.anchors.get(outcome)
         if (a is not None and event_time >= D(str(a.scenario.joined_at.timestamp()))
                 and (price if outcome is Outcome.YES else 1 - price) <= a.scenario.price):
             a.scenario.trade(qty)
 
     def advice(self, symbol, *, now, generation, orders, safe, allow_entry=False):
-        if symbol not in self.policy.symbols:
+        if symbol not in self.symbols:
             return "outside_pilot"
         m = self.markets.get(symbol)
         if (symbol in self.disabled or m is None or m.generation != generation or not safe
@@ -202,6 +220,7 @@ class QueuePilot:
         if not working and m.sequence <= self.cancel_sequence.get(symbol, -1):
             self.reasons[symbol] = "post_cancel_depth_required"
             return "wait"
+        flow = m.sell_flow(now)
         for outcome in (Outcome.YES, Outcome.NO):
             order = next((o for o in working if o.outcome is outcome), None)
             a = m.anchors.get(outcome)
@@ -214,12 +233,13 @@ class QueuePilot:
             observation = BidObservation(
                 symbol, now, m.depths[outcome],
                 a.scenario.ahead_scenario if order is not None else m.depths[outcome],
-                sum((q for at, o, q in m.trades if o is outcome and 0 <= (now - at).total_seconds() <= 60), D(0)),
+                flow[outcome],
                 working=order is not None, best_price_changed=order is not None and order.price != m.prices[outcome],
                 observation_complete=True, safety_checks_pass=safe,
                 since_last_refresh_seconds=max(D(0), since),
             )
-            advice = recommend_bid(observation, pilot_symbols=self.policy.symbols, calibration=c)
+            advice = recommend_bid(observation, pilot_symbols=self.symbols, calibration=c,
+                maximum_symbols=MAX_ACTIVE_MARKETS if getattr(self.policy, 'scope', None) == 'all_selected' else 2)
             if advice.action not in {"keep", "join_best_bid_moc"}:
                 self.reasons[symbol] = advice.reason
                 return "withdraw" if working else "wait"
@@ -242,6 +262,6 @@ class QueuePilot:
             self.markets[symbol].anchors.clear()
 
     def report(self):
-        return {"configured": True, "symbols": sorted(self.policy.symbols),
+        return {"configured": True, "symbols": sorted(self.symbols),
                 "exact_queue_position_available": False, "disabled": dict(self.disabled),
                 "proof_required": sorted(self.proof_required), "reasons": dict(self.reasons)}

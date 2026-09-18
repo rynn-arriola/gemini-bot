@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from .queue_shadow import aware, nonnegative
+from .capacity import MAX_ACTIVE_MARKETS
 
 D = Decimal
 
@@ -62,11 +63,15 @@ class BidAdvice:
 def recommend_bid(
     observation: BidObservation, *, pilot_symbols: frozenset[str],
     calibration: QueueCalibration | None,
+    maximum_symbols: int = 2,
 ) -> BidAdvice:
     o = observation
     aware(o.at)
-    if len(pilot_symbols) != 2 or any(not s or s.strip().upper() != s for s in pilot_symbols):
-        raise ValueError("pilot requires exactly two distinct canonical symbols")
+    if (maximum_symbols not in (2, MAX_ACTIVE_MARKETS)
+            or (maximum_symbols == 2 and len(pilot_symbols) != 2)
+            or (maximum_symbols == MAX_ACTIVE_MARKETS and not 1 <= len(pilot_symbols) <= MAX_ACTIVE_MARKETS)
+            or any(not isinstance(s, str) or not s or s.strip().upper() != s for s in pilot_symbols)):
+        raise ValueError("invalid bounded queue strategy scope")
     if o.symbol not in pilot_symbols:
         return BidAdvice("unchanged_configured_offset_policy", "outside_pilot")
     for value in (o.external_depth, o.ahead_scenario, o.sell_flow_60s, o.since_last_refresh_seconds):

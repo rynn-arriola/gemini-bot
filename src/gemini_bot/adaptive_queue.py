@@ -15,6 +15,7 @@ from .domain import Outcome
 from .guarded_bid import QueueCalibration
 from .queue_pilot import QueuePilot
 from .queue_shadow import aware, nonnegative
+from .capacity import MAX_ACTIVE_MARKETS
 
 
 @dataclass(frozen=True)
@@ -53,17 +54,21 @@ class AdaptiveLimits:
 
 @dataclass(frozen=True)
 class AdaptivePolicy:
-    # Explicit pilot scope remains fixed. Wider rollout is a separate decision.
+    # Research uses two fixed names; all_selected binds to reconciled ownership.
     market_symbols: tuple[str, ...]
     limits: AdaptiveLimits
+    scope: str = 'research'
 
     def __post_init__(self):
         if (not isinstance(self.market_symbols, tuple)
-                or len(self.market_symbols) != 2 or len(set(self.market_symbols)) != 2
+                or self.scope not in {'research', 'all_selected'}
+                or (self.scope == 'research' and (len(self.market_symbols) != 2
+                    or len(set(self.market_symbols)) != 2))
+                or (self.scope == 'all_selected' and self.market_symbols != ())
                 or any(not isinstance(s, str) or not s or s.strip().upper() != s
                        for s in self.market_symbols)
                 or not isinstance(self.limits, AdaptiveLimits)):
-            raise ValueError('adaptive pilot requires exactly two canonical symbols')
+            raise ValueError('adaptive scope must be two research symbols or all_selected without names')
 
     @property
     def symbols(self):
@@ -79,12 +84,17 @@ class AdaptivePolicy:
                       str(v.normalize()) if isinstance(v, D) else v)
                   for k, v in asdict(self.limits).items()}
         raw = json.dumps({'symbols': sorted(self.symbols), 'limits': limits}, sort_keys=True)
+        if self.scope == 'all_selected':
+            # Membership changes must never clear a shared cancellation breach.
+            raw = json.dumps({'scope': self.scope, 'limits': limits}, sort_keys=True)
         return 'adaptive_cancel_breach_v1:' + hashlib.sha256(raw.encode()).hexdigest()
 
 
 def parse_adaptive_policy(raw):
-    if (not isinstance(raw, dict) or set(raw) != {'symbols', 'adaptive'}
-            or not isinstance(raw['symbols'], list) or not isinstance(raw['adaptive'], dict)
+    if (not isinstance(raw, dict) or set(raw) not in ({'symbols', 'adaptive'}, {'scope', 'adaptive'})
+            or ('symbols' in raw and not isinstance(raw['symbols'], list))
+            or ('scope' in raw and raw['scope'] != 'all_selected')
+            or not isinstance(raw['adaptive'], dict)
             or set(raw['adaptive']) != {f.name for f in fields(AdaptiveLimits)}):
         raise ValueError('invalid adaptive policy schema')
     parsed = {}
@@ -97,7 +107,8 @@ def parse_adaptive_policy(raw):
             if isinstance(value, bool) or not isinstance(value, (str, int)):
                 raise ValueError('adaptive decimal must be exact text or integer')
             parsed[key] = D(value)
-    return AdaptivePolicy(tuple(raw['symbols']), AdaptiveLimits(**parsed))
+    return AdaptivePolicy(tuple(raw.get('symbols', ())), AdaptiveLimits(**parsed),
+                          raw.get('scope', 'research'))
 
 
 @dataclass
@@ -112,6 +123,7 @@ class Evidence:
 
 class AdaptiveQueuePilot(QueuePilot):
     def __init__(self, policy: AdaptivePolicy):
+        self._symbols = policy.symbols
         super().__init__(policy)
         self.evidence = {}
         self.modes = {s: 'fallback' for s in policy.symbols}
@@ -122,7 +134,33 @@ class AdaptiveQueuePilot(QueuePilot):
         self.cancel_envelope_breached = False
         self.settling = set()
 
+    @property
+    def symbols(self):
+        return self._symbols
+
+    def sync_selected(self, symbols):
+        """Caller must prove retiring names terminal/flat before removing them.
+
+        Observation never admits an owner. Fresh membership gets no inherited
+        evidence, queue anchor, proof or mode; shared breach latch survives.
+        """
+        names = frozenset(symbols)
+        if (self.policy.scope != 'all_selected' or len(names) > MAX_ACTIVE_MARKETS
+                or any(not isinstance(s, str) or not s or s != s.strip().upper() for s in names)):
+            raise ValueError('invalid selected adaptive scope')
+        for s in self.symbols - names:
+            for mapping in (self.markets, self.evidence, self.modes, self.cooldown_at,
+                            self.disabled, self.reasons, self.cancel_sequence):
+                mapping.pop(s, None)
+            self.proof_required.discard(s)
+            self.settling.discard(s)
+        for s in names - self.symbols:
+            self.modes[s] = 'fallback'
+        self._symbols = names
+
     def invalidate(self, symbol):
+        if symbol not in self.symbols:
+            return
         super().invalidate(symbol)
         self.evidence.pop(symbol, None)
         self.settling.add(symbol)
@@ -153,12 +191,11 @@ class AdaptiveQueuePilot(QueuePilot):
 
     def _peaks(self, symbol, now):
         m, e = self.markets.get(symbol), self.evidence.get(symbol)
-        if m is None or e is None:
+        if m is None or e is None or (m.flow_clock is not None and now < m.flow_clock):
             return
+        flow = m.sell_flow(now)
         for o in Outcome:
-            flow = sum((q for at, side, q in m.trades
-                        if side is o and 0 <= (now - at).total_seconds() <= 60), D(0))
-            e.peak_flow[o] = max(e.peak_flow[o], flow)
+            e.peak_flow[o] = max(e.peak_flow[o], flow[o])
 
     def record_cancel(self, elapsed, *, succeeded):
         value = D(str(elapsed))
@@ -180,6 +217,8 @@ class AdaptiveQueuePilot(QueuePilot):
 
     def desired_mode(self, symbol, *, now, generation, safe):
         aware(now)
+        if symbol not in self.symbols:
+            return 'fallback'
         m, e, p = self.markets.get(symbol), self.evidence.get(symbol), self.policy.limits
         reason = None
         if (m is None or e is None or m.generation != generation or e.generation != generation
@@ -193,7 +232,8 @@ class AdaptiveQueuePilot(QueuePilot):
                 e.since, e.good_since = now, None
             e.last_check = now
             self._peaks(symbol, now)
-            if (now < m.observed_at or (m.uncertain_until is not None and now < m.uncertain_until)
+            if (now < m.observed_at or (m.flow_clock is not None and now < m.flow_clock)
+                    or (m.uncertain_until is not None and now < m.uncertain_until)
                     or D(str((now - e.since).total_seconds())) < p.warmup_seconds
                     or (now - m.started_at).total_seconds() < 60):
                 reason = 'adaptive_continuous_warmup_required'
@@ -221,7 +261,7 @@ class AdaptiveQueuePilot(QueuePilot):
                               safe=safe, allow_entry=allow_entry)
 
     def report(self):
-        return {**super().report(), 'adaptive': True, 'modes': dict(self.modes),
+        return {**super().report(), 'adaptive': True, 'scope': self.policy.scope, 'modes': dict(self.modes),
             'cancel_maximum_seconds': str(self.cancel_maximum),
             'cancel_envelope_breached': self.cancel_envelope_breached,
             'thresholds_are_scenarios': True,

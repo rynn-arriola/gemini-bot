@@ -263,19 +263,56 @@ class ProductionOrchestrator:
         self.log.event(logging.INFO, "runner_created", read_only=read_only)
 
     def _rank_live_universe(self, *args, **kwargs):
-        policy = self.config.strategy.queue_pilot
-        if policy is not None:
-            kwargs["symbol_offsets"] = {s: 0 for s in policy.symbols if self._pilot_at_touch(s)}
+        if self.queue_pilot is not None:
+            kwargs["symbol_offsets"] = {s: 0 for s in self.queue_pilot.symbols if self._pilot_at_touch(s)}
         return rank_live_universe(*args, **kwargs)
+
+    def _sync_adaptive_scope(self):
+        """Bind all-selected policy to durable owners, never to all watched books.
+
+        Existing retirement paths supply authenticated terminal/flat proof. Do
+        not discard local safety state while orders, inventory or proof work
+        remain. New owners can use normal fallback until a retained slot clears.
+        """
+        pilot = self.queue_pilot
+        if not isinstance(pilot, AdaptiveQueuePilot) or pilot.policy.scope != 'all_selected':
+            return
+        selected = {s for _, s in self._sticky_markets.values()} & self._permitted_symbols
+        maximum = self.config.risk.max_two_sided_quotes
+        if len(selected) > maximum:
+            raise RuntimeError('selected adaptive owner count exceeds capacity')
+        retained = set()
+        for symbol in pilot.symbols - selected:
+            task = self._pilot_proof_tasks.get(symbol)
+            if task is not None and task.done():
+                task.result()  # Never discard an unknown account failure.
+            if (self.account.reducer.positions.get(symbol)
+                    or self.account.reducer.risk_adding_order_ids(symbol)
+                    or self.journal.has_nonterminal_intents(symbol)
+                    or self.journal.pending_exit(symbol) or symbol in self._exit_workers
+                    or symbol in self._exit_uncertain or symbol in self._entry_cancel_symbols
+                    or any(self.journal.get_deadline(symbol, o) is not None for o in ('YES', 'NO'))
+                    or (task is not None and not task.done())):
+                retained.add(symbol)
+        names = (set(pilot.symbols) & selected) | retained
+        for symbol in sorted(selected - names):
+            if len(names) >= maximum:
+                break
+            names.add(symbol)
+        for symbol in pilot.symbols - names:
+            self._pilot_proof_tasks.pop(symbol, None)
+            self._pilot_proved.pop(symbol, None)
+            self._pilot_next_proof.pop(symbol, None)
+        pilot.sync_selected(names)
 
     def _pilot_at_touch(self, symbol):
         pilot = self.queue_pilot
-        return bool(pilot is not None and symbol in pilot.policy.symbols
+        return bool(pilot is not None and symbol in pilot.symbols
                     and (not isinstance(pilot, AdaptiveQueuePilot) or pilot.modes[symbol] == 'best'))
 
     def _adaptive_desired(self, symbol):
         pilot = self.queue_pilot
-        if not isinstance(pilot, AdaptiveQueuePilot) or symbol not in pilot.policy.symbols:
+        if not isinstance(pilot, AdaptiveQueuePilot) or symbol not in pilot.symbols:
             return None
         try:
             return pilot.desired_mode(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
@@ -303,7 +340,7 @@ class ProductionOrchestrator:
 
     def _pilot_advice(self, symbol, *, allow_entry=False):
         pilot = self.queue_pilot
-        if pilot is None or symbol not in pilot.policy.symbols:
+        if pilot is None or symbol not in pilot.symbols:
             return "outside_pilot"
         try:
             return pilot.advice(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
@@ -320,7 +357,7 @@ class ProductionOrchestrator:
 
     def _observe_queue_pilot(self, symbol, *, frame=None):
         pilot = self.queue_pilot
-        if pilot is None or symbol not in pilot.policy.symbols:
+        if pilot is None or symbol not in pilot.symbols:
             return
         try:
             if (not self._book_fresh(symbol) or self._public_shard_held(symbol)
@@ -343,7 +380,7 @@ class ProductionOrchestrator:
             generation, version = self._pilot_generation(symbol), self.account.fill_version
             async with asyncio.timeout(15):
                 snapshot = await self._exit_account_snapshot(symbol)
-            if (snapshot.signed_positions.get(symbol) or generation != self._pilot_generation(symbol)
+            if (symbol not in pilot.symbols or snapshot.signed_positions.get(symbol) or generation != self._pilot_generation(symbol)
                     or version != self.account.fill_version or not self._pilot_safe(symbol)
                     or self.journal.has_nonterminal_intents(symbol)):
                 return
@@ -362,7 +399,7 @@ class ProductionOrchestrator:
 
     def _pilot_entry_ready(self, symbol):
         pilot = self.queue_pilot
-        if pilot is None or symbol not in pilot.policy.symbols:
+        if pilot is None or symbol not in pilot.symbols:
             return True
         if symbol not in pilot.markets:
             self._observe_queue_pilot(symbol)
@@ -385,7 +422,12 @@ class ProductionOrchestrator:
         if not self._pilot_proof_current(symbol):
             pilot.proof_required.add(symbol)
         if symbol in pilot.proof_required:
+            # At full breadth, serialize additional adaptive REST proofs. The
+            # shared transport governor remains authoritative for every read.
+            proof_busy = (adaptive and pilot.policy.scope == 'all_selected'
+                          and any(not t.done() for t in self._pilot_proof_tasks.values()))
             if (symbol not in self._pilot_proof_tasks and self._pilot_safe(symbol)
+                    and not proof_busy
                     and time.monotonic() >= self._pilot_next_proof.get(symbol, 0)):
                 self._pilot_proof_tasks[symbol] = asyncio.create_task(self._pilot_flat_proof(symbol))
             return False
@@ -571,7 +613,7 @@ class ProductionOrchestrator:
                     self._queue_live_orders.pop(order.order_id, None)
                 if len(self._queue_live_orders) > 40:
                     raise RuntimeError("working-order cache exceeds approved capacity")
-                if (self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols
+                if (self.queue_pilot is not None and symbol in self.queue_pilot.symbols
                         and (not order.working or order.cumulative_filled)):
                     # Spontaneous MOC cancellation or fill is just as binding
                     # as an operator/guard cancellation; never reuse old proof.
@@ -827,6 +869,7 @@ class ProductionOrchestrator:
                     self._owner_event("sticky_owner_admitted", owner, symbol, "vacant_slot_pool_aware_selection")
             self.journal.set_runtime_state("sticky_markets_v2", json.dumps(markets, sort_keys=True), updated_at=_utc_now())
             self._sticky_markets = markets
+        self._sync_adaptive_scope()
 
     def _inventory_locked_pool_ids(self) -> set[str]:
         held = {symbol for symbol, quantity in self.account.reducer.positions.items() if quantity}
@@ -2247,7 +2290,7 @@ class ProductionOrchestrator:
                     order = self.account.reducer.orders.get(order_id)
                     status = str(terminal["status"]).upper().replace("CANCELLED", "CANCELED")
                     if order is not None and (not send_cancel or
-                            (self.queue_pilot is not None and order.symbol in self.queue_pilot.policy.symbols)):
+                            (self.queue_pilot is not None and order.symbol in self.queue_pilot.symbols)):
                         # No new cancel was sent because disconnect/admission may
                         # already have terminalized it. Require exact history so
                         # a missed partial fill can never be erased as a cancel.
@@ -2264,7 +2307,7 @@ class ProductionOrchestrator:
         raise TimeoutError("order cancellation was not proven terminal") from last_transient
 
     async def _cancel_symbol_entries(self, symbol: str) -> None:
-        if self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+        if self.queue_pilot is not None and symbol in self.queue_pilot.symbols:
             if self.account.reducer.risk_adding_order_ids(symbol):
                 self.queue_pilot.canceled(symbol, _utc_now())
         self._entry_cancel_symbols[symbol] = self._entry_cancel_symbols.get(symbol, 0) + 1
@@ -2279,7 +2322,7 @@ class ProductionOrchestrator:
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
-            if order_ids and self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+            if order_ids and self.queue_pilot is not None and symbol in self.queue_pilot.symbols:
                 self.queue_pilot.canceled(symbol, _utc_now())
                 self._pilot_proved.pop(symbol, None)
         finally:
@@ -2392,7 +2435,7 @@ class ProductionOrchestrator:
             if self._adaptive_transition(symbol):
                 raise QuoteChangedBeforeSend("adaptive mode changed before send")
             if (isinstance(self.queue_pilot, AdaptiveQueuePilot)
-                    and symbol in self.queue_pilot.policy.symbols
+                    and symbol in self.queue_pilot.symbols
                     and (symbol in self.queue_pilot.proof_required
                          or (symbol in self.queue_pilot.cooldown_at and not self._pilot_proof_current(symbol)))):
                 raise QuoteChangedBeforeSend("adaptive transition proof required")
@@ -3344,7 +3387,7 @@ class ProductionOrchestrator:
             self._observe_resting()
             self._check_stream_recovery()
             if self.queue_pilot is not None:
-                for symbol in self.queue_pilot.policy.symbols:
+                for symbol in self.queue_pilot.symbols:
                     self.public.adverse_dirty.mark(symbol)
                 self.public.depth_changed.set()
             if self._permit_expires_at is not None and now >= self._permit_expires_at:
@@ -3752,6 +3795,7 @@ class ProductionOrchestrator:
                 self.journal.set_runtime_state("sticky_markets_v2", json.dumps(self._sticky_markets, sort_keys=True), updated_at=_utc_now())
                 self._reward_epoch = None  # New identities require freshly computed eligibility.
                 self.log.event(logging.INFO, "catalog_owners_refreshed", retired=len(removable), added=len(additions))
+                self._sync_adaptive_scope()
 
     async def activate(
         self,
@@ -3782,11 +3826,16 @@ class ProductionOrchestrator:
         self._permit_policy_digest = permit.policy_sha256
         if self.queue_pilot is not None:
             incumbents = {symbol for _, symbol in self._sticky_markets.values()}
-            if (permit.permit_version != 7 or not self.queue_pilot.policy.symbols <= incumbents
-                    or not self.queue_pilot.policy.symbols <= self._permitted_symbols):
-                raise RuntimeError("queue pilot must name exactly two existing permitted owners")
+            policy = self.queue_pilot.policy
+            all_selected = isinstance(policy, AdaptivePolicy) and policy.scope == 'all_selected'
+            if (permit.permit_version != 7
+                    or (all_selected and permit.universe_scope != 'reward_catalog')
+                    or (not all_selected and (not policy.symbols <= incumbents
+                                             or not policy.symbols <= self._permitted_symbols))):
+                raise RuntimeError("queue strategy scope requires reconciled permitted ownership")
             if self.queue_pilot.policy.expired(_utc_now()):
                 raise RuntimeError("queue pilot calibration expired before activation")
+            self._sync_adaptive_scope()
         if not self._permitted_symbols <= (
             {item.rules.symbol for item in self.universe} | self._inventory_catalog_holds
         ):

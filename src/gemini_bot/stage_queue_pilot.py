@@ -48,7 +48,7 @@ def build_candidate(base_path: Path, review: dict, *, now: datetime) -> dict:
     if reviewed > now:
         raise ValueError("review timestamp is in the future")
     owners = review['incumbent_symbols']
-    if (not isinstance(owners, list) or not 2 <= len(owners) <= 20
+    if (not isinstance(owners, list) or not 0 <= len(owners) <= 20
             or any(not isinstance(s, str) or not s or s.strip().upper() != s for s in owners)
             or len(set(owners)) != len(owners)):
         raise ValueError("invalid incumbent symbol snapshot")
@@ -60,7 +60,8 @@ def build_candidate(base_path: Path, review: dict, *, now: datetime) -> dict:
     if pilot.expired(now):
         raise ValueError("calibration is expired")
     replace(strategy, queue_pilot=pilot).validate()
-    return {**base, 'policy_version': 4 if adaptive else 3, 'queue_pilot': review['queue_pilot']}
+    version = 5 if adaptive and pilot.scope == 'all_selected' else 4 if adaptive else 3
+    return {**base, 'policy_version': version, 'queue_pilot': review['queue_pilot']}
 
 
 def stage_candidate(base_path: Path, review_path: Path, *, draft_name: str,

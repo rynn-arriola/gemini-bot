@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 18 — all-selected adaptive scope and full-capacity work
+
+The candidate still assumed exactly two fixed symbols despite the intended shared all-market strategy. Explicit v5 all-selected mode now binds to permitted durable owners, handles fresh replacement/readmission, bounds and prunes retired state, preserves shared cancellation breaches and serializes extra account proofs. Optional two-symbol v4 research remains explicit. Full-buffer profiling exposed repeated trade scans; exact incremental rolling totals remove that work with duplicate/window/overflow/clock regressions. This is isolated source, not a fix already active in production. Deployment and quote transitions can create uncredited gaps; no sticky reset, risk/HARD change or live trial was performed. [Tests and release](docs/ALL_SELECTED_ADAPTIVE_2026-09-18.md).
+
 ## September 17 — one missing public reward event aborted all discovery
 
 The user-run startup failed on a per-event 404 before activation. Discovery now skips only that unavailable public event; saved owners keep recovery space and identity. Live refresh blocks/cancels only affected entries, preserving exact cancellation/account/inventory proof and normal later recovery. Catalog/account/authentication/cooldown/unknown-mutation failures retain their existing boundaries. [Evidence and tests](docs/MISSING_REWARD_EVENT_2026-09-17.md).

@@ -1,0 +1,20 @@
+{
+  "reviewed_at": "2026-09-18T05:45:17.556657-04:00",
+  "incumbent_symbols": [],
+  "queue_pilot": {
+    "scope": "all_selected",
+    "adaptive": {
+      "warmup_seconds": "600",
+      "promotion_seconds": "60",
+      "observation_gap_seconds": "3",
+      "cancel_budget_seconds": "10",
+      "buffer_contracts": "250",
+      "burst_multiplier": "1",
+      "depth_multiplier": "1.5",
+      "minimum_requeue_gain": "250",
+      "refresh_cooldown_seconds": "10",
+      "expires_at": "2026-09-19T05:45:00-04:00",
+      "evidence_reference": "UNAPPROVED SHARED SETTINGS PROPOSAL: docs/ADAPTIVE_SETTINGS_PROPOSAL_2026-09-18.md; all_selected scope; no claim of guaranteed queue position, fill protection or profitability"
+    }
+  }
+}
