@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Pending controlled deployment:** verified candidate `fix/adaptive-transition-continuity` repairs self-cancellation warmup reset and quiet-market transition scheduling. Preserve v23 until restart approval; then graceful drain, fresh terminal/flat preparation, exact-build authority and live acceptance. Do not reuse the old permit or extend the unchanged envelope. [Handoff](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
+- **V24 controlled deployment completed.** Continue read-only observation of real promotion, requeue/demotion, natural fills/exits and unaffected markets. The initial 34-order/17-market flat acceptance proves startup health, not long-run behavior, queue position, snapshot qualification or reward. Do not extend the unchanged envelope without a new owner decision. [Evidence](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
 
 - **All-selected v23 is live under the approved shared envelope.** Initial acceptance passed with exact build/policy/account authority, zero positions, owned resting orders, five healthy public shards and no holds/restarts. Continue read-only observation through natural promotions/demotions, fills/exits and recovery; do not induce fills/faults or edit the active source/configuration.
 

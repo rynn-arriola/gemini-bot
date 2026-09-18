@@ -2,7 +2,7 @@
 
 ## Scope and diagnosis
 
-Owner requested a restart-ready repair, not another immediate restart. Candidate branch: `fix/adaptive-transition-continuity`. Running main/v23 is untouched.
+Owner first requested a restart-ready repair, then explicitly approved the controlled restart after verification and publication. Candidate branch: `fix/adaptive-transition-continuity`; deployed source commit: `52454db`.
 
 Read-only live inspection found repeated `adaptive_mode_transition` cancellations but no completed `adaptive_queue_mode` audit entries. An offline reproduction established that concurrent adaptive checks treated the bot's own entry-cancellation flag as lost observation continuity. The warmup reset during cancellation, returning desired mode to fallback rather than completing best-bid promotion.
 
@@ -31,4 +31,6 @@ A 1,000-iteration synthetic benchmark of the additional 20-member local check me
 
 This targets repeated failed-promotion churn without rotating sticky owners or transferring uptime. Genuine mode transitions still create an unquoted cancellation/proof/cooldown interval; neither tests nor resting presence prove Gemini snapshot qualification, exact queue rank, reward or fill avoidance.
 
-After restart approval: gracefully drain the old owner, verify terminal/flat classified account and backup, integrate the verified branch, perform fresh read-only preparation, then issue new exact-build/policy/account authority and launch through the persistent Windows task. Do not reuse v23's consumed permit or start a second owner. Preserve all sticky/economic/deadline history and HARD. No automatic policy renewal: the unchanged adaptive envelope expires September 19 at 05:45 ET, after which normal guarded one-tick fallback applies. Verify real best-bid promotions, requeues/demotions and unaffected resting orders after deployment; long-run live acceptance remains pending.
+Deployment completed in that order: v23 reached `stopped_flat` with zero orders/positions and its supervisor stopped; `main` fast-forwarded to `52454db`; a fresh verified backup and read-only preparation proved flat/order-free state, healthy journal, preserved economic/sticky history and non-HARD capacity; a new v7 exact-build/policy/account permit launched v24 through the persistent Windows task. Initial authenticated acceptance found 34 owned size-15 orders across 17 markets, zero positions, five healthy public shards, no read/stream holds or backup error, and zero supervisor restarts.
+
+No automatic policy renewal: the unchanged adaptive envelope expires September 19 at 05:45 ET, after which normal guarded one-tick fallback applies. Real best-bid promotions, requeues/demotions, natural fills/exits and unaffected resting orders still require long-run observation. The restart interval receives no snapshot credit.

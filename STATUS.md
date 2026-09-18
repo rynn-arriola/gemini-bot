@@ -4,7 +4,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **Adaptive transition repair is isolated for the next restart.** Own cancellation was resetting warmup; bounded independent observation and prompt proof/mode scheduling repair the transition without granting entry during cancellation. Running main/v23 is unchanged. Latest read-only checkpoint found 34 owned orders/17 markets, zero positions and no read/stream holds. [Diagnosis, tests and deployment handoff](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md). New code is not live; fresh restart approval and exact-build authority are required.
+- **Adaptive transition repair v24 is deployed and running.** Own cancellation no longer resets otherwise healthy warmup evidence; cancellation still blocks entry until terminal/flat proof, later depth and cooldown. The owner-approved restart completed with a fresh verified backup and exact build/policy/account authority. Initial authenticated acceptance found 34 canonically owned size-15 orders across 17 markets, zero positions, five healthy public shards, no read/stream holds or backup error, and a RUNNING supervisor with zero restarts. [Diagnosis, tests and deployment evidence](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
 
 - **All-selected adaptive v23 is deployed and running.** Owner-approved v5 policy applies the common rule to all selected markets/replacements within the unchanged 20-owner/40-order limits. The old v22 run drained to `stopped_flat` at 07:11 ET; fresh authenticated preparation proved zero positions/orders, healthy journal and backup, preserved economic/sticky history and a clear non-HARD window. Exact build/policy/account-bound v7 authority then launched the persistent task from `main` `b98ced9`.
 - **Initial live acceptance passed at approximately 07:19 ET.** Authenticated REST proved 26 canonically owned size-15 orders across 13 markets and zero positions; a nearby heartbeat reported 24 orders as normal concrete economics changed. The engine was `quoting`, all five public shards were connected, the private/account path was active, the supervisor/task were RUNNING, and there were no entry or stream holds, errors or restarts. All 20 selected owners started in the expected one-tick fallback/warmup mode; best-bid promotion requires the approved continuous evidence.
@@ -32,7 +32,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Active runtime directory: `data/production-20260918-adaptive-all-selected-v23`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
+Active runtime directory: `data/production-20260918-adaptive-transition-v24`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.

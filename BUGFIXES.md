@@ -2,7 +2,7 @@
 
 ## September 18 — own cancellation repeatedly reset adaptive promotion
 
-Concurrent checks treated an owned cancellation as lost observation continuity, restarting warmup after withdrawing the fallback pair. Separate evidence health from mutation permission; keep bounded safety-clock observations during quiet cooldowns and wake ranking after flat proof/mode changes. Cancellation still blocks sends and all terminal, freshness, fill, generation, cooldown and HARD safeguards remain. Isolated candidate only; running v23 unchanged. [Regression evidence and restart handoff](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
+Concurrent checks treated an owned cancellation as lost observation continuity, restarting warmup after withdrawing the fallback pair. Separate evidence health from mutation permission; keep bounded safety-clock observations during quiet cooldowns and wake ranking after flat proof/mode changes. Cancellation still blocks sends and all terminal, freshness, fill, generation, cooldown and HARD safeguards remain. Deployed as v24 after terminal/flat v23 drain and fresh exact authority. [Regression and deployment evidence](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
 
 ## September 18 — all-selected adaptive scope and full-capacity work
 
