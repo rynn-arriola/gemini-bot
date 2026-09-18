@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Same-price churn candidate is verified and published; deployment remains.** Full regression and offline release checks pass on the isolated branch. Deployment is not authorized; a later controlled deployment must drain terminal/flat, preserve history, use fresh exact authority and verify price-change responsiveness separately from optional same-price refresh frequency. [Handoff](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
+- **Same-price churn v27 deployment completed.** Continue read-only observation after the 600-second warmup: verify no market receives two optional refresh decisions within 300 seconds, each optional decision has at least 500 estimated contracts of gain, mandatory price changes remain responsive, and unrelated pairs stay resting. Initial acceptance proves configured controls and best-bid prices, not long-run frequency, exact queue rank, rewards or profit. [Handoff](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
 
 - **Stay-best-bid v26 deployment completed.** Continue read-only observation of natural price-change repositioning, useful same-price refresh, fills/exits, economic pauses and unaffected markets. Initial acceptance proved owned best-bid prices at two consecutive archive points, not uninterrupted future presence, exact queue position, reward qualification or profitability. Queue-settings expiry disables optional same-price optimization only; v6 best-bid placement continues under all existing safety gates. [Handoff](docs/STAY_BEST_BID_2026-09-18.md).
 

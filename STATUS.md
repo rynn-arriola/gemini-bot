@@ -4,7 +4,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **Same-price refresh churn repair is isolated, not deployed.** Candidate v7 leaves mandatory best-bid price tracking on the existing 10-second safe re-entry path while limiting optional same-price cancel/rejoin to one decision per market per five minutes and requiring 500 estimated contracts of improvement. Running v26 remains unchanged. [Evidence and design](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
+- **Same-price refresh churn repair v27 is deployed and running.** V26 drained terminal/flat; verified policy v7 launched with fresh exact authority after a transient read-only API timeout safely halted and the retry proved zero orders/positions, healthy shards and backup. Initial acceptance observed 30 owned size-15 orders/15 pairs exactly at best bid, zero price mismatches/positions, five healthy shards, no holds/live errors/fills/restarts and explicit 300-second/500-contract optional controls. No startup optional refresh occurred. [Evidence](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
 
 - **Stay-best-bid v26 is deployed and running.** V25 drained to `stopped_flat`; main/GitHub advanced to the verified v6 policy, fresh read-only preparation proved zero orders/positions and created a verified backup, and new exact build/policy/account v7 authority launched with no uptime override. Two consecutive live archives observed 32 then 28 owned size-15 orders across 16 then 14 markets, all exactly at the external best bids with zero mismatches; zero positions, five healthy public shards, no holds/errors/fills and a RUNNING supervisor. Economic reservations explain non-capacity breadth. [Behavior and deployment evidence](docs/STAY_BEST_BID_2026-09-18.md).
 
@@ -38,7 +38,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Active runtime directory: `data/production-20260918-stay-best-v26`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
+Active runtime directory: `data/production-20260918-refresh-churn-v27`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.
