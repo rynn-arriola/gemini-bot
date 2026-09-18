@@ -115,11 +115,12 @@ class RecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.r._save_sticky_markets(selected, reserved)
         return selected, owners
 
-    def bad(self, reason='non-positive conservative net-profit estimate'):
+    def bad(self, reason='quote exceeds maximum reward distance'):
         self.r.ranked = [replace(self.a, eligible_now=False, reasons=(reason,)), self.b]
 
     def mature(self):
-        self.r._sticky_recovery.failures[self.a.owner_key] = Failure('bad', 600, fixtures.NOW)
+        self.r._sticky_recovery.failures[self.a.owner_key] = Failure(
+            self.r._owner_failure_reason(self.a.symbol), 600, fixtures.NOW)
 
     async def test_missing_book_keeps_owner_then_resumes_same_market(self):
         self.r.ranked = [self.b]

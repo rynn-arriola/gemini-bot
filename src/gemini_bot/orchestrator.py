@@ -617,7 +617,11 @@ class ProductionOrchestrator:
               "inventory_catalog_holds": sorted(self._inventory_catalog_holds),
               "sticky_recovery": {owner: {"reason": failure.reason,
                   "observed_failure_seconds": failure.observed_seconds,
-                  "release_grace_seconds": RECOVERY_GRACE_SECONDS}
+                  "release_grace_seconds": RECOVERY_GRACE_SECONDS,
+                  "economic_reservation_until": (
+                      self._sticky_recovery.economic_hold_until(owner).isoformat()
+                      if self._sticky_recovery.economic_hold_until(owner) is not None else None),
+                  "reservation_is_not_quoting_or_uptime_credit": True}
                   for owner, failure in self._sticky_recovery.failures.items()},
               "reward_epoch": self._reward_epoch},
         )
@@ -764,7 +768,11 @@ class ProductionOrchestrator:
             raise RuntimeError("duplicate persisted market symbol")
         self._sticky_markets = {owner: tuple(pair) for owner, pair in value.items()}
         self._sticky_pool_ids = set(self._sticky_markets)
-        self._sticky_recovery.restore(self.journal.get_runtime_state("sticky_recovery_v1"), self._sticky_pool_ids)
+        recovery = self.journal.get_runtime_state("sticky_recovery_v2")
+        if recovery is not None:
+            self._sticky_recovery.restore_state(recovery, self._sticky_pool_ids)
+        else:
+            self._sticky_recovery.restore(self.journal.get_runtime_state("sticky_recovery_v1"), self._sticky_pool_ids)
 
     def _owner_event(self, event: str, owner: str, symbol: str, reason: str) -> None:
         fields = {"owner_key": owner, "symbol": symbol, "reason": reason}
@@ -789,14 +797,14 @@ class ProductionOrchestrator:
         )
 
     def _owner_failure_reason(self, symbol: str) -> str:
+        if not self._entry_time_valid(symbol):
+            return "entry_time_unavailable"
         candidate = next((c for c in self.ranked if c.symbol == symbol), None)
         if candidate is None:
             return "rank_candidate_missing:" + self._quote_target_state(symbol)[1]
         reasons = tuple(r for r in candidate.reasons if r != _UPTIME_PROXY_REJECTION)
         if reasons:
             return "; ".join(reasons)
-        if not self._entry_time_valid(symbol):
-            return "entry_time_unavailable"
         return "non_positive_marginal_pool_economics"
 
     async def _select_recovery_cohort(self, locked: set[str], maximum: int):
@@ -808,6 +816,7 @@ class ProductionOrchestrator:
         desired, _ = self._select_with_reserved_owners(reserved, maximum)
         healthy = {c.owner_key for c in desired}
         changed = False
+        holds_before = dict(self._sticky_recovery.economic_holds)
         for owner, (_, symbol) in tuple(self._sticky_markets.items()):
             previous = self._sticky_recovery.failures.get(owner)
             if owner in locked or owner in healthy:
@@ -815,13 +824,18 @@ class ProductionOrchestrator:
                     self._owner_event("sticky_owner_recovered" if owner in healthy else "sticky_owner_protected",
                                       owner, symbol, "quoting_checks_passed" if owner in healthy else "inventory_or_stream_hold")
                     changed = True
-                self._sticky_recovery.observe(owner, None, _utc_now())
+                self._sticky_recovery.observe(owner, None, _utc_now(),
+                                              preserve_economic_hold=owner in locked)
                 continue
             reason = self._owner_failure_reason(symbol)
             available = (not self._stream_holds and not self._read_recovery_attempts
                          and not self._reward_program_paused and self._book_fresh(symbol)
                          and self.account.snapshots_fresh and self.account.equity_classification_complete)
-            mature = self._sticky_recovery.observe(owner, reason, _utc_now(), evidence_available=available)
+            protected = self._sticky_recovery.protect_economics(owner, reason, _utc_now())
+            if owner not in holds_before and owner in self._sticky_recovery.economic_holds:
+                self._owner_event("sticky_owner_daily_reserved", owner, symbol, reason)
+            mature = self._sticky_recovery.observe(owner, reason, _utc_now(),
+                                                   evidence_available=available and not protected)
             if previous is None or previous.reason != reason:
                 self._owner_event("sticky_owner_recovery_hold", owner, symbol, reason)
                 changed = True
@@ -852,6 +866,14 @@ class ProductionOrchestrator:
                 self._owner_event("sticky_owner_recovered", owner, symbol, "fresh_post_proof_checks_passed")
                 changed = True
                 continue
+            fresh_reason = self._owner_failure_reason(symbol)
+            if (self._sticky_recovery.protect_economics(owner, fresh_reason, _utc_now())
+                    or fresh_reason != reason):
+                # An awaited proof can change the failure classification. A new
+                # economic hold or different fault needs its own recovery period.
+                self._sticky_recovery.observe(owner, fresh_reason, _utc_now(), evidence_available=False)
+                changed = True
+                continue
             if (not self._book_fresh(symbol) or self._stream_holds or self._read_recovery_attempts
                     or self._reward_program_paused or symbol in self._exit_workers
                     or symbol in self._exit_uncertain or self.journal.pending_exit(symbol)
@@ -868,8 +890,9 @@ class ProductionOrchestrator:
             self._sticky_recovery.observe(owner, None, _utc_now())
             changed = True
             break  # No stale pre-proof ranking can release a second owner.
-        if changed or time.monotonic() - self._sticky_recovery_saved_at >= 30:
-            self.journal.set_runtime_state("sticky_recovery_v1", self._sticky_recovery.dumps(), updated_at=_utc_now())
+        if (changed or holds_before != self._sticky_recovery.economic_holds
+                or time.monotonic() - self._sticky_recovery_saved_at >= 30):
+            self.journal.set_runtime_state("sticky_recovery_v2", self._sticky_recovery.dumps_state(), updated_at=_utc_now())
             self._sticky_recovery_saved_at = time.monotonic()
         desired, owners = self._select_with_reserved_owners(reserved, maximum)
         return desired, owners, reserved
