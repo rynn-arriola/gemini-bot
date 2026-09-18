@@ -249,7 +249,7 @@ class QueueShadow:
         return {
             "version": 1, "mode": "shadow_only", "used_for_trading": False,
             "exact_queue_position_available": False, "live_pilot_ready": False,
-            "reason": "calibration_and_pilot_execution_integration_pending",
+            "reason": "reporting_only_not_live_execution_authority",
             "error_type": self.error, "markets": rows,
             "cancel_measurement": {
                 "scope": "local_call_to_terminal_confirmation_including_admission_and_proof_not_exchange_latency",

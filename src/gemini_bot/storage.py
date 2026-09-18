@@ -1089,8 +1089,18 @@ class SQLiteJournal:
 
 
 def shared_control_directory() -> Path:
-    """Host-wide authority, independent of output folder and API-key rotation."""
-    return Path(os.environ["LOCALAPPDATA"]) / "GeminiRewardBot" / "control"
+    """One user-wide authority outside MSIX AppData write virtualization.
+
+Packaged operator processes can see redirected WAL/SHM/lock files under
+LocalCache while an unpackaged Scheduled Task sees the real AppData files.
+Never combine those views or silently create an empty replacement journal.
+An existing AppData deployment requires an explicit native, verified migration.
+"""
+    control = Path(os.environ["USERPROFILE"]) / "GeminiRewardBot" / "control"
+    legacy = Path(os.environ["LOCALAPPDATA"]) / "GeminiRewardBot" / "control"
+    if not (control / "production.sqlite").exists() and (legacy / "production.sqlite").exists():
+        raise RuntimeError("native verified control-journal migration required; refusing empty authority")
+    return control
 
 
 class WindowsOwnerLock(AbstractContextManager["WindowsOwnerLock"]):

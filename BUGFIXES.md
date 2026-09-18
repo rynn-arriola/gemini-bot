@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 17 — packaged operator and native runner had different AppData WAL views
+
+The packaged operator's apparent control journal omitted 22 new native-runner intents because AppData WAL/SHM/lock writes were redirected to a package cache. The actual native journal passed integrity and terminal/flat checks; the mixed packaged base/WAL view did not. Production was drained, a native consistent backup was verified, and every table was explicitly preserved into a user-profile control directory outside AppData. Runtime now uses that shared directory and refuses blank startup when legacy authority exists. Real native/packaged hash agreement and second-owner rejection passed before restart. This changes neither accounting baselines nor HARD. [Evidence](docs/CONTROL_LOCATION_2026-09-17.md).
+
 ## September 17 — failed background worker incorrectly closed the session normally
 
 V17's private venue-restart disconnects and concurrent public-shard cancel-proof timeouts halted the gate between main-loop iterations. The loop then skipped retrieval of the worker exception and recorded `closed` after draining flat, preventing the intended bounded transient recovery. Completed worker failures are now retrieved before normal-close classification. The actual activation-loop regression reproduces the inter-iteration HALT and reaches `recoverable_flat` only after synthetic successful drain. Unknown/permanent errors, incomplete drain and HARD retain existing blocks; this neither retries an ambiguous cancel nor fixes the external venue outage. [Evidence](docs/QUEUE_PILOT_EXECUTION_2026-09-17.md).

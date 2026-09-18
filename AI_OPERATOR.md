@@ -28,6 +28,8 @@ The prior paper observer under `scripts/` and `data/` is retained as research ev
 
 ## Platform boundary
 
+The canonical authority directory is `%USERPROFILE%\GeminiRewardBot\control`, outside AppData. MSIX-packaged operator processes can virtualize AppData WAL/SHM/lock files while the native Scheduled Task sees the physical files. Never use the legacy `%LOCALAPPDATA%` directory or a package-cache view for new preparation, permits, accounting or ownership. Existing deployments require explicit native verified migration; missing new authority with an existing legacy database fails closed, never starts a blank ledger. The September 17 migration preserved every table and both old/cache copies. See `docs/CONTROL_LOCATION_2026-09-17.md`.
+
 The supported host is native Windows. Use PowerShell, Windows paths, a Windows process supervisor/task mechanism, and Windows-compatible locking. Do not introduce dependencies on Ubuntu, WSL, Bash, systemd, cron, `fcntl`, or POSIX signals.
 
 ## Documentation discipline
