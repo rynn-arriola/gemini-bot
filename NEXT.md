@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Next controlled deployment:** integrate verified `fix/daily-sticky-economics` with fresh build-bound authority and observe economic reservations/recovery. Source work does not activate the new retention policy in running v24. Slot reservation can reduce live order breadth while economics are invalid; it grants no uptime or order permission. [Details](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).
+- **V25 daily sticky deployment completed.** Continue read-only observation of profitability-only reservations, same-owner recovery and post-midnight fresh grace. Initial acceptance found 32 owned orders/16 markets, zero positions, five healthy public shards and three economic reservations; reserved idle slots grant no uptime or order permission. [Details](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).
 
 - **V24 controlled deployment completed.** Continue read-only observation of real promotion, requeue/demotion, natural fills/exits and unaffected markets. The initial 34-order/17-market flat acceptance proves startup health, not long-run behavior, queue position, snapshot qualification or reward. Do not extend the unchanged envelope without a new owner decision. [Evidence](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
 

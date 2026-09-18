@@ -4,7 +4,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **Daily sticky-economics candidate verified:** `fix/daily-sticky-economics` reserves existing owners through the current Eastern day during profitability-only failures, while invalid orders still cancel. Durable reservations survive restarts; persistent failure gets fresh grace after midnight, never automatic renewal. 973 production + 28 script tests pass. Current main/v24 remains unchanged; read-only verification found 32 orders/16 markets, zero positions and no holds. [Behavior and deployment handoff](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).
+- **Daily sticky economics v25 is deployed and running.** V24 drained to `stopped_flat`; fresh preparation proved the venue flat/order-free, verified a new backup, preserved sticky/economic history and created exact build/policy/account authority with no uptime override. Initial authenticated acceptance found 32 owned size-15 orders across 16 markets, zero positions, all five public shards connected, no read/stream holds or stderr errors, and a RUNNING supervisor with zero restarts. Three profitability-only owners were already reserved through Eastern midnight rather than rotated. [Behavior and deployment evidence](docs/DAILY_STICKY_ECONOMICS_2026-09-18.md).
 
 - **Adaptive transition repair v24 is deployed and running.** Own cancellation no longer resets otherwise healthy warmup evidence; cancellation still blocks entry until terminal/flat proof, later depth and cooldown. The owner-approved restart completed with a fresh verified backup and exact build/policy/account authority. Initial authenticated acceptance found 34 canonically owned size-15 orders across 17 markets, zero positions, five healthy public shards, no read/stream holds or backup error, and a RUNNING supervisor with zero restarts. [Diagnosis, tests and deployment evidence](docs/ADAPTIVE_TRANSITION_REPAIR_2026-09-18.md).
 
@@ -34,7 +34,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Active runtime directory: `data/production-20260918-adaptive-transition-v24`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
+Active runtime directory: `data/production-20260918-daily-sticky-v25`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.
