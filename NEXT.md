@@ -2,9 +2,9 @@
 
 ## Current release
 
-- **All-selected integration and offline verification are complete, not deployed.** The shared rule now follows selected owners/replacements within 20/40 capacity; state cleanup, cold starts, partial fills/no-buyer/exact exit, proof pacing and full-width shared quota are tested. 972 production/script tests pass. [Restart handoff](docs/ALL_SELECTED_ADAPTIVE_2026-09-18.md).
+- **All-selected v23 is live under the approved shared envelope.** Initial acceptance passed with exact build/policy/account authority, zero positions, owned resting orders, five healthy public shards and no holds/restarts. Continue read-only observation through natural promotions/demotions, fills/exits and recovery; do not induce fills/faults or edit the active source/configuration.
 
-- **Shared settings response and deployment remain:** [September 18 review](docs/ADAPTIVE_SETTINGS_PROPOSAL_2026-09-18.md) proposes a 250-contract buffer, full-burst reserve, 1.5 depth multiplier, ten-minute warmup, one-minute stable promotion, ten-second cooldown/cancellation budget and 250-contract requeue gain. The explicit settings question remains unanswered; the valid all-selected draft is non-active. Review its September 19 05:45 ET expiry if delayed. Later deployment needs a separate restart instruction, controlled source/configuration promotion, fresh account/build/policy authority and user launch. No hot edit or old v22 permit/helper reuse. Two markets are execution research samples, never a permanent cap or manual calibration requirement.
+- **Before the September 19 05:45 ET adaptive expiry:** review live evidence and make a new explicit owner decision only if renewal or changed settings are desired. Without renewal the service remains 24/7 and safely uses its one-tick fallback. Do not infer reward qualification or queue position from local presence.
 
 ## Earlier implementation checkpoints (historical)
 
@@ -20,7 +20,7 @@ The following release-preparation notes are historical; the user has since start
 
 ## Live evidence still required
 
-**Best-bid live acceptance remains unfinished.** All-selected implementation is now present, not a future coding prerequisite. Review/approve the common expiring settings and concrete activation scope, deploy with fresh authority and observe actual joins/cancel/proof/requeue/fallback and unaffected markets. Optional two-name research mode stays fixed; explicit all-selected mode automatically admits replacements through normal ownership/cold-start checks. Minute archives cannot establish sub-second races or execution P&L. Do not require manual calibration per market, ask for unspecified waiting, or describe code tests as live acceptance.
+**Initial startup acceptance is complete; long-run adaptive acceptance remains unfinished.** Observe actual joins/cancel/proof/requeue/fallback and unaffected markets under natural conditions. Minute archives cannot establish sub-second races or execution P&L. Do not require manual calibration per market or describe code tests/startup alone as long-run acceptance.
 
 - Best-bid acceptance: measure natural cancellation tails and gaps, distinguish operator drain/recovery from normal refresh, and verify reviewed policy-bound behavior. The September 18 settings review supersedes the old V18 zero-cancellation-sample checkpoint. No induced fills/faults, automatic renewal or silent research-to-all-selected policy change.
 - Observe natural partial/full fills, exact exits/no-buyer isolation, shard/private recovery and long-run continuity. Tests are not live acceptance. No induced fills/faults or HARD bypass.

@@ -4,9 +4,9 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **All-selected source preparation completed on `feature/adaptive-queue-policy`, not deployed.** Explicit v5 scope supports every selected market and automatic replacements, bounded at 20 markets/40 orders. Research remains optional v4 two-symbol scope, not the finished strategy's limit. New members warm up one tick back; shared parameters replace manual per-market tables. Full-width guards, scoped partial-fill/no-buyer/exact-exit flow, shared quota and bounded proof work pass verification. **944 production + 28 script tests = 972 passed**, plus compilation/offline validation. [Release and restart handoff](docs/ALL_SELECTED_ADAPTIVE_2026-09-18.md).
-- **Current main remains `840813b`, unchanged v2 one-tick size-15 policy.** At the approximately 07:03 ET read-only checkpoint: 38 canonically owned orders/19 markets, zero positions, healthy journal/build-policy identity and no observer/archive errors. The 06:52 ET native heartbeat was fresh RUNNING/quoting with no read/stream holds. No live source/configuration/process/order/permit changes occurred in this work.
-- **Policy draft prepared, numeric approval pending:** the [common-settings proposal](docs/adaptive_all_selected_proposal_2026-09-18.json) builds a separate non-active v5 draft and preserves every base risk limit. The explicit settings question remains unanswered. Remaining: settings response, later authorized controlled deployment with fresh authority/user launch, and actual live acceptance. No further known all-market integration work is deferred. No fill-avoidance, reward or crash-free guarantee.
+- **All-selected adaptive v23 is deployed and running.** Owner-approved v5 policy applies the common rule to all selected markets/replacements within the unchanged 20-owner/40-order limits. The old v22 run drained to `stopped_flat` at 07:11 ET; fresh authenticated preparation proved zero positions/orders, healthy journal and backup, preserved economic/sticky history and a clear non-HARD window. Exact build/policy/account-bound v7 authority then launched the persistent task from `main` `b98ced9`.
+- **Initial live acceptance passed at approximately 07:19 ET.** Authenticated REST proved 26 canonically owned size-15 orders across 13 markets and zero positions; a nearby heartbeat reported 24 orders as normal concrete economics changed. The engine was `quoting`, all five public shards were connected, the private/account path was active, the supervisor/task were RUNNING, and there were no entry or stream holds, errors or restarts. All 20 selected owners started in the expected one-tick fallback/warmup mode; best-bid promotion requires the approved continuous evidence.
+- **The adaptive envelope expires September 19 at 05:45 ET and is not auto-renewed.** Expiry, insufficient evidence or a market-local adaptive fault falls back to normal one-tick quoting rather than stopping unrelated markets. This is initial acceptance, not a guarantee of fill avoidance, rewards, profit or crash-free long-run behavior. Natural fills/exits, promotions/demotions, recovery and reward accounting still require observation.
 
 ## Earlier preparation checkpoints (historical)
 
@@ -30,8 +30,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Active measurement directory: `data/production-20260917-one-tick-measurement-v22`. Its current permit belongs to the active `840813b` run; never reuse it for this candidate branch. Use read-only `scripts/check_runtime.ps1` from the active checkout to inspect that run.
-The enable-later branch is separate source only. Future source/policy deployment still requires fresh exact-build/account/policy authority and normal reconciliation, followed by owned resting-order acceptance. User must initiate live trading. Best-bid remains disabled pending reviewed calibration; the next-day review is user-initiated, not scheduled.
+Active runtime directory: `data/production-20260918-adaptive-all-selected-v23`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.
