@@ -15,6 +15,7 @@ import re
 
 from .config import DEFAULT_POLICY_PATH, load_policy
 from .queue_pilot import parse_pilot_policy
+from .adaptive_queue import parse_adaptive_policy
 from .queue_shadow import aware
 
 
@@ -51,15 +52,15 @@ def build_candidate(base_path: Path, review: dict, *, now: datetime) -> dict:
             or any(not isinstance(s, str) or not s or s.strip().upper() != s for s in owners)
             or len(set(owners)) != len(owners)):
         raise ValueError("invalid incumbent symbol snapshot")
-    pilot = parse_pilot_policy(review['queue_pilot'])
+    adaptive = isinstance(review['queue_pilot'], dict) and 'adaptive' in review['queue_pilot']
+    pilot = (parse_adaptive_policy(review['queue_pilot']) if adaptive
+             else parse_pilot_policy(review['queue_pilot']))
     if pilot is None or not pilot.symbols.issubset(owners):
         raise ValueError("pilot requires exactly two supplied incumbent symbols")
-    for _, yes, no in pilot.markets:
-        for calibration in (yes, no):
-            if calibration.expires_at <= now:
-                raise ValueError("calibration is expired")
+    if pilot.expired(now):
+        raise ValueError("calibration is expired")
     replace(strategy, queue_pilot=pilot).validate()
-    return {**base, 'policy_version': 3, 'queue_pilot': review['queue_pilot']}
+    return {**base, 'policy_version': 4 if adaptive else 3, 'queue_pilot': review['queue_pilot']}
 
 
 def stage_candidate(base_path: Path, review_path: Path, *, draft_name: str,

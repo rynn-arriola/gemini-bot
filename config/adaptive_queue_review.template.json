@@ -1,0 +1,20 @@
+{
+  "reviewed_at": null,
+  "incumbent_symbols": [],
+  "queue_pilot": {
+    "symbols": [],
+    "adaptive": {
+      "warmup_seconds": null,
+      "promotion_seconds": null,
+      "observation_gap_seconds": null,
+      "cancel_budget_seconds": null,
+      "buffer_contracts": null,
+      "burst_multiplier": null,
+      "depth_multiplier": null,
+      "minimum_requeue_gain": null,
+      "refresh_cooldown_seconds": null,
+      "expires_at": null,
+      "evidence_reference": ""
+    }
+  }
+}

@@ -1,8 +1,12 @@
 # Gemini current status
 
-Updated September 17, 2026. This is a checkpoint, not a perpetual venue-state guarantee.
+Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state guarantee.
 
 ## Operational truth
+
+- **Adaptive source is isolated on `feature/adaptive-queue-policy`, not deployed.** Shared reviewed parameters now derive separate YES/NO depth/flow scenarios without per-market threshold tables. Warmup uses one-tick quoting; two explicitly scoped incumbents can promote only after stable evidence and confirmed cancellation/fresh proof, or fall back under the same barriers. All-market expansion remains prohibited. The live v2 policy is unchanged. [Design, evidence and gates](docs/ADAPTIVE_QUEUE_2026-09-18.md).
+- **Latest read-only runtime heartbeat: September 18 05:32:56 ET**, main still on `840813b`, RUNNING/quoting, native persistent task Running, no read/stream holds. This heartbeat did not independently query venue orders. No live process, permit, policy, source or order was changed during adaptive construction.
+- **Remaining:** review/approve the shared envelope, choose two current incumbents, controlled source/policy deployment with fresh authority and user launch, then observed pilot acceptance. Offline tests and minute-archive sensitivity are not live safety, fill avoidance or profitability validation.
 
 - **Running production remains `840813b` on main.** User launched v22 at 21:03 ET; first orders rested at 21:04 ET. The latest read-only acceptance during enable-later work confirmed 40 canonically owned size-15 orders on 20 markets, zero positions, healthy integrity, matching active build/policy and no measurement/archive errors. Normal quotes use one tick; pilot remains disabled. No task, process, permit, configuration or order mutation occurred during this isolated work.
 - **New source is isolated, not deployed:** `feature/pilot-enable-ready` supports one-tick nonpilot markets alongside the exactly-two-incumbent best-bid pilot and adds an offline reviewed-policy draft builder. **827 production + 28 script tests (855 total)**, compilation and offline validation passed. No live thresholds/symbols were chosen. [Enable-later workflow](docs/PILOT_ENABLE_LATER_2026-09-17.md).

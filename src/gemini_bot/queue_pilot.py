@@ -34,6 +34,9 @@ class PilotPolicy:
     def calibration(self, symbol, outcome):
         return next(y if outcome is Outcome.YES else n for s, y, n in self.markets if s == symbol)
 
+    def expired(self, now):
+        return any(now >= c.expires_at for _, y, n in self.markets for c in (y, n))
+
 
 def parse_pilot_policy(raw):
     if raw is None:
@@ -89,6 +92,9 @@ class QueuePilot:
         self.disabled = {}
         self.reasons = {}
         self.cancel_sequence = {}
+
+    def calibration(self, symbol, outcome):
+        return self.policy.calibration(symbol, outcome)
 
     def invalidate(self, symbol):
         self.markets.pop(symbol, None)
@@ -202,7 +208,7 @@ class QueuePilot:
             if order is not None and (a is None or a.client_id != order.client_order_id):
                 self.reasons[symbol] = "actual_order_anchor_missing"
                 return "withdraw"
-            c = self.policy.calibration(symbol, outcome)
+            c = self.calibration(symbol, outcome)
             since = (D(str((now - self.cooldown_at[symbol]).total_seconds()))
                      if symbol in self.cooldown_at else c.refresh_cooldown_seconds)
             observation = BidObservation(

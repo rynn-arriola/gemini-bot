@@ -25,6 +25,7 @@ from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
 from .queue_shadow import QueueShadow, ShadowArchive
 from .queue_pilot import QueuePilot
+from .adaptive_queue import AdaptivePolicy, AdaptiveQueuePilot
 from .journal_backup import JournalBackups, verify_journal
 from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
 from .capacity import MAX_ACTIVE_MARKETS
@@ -251,17 +252,41 @@ class ProductionOrchestrator:
         self._queue_archive = ShadowArchive(self.directory)
         self._queue_watch_symbols: set[str] = set()
         self._queue_live_orders: dict[str, Any] = {}
-        self.queue_pilot = QueuePilot(config.strategy.queue_pilot) if config.strategy.queue_pilot else None
+        self.queue_pilot = (AdaptiveQueuePilot(config.strategy.queue_pilot)
+            if isinstance(config.strategy.queue_pilot, AdaptivePolicy) else
+            QueuePilot(config.strategy.queue_pilot) if config.strategy.queue_pilot else None)
         self._pilot_proof_tasks: dict[str, asyncio.Task] = {}
         self._pilot_next_proof: dict[str, float] = {}
         self._pilot_proved: dict[str, tuple] = {}
+        self._adaptive_breach_saved = False
+        self._adaptive_storage_failure = None
         self.log.event(logging.INFO, "runner_created", read_only=read_only)
 
     def _rank_live_universe(self, *args, **kwargs):
         policy = self.config.strategy.queue_pilot
         if policy is not None:
-            kwargs["symbol_offsets"] = {s: 0 for s in policy.symbols}
+            kwargs["symbol_offsets"] = {s: 0 for s in policy.symbols if self._pilot_at_touch(s)}
         return rank_live_universe(*args, **kwargs)
+
+    def _pilot_at_touch(self, symbol):
+        pilot = self.queue_pilot
+        return bool(pilot is not None and symbol in pilot.policy.symbols
+                    and (not isinstance(pilot, AdaptiveQueuePilot) or pilot.modes[symbol] == 'best'))
+
+    def _adaptive_desired(self, symbol):
+        pilot = self.queue_pilot
+        if not isinstance(pilot, AdaptiveQueuePilot) or symbol not in pilot.policy.symbols:
+            return None
+        try:
+            return pilot.desired_mode(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
+                                      safe=self._pilot_safe(symbol))
+        except Exception as exc:
+            pilot.fail(symbol, exc)
+            return 'fallback'
+
+    def _adaptive_transition(self, symbol):
+        desired = self._adaptive_desired(symbol)
+        return desired is not None and desired != self.queue_pilot.modes[symbol]
 
     def _pilot_generation(self, symbol):
         return self._public_generation(symbol), self._stream_generation["private"]
@@ -341,10 +366,22 @@ class ProductionOrchestrator:
             return True
         if symbol not in pilot.markets:
             self._observe_queue_pilot(symbol)
+        adaptive = isinstance(pilot, AdaptiveQueuePilot)
+        desired = self._adaptive_desired(symbol) if adaptive else None
         task = self._pilot_proof_tasks.get(symbol)
         if task is not None and task.done():
             task.result()  # Unknown account/ownership failures remain fatal.
             self._pilot_proof_tasks.pop(symbol)
+        if (adaptive and desired == pilot.modes[symbol] == 'fallback'
+                and symbol not in pilot.proof_required and symbol not in pilot.settling
+                and symbol not in pilot.cooldown_at):
+            return True  # Initial normal quoting; no best-bid permission.
+        if adaptive and symbol in pilot.cooldown_at:
+            book = self.public.books.get(symbol)
+            if (book is None or book.last_update_id <= pilot.cancel_sequence.get(symbol, -1)
+                    or Decimal(str((_utc_now()-pilot.cooldown_at[symbol]).total_seconds()))
+                        < pilot.policy.limits.refresh_cooldown_seconds):
+                return False  # Do not spend a short-lived proof during cooldown.
         if not self._pilot_proof_current(symbol):
             pilot.proof_required.add(symbol)
         if symbol in pilot.proof_required:
@@ -352,6 +389,27 @@ class ProductionOrchestrator:
                     and time.monotonic() >= self._pilot_next_proof.get(symbol, 0)):
                 self._pilot_proof_tasks[symbol] = asyncio.create_task(self._pilot_flat_proof(symbol))
             return False
+        if adaptive:
+            # Mode changes happen only between pairs, not between maker legs.
+            # Even fallback after withdrawal needs terminal/flat proof, cooldown
+            # and a later public sequence. No observation clears this barrier.
+            if desired != pilot.modes[symbol] or desired == 'fallback':
+                book = self.public.books.get(symbol)
+                last = pilot.cooldown_at.get(symbol)
+                if (self.account.reducer.risk_adding_order_ids(symbol)
+                        or self.journal.has_nonterminal_intents(symbol)
+                        or not self._pilot_safe(symbol) or book is None
+                        or book.last_update_id <= pilot.cancel_sequence.get(symbol, -1)
+                        or (last is not None and Decimal(str((_utc_now()-last).total_seconds()))
+                            < pilot.policy.limits.refresh_cooldown_seconds)):
+                    return False
+                if desired != pilot.modes[symbol]:
+                    pilot.modes[symbol] = desired
+                    pilot.settling.discard(symbol)
+                    self.journal.audit('adaptive_queue_mode', {'symbol': symbol, 'mode': desired})
+                    return False  # Rerank at the new offset; never reuse candidate.
+                pilot.settling.discard(symbol)
+                return True
         return self._pilot_advice(symbol, allow_entry=True) == "allow"
 
     def _observe_queue_shadow(self, symbol: str, *, frame: dict | None = None) -> None:
@@ -409,13 +467,46 @@ class ProductionOrchestrator:
             return {"mode": "unavailable", "used_for_trading": False, "error_type": observer.error}
 
     def _queue_cancel_done(self, started: float, task: asyncio.Task) -> None:
+        elapsed = time.monotonic() - started
+        succeeded = not task.cancelled() and task.exception() is None
+        if isinstance(self.queue_pilot, AdaptiveQueuePilot):
+            try:
+                self.queue_pilot.record_cancel(elapsed, succeeded=succeeded)
+            except Exception:
+                self.queue_pilot.cancel_envelope_breached = True
+            if self.queue_pilot.cancel_envelope_breached and not self._adaptive_breach_saved:
+                try:
+                    self.journal.set_runtime_state(self.queue_pilot.policy.breach_key,
+                        json.dumps({'breached': True, 'maximum_seconds': str(self.queue_pilot.cancel_maximum)}),
+                        updated_at=_utc_now())
+                    self._adaptive_breach_saved = True
+                except Exception as exc:
+                    # Persistence/integrity failure is not a market-local signal.
+                    # Surface it after the loop as well as blocking new sends.
+                    self._adaptive_storage_failure = exc
+                    self.gate.halt()
         observer = getattr(self, "queue_shadow", None)
         if observer is not None:
             try:
-                observer.record_cancel(time.monotonic() - started,
-                                       succeeded=not task.cancelled() and task.exception() is None)
+                observer.record_cancel(elapsed, succeeded=succeeded)
             except Exception as exc:
                 observer.disable(exc)
+
+    def _restore_adaptive_breach(self):
+        pilot = self.queue_pilot
+        if not isinstance(pilot, AdaptiveQueuePilot):
+            return
+        raw = self.journal.get_runtime_state(pilot.policy.breach_key)
+        if raw is None:
+            return
+        value = json.loads(raw)
+        if set(value) != {'breached', 'maximum_seconds'} or value['breached'] is not True:
+            raise RuntimeError('invalid durable adaptive cancellation breach')
+        maximum = Decimal(value['maximum_seconds'])
+        if not maximum.is_finite() or maximum < 0:
+            raise RuntimeError('invalid durable adaptive cancellation maximum')
+        pilot.cancel_maximum = max(pilot.cancel_maximum, maximum)
+        pilot.cancel_envelope_breached = self._adaptive_breach_saved = True
 
     def _write_status(self, phase: str, activated: bool, reason: str) -> None:
         clock = time.monotonic()
@@ -764,6 +855,8 @@ class ProductionOrchestrator:
             self._stream_recovery_task.result()
 
     def _check_background_failures(self, *workers) -> None:
+        if self._adaptive_storage_failure is not None:
+            raise self._adaptive_storage_failure
         self._check_stream_recovery()
         tasks = (*workers, *self._tasks, *self._adverse_tasks.values(),
                  *self._exit_workers.values(), *self._cancel_tasks.values())
@@ -1777,6 +1870,7 @@ class ProductionOrchestrator:
         canonical.set_runtime_state("credential_identity", identity, updated_at=_utc_now())
         self.journal.close()
         self.journal = canonical
+        self._restore_adaptive_breach()
         if self._journal_backups is None:
             self._journal_backups = JournalBackups(canonical_path)
             self._journal_backups.start()
@@ -2295,7 +2389,14 @@ class ProductionOrchestrator:
                 raise EntryStateChangedBeforeSend(
                     "entry exposure changed while waiting to send"
                 )
-            if self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+            if self._adaptive_transition(symbol):
+                raise QuoteChangedBeforeSend("adaptive mode changed before send")
+            if (isinstance(self.queue_pilot, AdaptiveQueuePilot)
+                    and symbol in self.queue_pilot.policy.symbols
+                    and (symbol in self.queue_pilot.proof_required
+                         or (symbol in self.queue_pilot.cooldown_at and not self._pilot_proof_current(symbol)))):
+                raise QuoteChangedBeforeSend("adaptive transition proof required")
+            if self._pilot_at_touch(symbol):
                 if (params.get("timeInForce") != "MOC" or not self._pilot_proof_current(symbol)
                         or self._pilot_advice(symbol, allow_entry=True) != "allow"):
                     raise QuoteChangedBeforeSend("queue pilot evidence changed before send")
@@ -2603,7 +2704,11 @@ class ProductionOrchestrator:
         ]
         if not working:
             return False
-        if self.queue_pilot is not None and symbol in self.queue_pilot.policy.symbols:
+        if self._adaptive_transition(symbol):
+            self._record_quote_cancel(symbol, "adaptive_mode_transition")
+            await self._cancel_symbol_entries(symbol)
+            return True
+        if self._pilot_at_touch(symbol):
             if self._pilot_advice(symbol) != "keep":
                 self._record_quote_cancel(symbol, "queue_pilot:" + self.queue_pilot.reasons.get(symbol, "evidence"))
                 await self._cancel_symbol_entries(symbol)
@@ -2681,8 +2786,8 @@ class ProductionOrchestrator:
             if working:
                 await self._cancel_symbol_entries(candidate.symbol)
             return
-        if (working and self.queue_pilot is not None and candidate.symbol in self.queue_pilot.policy.symbols
-                and self._pilot_advice(candidate.symbol) != "keep"):
+        if (working and (self._adaptive_transition(candidate.symbol)
+                or (self._pilot_at_touch(candidate.symbol) and self._pilot_advice(candidate.symbol) != "keep"))):
             await self._cancel_symbol_entries(candidate.symbol)
             return
         expected = {
@@ -3680,7 +3785,7 @@ class ProductionOrchestrator:
             if (permit.permit_version != 7 or not self.queue_pilot.policy.symbols <= incumbents
                     or not self.queue_pilot.policy.symbols <= self._permitted_symbols):
                 raise RuntimeError("queue pilot must name exactly two existing permitted owners")
-            if any(_utc_now() >= c.expires_at for _, y, n in self.queue_pilot.policy.markets for c in (y, n)):
+            if self.queue_pilot.policy.expired(_utc_now()):
                 raise RuntimeError("queue pilot calibration expired before activation")
         if not self._permitted_symbols <= (
             {item.rules.symbol for item in self.universe} | self._inventory_catalog_holds

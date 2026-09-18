@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **September 18 adaptive implementation supersedes manual per-market calibration as the candidate approach.** `feature/adaptive-queue-policy` is isolated, disabled and not deployed. The same shared rule computes side-specific thresholds and performs safe one-tick/best-bid transitions for two fixed pilot symbols. No real envelope/symbols have been configured. Existing running main is untouched. [Evidence and acceptance checklist](docs/ADAPTIVE_QUEUE_2026-09-18.md).
+
 - **Enable-later source complete, isolated and not deployed:** one-tick nonpilot compatibility plus an offline candidate builder passed 855 tests. Active v22 remains on `840813b`, one tick, size 15, pilot disabled; recent read-only venue proof found 40 owned orders/20 markets and no positions. No live interruption or configuration change. [Workflow](docs/PILOT_ENABLE_LATER_2026-09-17.md).
 
 The following release-preparation notes are historical; the user has since started v22:
@@ -12,7 +14,7 @@ The following release-preparation notes are historical; the user has since start
 
 ## Live evidence still required
 
-**Best-bid live acceptance remains unfinished; the known enable-later code work is complete on this branch.** Measurement is running. Remaining work is evidence review, explicit calibrated two-incumbent configuration, owner approval, controlled deployment/fresh authority and observed live pilot behavior. One-tick nonpilot compatibility is implemented and tested but not deployed. Evidence may expose new issues; no automatic enablement or sufficiency claim.
+**Best-bid live acceptance remains unfinished.** The adaptive candidate adds reusable rules, not permission to apply arbitrary defaults. Review a common expiring envelope (latency allowance, burst/depth multipliers, buffer, continuity, promotion and cooldown), stage exactly two current incumbents, obtain owner approval, deploy with fresh authority and observe the pilot. Wider scope/replacement auto-admission requires a separate approved rollout; the pilot keeps its exact two symbols even if one expires. Minute archives cannot establish sub-second races or execution P&L. Do not ask for an unspecified amount of waiting or describe code tests as evidence sufficiency.
 
 - Best-bid trial: collect natural cancellation success/failure timings with depth and side-specific sell flow, distinguish operator drain/recovery observations, select exactly two existing owners and reviewed expiring thresholds, then validate fresh policy-bound authority. V18 had 30 complete flow windows but zero natural cancellation samples. Warmup/test thresholds are not calibration; no automatic expansion.
 - Observe natural partial/full fills, exact exits/no-buyer isolation, shard/private recovery and long-run continuity. Tests are not live acceptance. No induced fills/faults or HARD bypass.

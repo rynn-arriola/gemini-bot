@@ -7,6 +7,7 @@ import json
 import os
 from .capacity import MAX_PENDING_ORDERS
 from .queue_pilot import PilotPolicy, parse_pilot_policy
+from .adaptive_queue import AdaptivePolicy, parse_adaptive_policy
 
 
 class ConfigurationError(ValueError):
@@ -22,9 +23,11 @@ class StrategyConfig:
     max_quote_distance: Decimal = Decimal("0.10")
     reward_size_cap: Decimal = Decimal("250")
     stale_book_seconds: Decimal = Decimal("3")
-    queue_pilot: PilotPolicy | None = None
+    queue_pilot: PilotPolicy | AdaptivePolicy | None = None
 
     def validate(self) -> None:
+        if isinstance(self.queue_pilot, AdaptivePolicy) and self.quote_offset_ticks != 1:
+            raise ConfigurationError("adaptive pilot requires one-tick fallback")
         if self.queue_pilot is not None and (
             self.quote_quantity != Decimal("15") or self.quote_offset_ticks not in {1, 2}
         ):
@@ -139,9 +142,9 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         "max_inventory_age_seconds", "force_exit_before_expiry_seconds", "monetary_stop_authorities",
     }
     version = raw.get("policy_version")
-    if version == 3:
+    if version in {3, 4}:
         required.add("queue_pilot")
-    if set(raw) != required or version not in {2, 3} or raw["platform"] != "windows":
+    if set(raw) != required or version not in {2, 3, 4} or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
         raise ConfigurationError("risk-window clock does not match approved Eastern windows")
@@ -154,7 +157,8 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
     if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
         raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
     try:
-        pilot = parse_pilot_policy(raw.get("queue_pilot"))
+        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version == 4
+                 else parse_pilot_policy(raw.get("queue_pilot")))
     except (ValueError, TypeError, ArithmeticError, AttributeError) as exc:
         raise ConfigurationError("invalid queue pilot calibration") from exc
     strategy = StrategyConfig(
