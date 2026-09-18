@@ -272,7 +272,8 @@ class ProductionOrchestrator:
 
         Existing retirement paths supply authenticated terminal/flat proof. Do
         not discard local safety state while orders, inventory or proof work
-        remain. New owners can use normal fallback until a retained slot clears.
+        remain. Legacy adaptive owners may use normal fallback while waiting;
+        stay-best owners cannot enter until their proof-tracked slot is present.
         """
         pilot = self.queue_pilot
         if not isinstance(pilot, AdaptiveQueuePilot) or pilot.policy.scope != 'all_selected':
@@ -319,7 +320,7 @@ class ProductionOrchestrator:
                                       safe=self._pilot_evidence_safe(symbol))
         except Exception as exc:
             pilot.fail(symbol, exc)
-            return 'fallback'
+            return 'best' if pilot.policy.placement_mode == 'stay_best' else 'fallback'
 
     def _adaptive_transition(self, symbol):
         desired = self._adaptive_desired(symbol)
@@ -417,6 +418,9 @@ class ProductionOrchestrator:
 
     def _pilot_entry_ready(self, symbol):
         pilot = self.queue_pilot
+        if (isinstance(pilot, AdaptiveQueuePilot) and pilot.policy.placement_mode == 'stay_best'
+                and symbol not in pilot.symbols):
+            return False  # A watched reserve cannot skip the selected-owner proof path.
         if pilot is None or symbol not in pilot.symbols:
             return True
         if symbol not in pilot.markets:

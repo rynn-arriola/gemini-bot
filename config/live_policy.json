@@ -1,8 +1,8 @@
 {
-  "policy_version": 5,
+  "policy_version": 6,
   "platform": "windows",
   "quote_quantity": "15",
-  "quote_offset_ticks": 1,
+  "quote_offset_ticks": 0,
   "target_uptime": "0.75",
   "max_pending_orders": 40,
   "max_two_sided_quotes": 20,
@@ -20,6 +20,7 @@
   "monetary_stop_authorities": 1,
   "queue_pilot": {
     "scope": "all_selected",
+    "placement_mode": "stay_best",
     "adaptive": {
       "warmup_seconds": "600",
       "promotion_seconds": "60",

@@ -909,6 +909,8 @@ class OrchestratorWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_quote_pair_places_yes_then_ack_then_no(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             strategy, risk = load_policy()
+            # Exercise basic legacy leg ordering independently of queue policy.
+            strategy = replace(strategy, queue_pilot=None, quote_offset_ticks=1)
             runtime = ProductionOrchestrator(
                 LiveConfig("account-example", "secret", "", True, strategy, risk),
                 Path(directory), public_shard_count=1,

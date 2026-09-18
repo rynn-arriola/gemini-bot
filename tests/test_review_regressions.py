@@ -49,7 +49,7 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         strategy, risk = load_policy()
         # Preserve the original size-20 incident fixture independently of policy.
-        strategy = replace(strategy, quote_quantity=D(20), quote_offset_ticks=2)
+        strategy = replace(strategy, quote_quantity=D(20), quote_offset_ticks=2, queue_pilot=None)
         self.runtime = ProductionOrchestrator(
             LiveConfig("account-review-fake", "fake-review-secret", "", True, strategy, risk),
             Path(self.temporary.name),

@@ -15,7 +15,7 @@ class OneTickTests(unittest.IsolatedAsyncioTestCase):
         self.r = self.fx.r
         strategy, risk = load_policy()
         # This suite exercises the one-tick fallback, independently of live pilot scope.
-        strategy = replace(strategy, queue_pilot=None)
+        strategy = replace(strategy, queue_pilot=None, quote_offset_ticks=1)
         self.assertEqual(strategy.quote_offset_ticks, 1)
         self.assertEqual(strategy.quote_quantity, D(15))
         self.assertIsNone(strategy.queue_pilot)

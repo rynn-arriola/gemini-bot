@@ -11,7 +11,7 @@ from decimal import Decimal as D
 import hashlib
 import json
 
-from .domain import Outcome
+from .domain import Outcome, Side
 from .guarded_bid import QueueCalibration
 from .queue_pilot import QueuePilot
 from .queue_shadow import aware, nonnegative
@@ -58,9 +58,12 @@ class AdaptivePolicy:
     market_symbols: tuple[str, ...]
     limits: AdaptiveLimits
     scope: str = 'research'
+    placement_mode: str = 'adaptive'
 
     def __post_init__(self):
         if (not isinstance(self.market_symbols, tuple)
+                or self.placement_mode not in {'adaptive', 'stay_best'}
+                or (self.placement_mode == 'stay_best' and self.scope != 'all_selected')
                 or self.scope not in {'research', 'all_selected'}
                 or (self.scope == 'research' and (len(self.market_symbols) != 2
                     or len(set(self.market_symbols)) != 2))
@@ -75,7 +78,8 @@ class AdaptivePolicy:
         return frozenset(self.market_symbols)
 
     def expired(self, now):
-        return now >= self.limits.expires_at
+        # In stay_best, only optional queue optimization expires.
+        return self.placement_mode != 'stay_best' and now >= self.limits.expires_at
 
     @property
     def breach_key(self):
@@ -91,7 +95,9 @@ class AdaptivePolicy:
 
 
 def parse_adaptive_policy(raw):
-    if (not isinstance(raw, dict) or set(raw) not in ({'symbols', 'adaptive'}, {'scope', 'adaptive'})
+    if (not isinstance(raw, dict) or set(raw) not in ({'symbols', 'adaptive'}, {'scope', 'adaptive'},
+                                                   {'scope', 'adaptive', 'placement_mode'})
+            or ('placement_mode' in raw and raw['placement_mode'] != 'stay_best')
             or ('symbols' in raw and not isinstance(raw['symbols'], list))
             or ('scope' in raw and raw['scope'] != 'all_selected')
             or not isinstance(raw['adaptive'], dict)
@@ -108,7 +114,7 @@ def parse_adaptive_policy(raw):
                 raise ValueError('adaptive decimal must be exact text or integer')
             parsed[key] = D(value)
     return AdaptivePolicy(tuple(raw.get('symbols', ())), AdaptiveLimits(**parsed),
-                          raw.get('scope', 'research'))
+                          raw.get('scope', 'research'), raw.get('placement_mode', 'adaptive'))
 
 
 @dataclass
@@ -126,7 +132,7 @@ class AdaptiveQueuePilot(QueuePilot):
         self._symbols = policy.symbols
         super().__init__(policy)
         self.evidence = {}
-        self.modes = {s: 'fallback' for s in policy.symbols}
+        self.modes = {s: self.initial_mode for s in policy.symbols}
         # Initial one-tick placement uses normal execution proofs. Transitions
         # and any subsequent cancellation require the stronger pilot barrier.
         self.proof_required.clear()
@@ -137,6 +143,10 @@ class AdaptiveQueuePilot(QueuePilot):
     @property
     def symbols(self):
         return self._symbols
+
+    @property
+    def initial_mode(self):
+        return 'best' if self.policy.placement_mode == 'stay_best' else 'fallback'
 
     def sync_selected(self, symbols):
         """Caller must prove retiring names terminal/flat before removing them.
@@ -155,7 +165,9 @@ class AdaptiveQueuePilot(QueuePilot):
             self.proof_required.discard(s)
             self.settling.discard(s)
         for s in names - self.symbols:
-            self.modes[s] = 'fallback'
+            self.modes[s] = self.initial_mode
+            if self.policy.placement_mode == 'stay_best':
+                self.proof_required.add(s)
         self._symbols = names
 
     def invalidate(self, symbol):
@@ -219,6 +231,11 @@ class AdaptiveQueuePilot(QueuePilot):
         aware(now)
         if symbol not in self.symbols:
             return 'fallback'
+        if self.policy.placement_mode == 'stay_best':
+            # Placement is an owner policy, never inferred from depth or flow.
+            # Advice and the orchestrator independently enforce safety/proof.
+            self.reasons[symbol] = 'stay_best_owner_policy'
+            return 'best'
         m, e, p = self.markets.get(symbol), self.evidence.get(symbol), self.policy.limits
         reason = None
         if (m is None or e is None or m.generation != generation or e.generation != generation
@@ -255,13 +272,69 @@ class AdaptiveQueuePilot(QueuePilot):
         return 'best'
 
     def advice(self, symbol, *, now, generation, orders, safe, allow_entry=False):
+        if self.policy.placement_mode == 'stay_best':
+            return self._stay_best_advice(symbol, now=now, generation=generation,
+                orders=orders, safe=safe, allow_entry=allow_entry)
         if self.desired_mode(symbol, now=now, generation=generation, safe=safe) != 'best':
             return 'withdraw'
         return super().advice(symbol, now=now, generation=generation, orders=orders,
                               safe=safe, allow_entry=allow_entry)
 
+    def _stay_best_advice(self, symbol, *, now, generation, orders, safe, allow_entry):
+        aware(now)
+        if symbol not in self.symbols:
+            return 'outside_pilot'
+        m = self.markets.get(symbol)
+        if (not safe or m is None or m.generation != generation
+                or symbol in self.disabled or now < m.observed_at):
+            self.reasons[symbol] = 'canonical_book_or_account_unavailable'
+            return 'withdraw'
+        working = [o for o in orders if o.symbol == symbol and o.working]
+        if ((working and symbol in self.proof_required)
+                or len(working) > 2 or len({o.outcome for o in working}) != len(working)
+                or any(o.side is not Side.BUY or o.cumulative_filled
+                    or o.remaining_quantity != D(15) or o.original_quantity != D(15) for o in working)):
+            self.reasons[symbol] = 'fill_or_invalid_pair'
+            return 'withdraw'
+        since = (D(str((now-self.cooldown_at[symbol]).total_seconds()))
+                 if symbol in self.cooldown_at else self.policy.limits.refresh_cooldown_seconds)
+        if not working:
+            if (symbol in self.proof_required
+                    or m.sequence <= self.cancel_sequence.get(symbol, -1)
+                    or since < self.policy.limits.refresh_cooldown_seconds):
+                self.reasons[symbol] = 'terminal_flat_depth_or_cooldown_required'
+                return 'wait'
+        # Price tracking is mandatory even when optional queue telemetry expires.
+        if any(o.price != m.prices[o.outcome] for o in working):
+            self.reasons[symbol] = 'best_price_changed'
+            return 'withdraw'
+        optional_ready = (not allow_entry and len(working) == 2
+            and now < self.policy.limits.expires_at and not self.cancel_envelope_breached
+            and since >= self.policy.limits.refresh_cooldown_seconds
+            and (now-m.started_at).total_seconds() >= float(self.policy.limits.warmup_seconds)
+            and (m.uncertain_until is None or now >= m.uncertain_until)
+            and (m.flow_clock is None or now >= m.flow_clock)
+            and symbol in self.evidence)
+        if optional_ready:
+            self._peaks(symbol, now)
+            for order in working:
+                a = m.anchors.get(order.outcome)
+                # Missing queue estimates never pretend to be queue protection.
+                if a is None or a.client_id != order.client_order_id:
+                    continue
+                ahead = a.scenario.ahead_scenario
+                gain = max(D(0), m.depths[order.outcome]-ahead)
+                if (ahead <= self.calibration(symbol, order.outcome).warning_ahead
+                        and gain >= self.policy.limits.minimum_requeue_gain):
+                    self.reasons[symbol] = 'estimated_queue_refresh_benefit'
+                    return 'withdraw'
+        self.reasons[symbol] = 'stay_best_accept_fill_risk'
+        return 'allow' if allow_entry else 'keep'
+
     def report(self):
         return {**super().report(), 'adaptive': True, 'scope': self.policy.scope, 'modes': dict(self.modes),
+            'placement_mode': self.policy.placement_mode,
+            'queue_settings_expiry_affects_placement': self.policy.placement_mode != 'stay_best',
             'cancel_maximum_seconds': str(self.cancel_maximum),
             'cancel_envelope_breached': self.cancel_envelope_breached,
             'thresholds_are_scenarios': True,

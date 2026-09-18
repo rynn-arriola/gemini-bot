@@ -149,6 +149,7 @@ class SelectedConfigTests(unittest.TestCase):
         base = json.loads(DEFAULT_POLICY_PATH.read_text())
         base.pop('queue_pilot', None)
         base['policy_version'] = 2
+        base['quote_offset_ticks'] = 1
         with tempfile.TemporaryDirectory() as d:
             base_path = Path(d)/'base.json'; base_path.write_text(json.dumps(base))
             value = build_candidate(base_path, review, now=NOW)

@@ -32,6 +32,7 @@ class StagingTests(unittest.TestCase):
         baseline = json.loads(DEFAULT_POLICY_PATH.read_text())
         baseline.pop('queue_pilot', None)
         baseline['policy_version'] = 2
+        baseline['quote_offset_ticks'] = 1
         self.baseline = json.dumps(baseline).encode()
         self.base.write_bytes(self.baseline)
         self.source = self.root / 'review.json'

@@ -60,7 +60,8 @@ def build_candidate(base_path: Path, review: dict, *, now: datetime) -> dict:
     if pilot.expired(now):
         raise ValueError("calibration is expired")
     replace(strategy, queue_pilot=pilot).validate()
-    version = 5 if adaptive and pilot.scope == 'all_selected' else 4 if adaptive else 3
+    version = (6 if adaptive and pilot.placement_mode == 'stay_best' else
+               5 if adaptive and pilot.scope == 'all_selected' else 4 if adaptive else 3)
     return {**base, 'policy_version': version, 'queue_pilot': review['queue_pilot']}
 
 
