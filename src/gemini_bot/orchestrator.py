@@ -25,6 +25,7 @@ from .config import DEFAULT_POLICY_PATH, LiveConfig
 from .continuity import RestingObservation
 from .queue_shadow import QueueShadow, ShadowArchive
 from .queue_pilot import QueuePilot
+from .journal_backup import JournalBackups, verify_journal
 from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
 from .capacity import MAX_ACTIVE_MARKETS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
@@ -135,6 +136,7 @@ class ProductionOrchestrator:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.journal = SQLiteJournal(self.directory / "production.sqlite")
         self.control_directory = shared_control_directory()
+        self._journal_backups: JournalBackups | None = None
         self.lock = WindowsOwnerLock(self.control_directory / "mutation-owner.lock")
         self._lifecycle_lock = asyncio.Lock()
         self._exit_uncertain: set[str] = set()
@@ -444,6 +446,7 @@ class ProductionOrchestrator:
                 },
             ), "exchange_reward_uptime": self.exchange_reward_uptime.metadata(now=_utc_now()),
              "entry_read_holds": sorted(self._read_recovery_attempts),
+             "journal_backup": self._journal_backups.report() if self._journal_backups else None,
              "stream_recovery_holds": sorted(self._stream_holds),
              "public_shards": self.public.status() if isinstance(self.public, PublicMarketShards) else [],
              "public_shard_reconnect_attempts": dict(self._shard_attempts),
@@ -1754,6 +1757,12 @@ class ProductionOrchestrator:
             raise RuntimeError("manual-flat preparation requires read-only mode")
         self.lock.acquire()
         # All output directories share one durable mutation/permit/risk history.
+        canonical_path = self.control_directory / "production.sqlite"
+        if canonical_path.exists():
+            await asyncio.to_thread(verify_journal, canonical_path, required_tables=frozenset({
+                "order_intent", "runtime_state", "execution_fill", "position_deadline",
+                "realized_risk_window_state",
+            }))
         canonical = SQLiteJournal(self.control_directory / "production.sqlite")
         identity = hashlib.sha256(self.config.api_key.encode()).hexdigest()
         previous_identity = canonical.get_runtime_state("credential_identity")
@@ -1768,6 +1777,9 @@ class ProductionOrchestrator:
         canonical.set_runtime_state("credential_identity", identity, updated_at=_utc_now())
         self.journal.close()
         self.journal = canonical
+        if self._journal_backups is None:
+            self._journal_backups = JournalBackups(canonical_path)
+            self._journal_backups.start()
         self.exchange_reward_uptime.restore_reward_history(
             canonical.get_runtime_state("reward_results_v1"), now=_utc_now(),
         )
@@ -4237,8 +4249,14 @@ class ProductionOrchestrator:
                         pass  # Optional diagnostic close must not strand ownership.
                 self._logging.close()
             finally:
-                self.journal.close()
-                self.lock.release()
+                try:
+                    if self._journal_backups is not None:
+                        await self._journal_backups.close()
+                finally:
+                    try:
+                        self.journal.close()
+                    finally:
+                        self.lock.release()
 
     async def __aenter__(self) -> ProductionOrchestrator:
         return self

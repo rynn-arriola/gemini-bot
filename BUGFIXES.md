@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 17 — missing automatic journal protection and pre-write integrity guard
+
+Added bounded hourly verified SQLite snapshots, off-loop I/O, safe managed retention and redacted backup health. Startup checks existing authority integrity and required tables read-only before schema/account writes; malformed/empty authority is preserved and blocked. Worker shutdown is joined before ownership release, and late backup exceptions are redacted inside the worker. No automatic restore, trading gate change or accounting/HARD reset. Existing native/packaged path and background-worker repairs remain intact. [Design and evidence](docs/JOURNAL_BACKUPS_2026-09-17.md).
+
 ## September 17 — packaged operator and native runner had different AppData WAL views
 
 The packaged operator's apparent control journal omitted 22 new native-runner intents because AppData WAL/SHM/lock writes were redirected to a package cache. The actual native journal passed integrity and terminal/flat checks; the mixed packaged base/WAL view did not. Production was drained, a native consistent backup was verified, and every table was explicitly preserved into a user-profile control directory outside AppData. Runtime now uses that shared directory and refuses blank startup when legacy authority exists. Real native/packaged hash agreement and second-owner rejection passed before restart. This changes neither accounting baselines nor HARD. [Evidence](docs/CONTROL_LOCATION_2026-09-17.md).

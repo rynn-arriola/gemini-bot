@@ -46,6 +46,7 @@ $Healthy = $SupervisorFresh -and $RunnerFresh -and $RunnerExists -and $Superviso
     observation = if ($Healthy -and ($RunnerStatus.phase -eq "recovering" -or @($RunnerStatus.entry_read_holds).Count -gt 0)) { "FRESH_RECOVERY_HOLD" } elseif ($Healthy -and $RunnerStatus.phase -eq "standby") { "FRESH_STANDBY_HEARTBEATS" } elseif ($Healthy) { "FRESH_QUOTING_HEARTBEATS" } elseif ($SupervisorFresh -and $SupervisorExists -and $Supervisor.state -eq "BACKOFF") { "FRESH_SUPERVISED_BACKOFF" } else { "ATTENTION_REQUIRED_OR_STOPPED" }
     entry_read_holds = $RunnerStatus.entry_read_holds
     stream_recovery_holds = $RunnerStatus.stream_recovery_holds
+    journal_backup = $RunnerStatus.journal_backup
     supervisor_fresh = $SupervisorFresh
     runner_fresh = $RunnerFresh
     supervisor_process_exists = $SupervisorExists
