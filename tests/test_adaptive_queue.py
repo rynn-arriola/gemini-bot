@@ -184,12 +184,15 @@ class AdaptiveStateTests(unittest.TestCase):
 class AdaptiveConfigTests(unittest.TestCase):
     def test_version_four_draft_preserves_base_and_can_load(self):
         review = dict(reviewed_at=NOW.isoformat(), incumbent_symbols=['X', 'Y'], queue_pilot=raw_policy())
-        draft = build_candidate(DEFAULT_POLICY_PATH, review, now=NOW)
         base = json.loads(DEFAULT_POLICY_PATH.read_text())
-        self.assertEqual(draft['policy_version'], 4)
-        self.assertEqual({k: v for k, v in draft.items() if k not in {'queue_pilot', 'policy_version'}},
-                         {k: v for k, v in base.items() if k != 'policy_version'})
+        base.pop('queue_pilot', None)
+        base['policy_version'] = 2
         with tempfile.TemporaryDirectory() as d:
+            base_path = Path(d)/'base.json'; base_path.write_text(json.dumps(base))
+            draft = build_candidate(base_path, review, now=NOW)
+            self.assertEqual(draft['policy_version'], 4)
+            self.assertEqual({k: v for k, v in draft.items() if k not in {'queue_pilot', 'policy_version'}},
+                             {k: v for k, v in base.items() if k != 'policy_version'})
             path = Path(d)/'synthetic.json'; path.write_text(json.dumps(draft))
             strategy, _ = load_policy(path)
             self.assertIsInstance(strategy.queue_pilot, AdaptivePolicy)
@@ -199,9 +202,14 @@ class AdaptiveConfigTests(unittest.TestCase):
 
     def test_template_remains_invalid_and_disabled_policy_unchanged(self):
         template = json.loads((DEFAULT_POLICY_PATH.parent/'adaptive_queue_review.template.json').read_text())
-        with self.assertRaises((ValueError, TypeError)):
-            build_candidate(DEFAULT_POLICY_PATH, template, now=NOW)
-        self.assertIsNone(load_policy()[0].queue_pilot)
+        base = json.loads(DEFAULT_POLICY_PATH.read_text())
+        base.pop('queue_pilot', None)
+        base['policy_version'] = 2
+        with tempfile.TemporaryDirectory() as d:
+            base_path = Path(d)/'base.json'; base_path.write_text(json.dumps(base))
+            with self.assertRaises((ValueError, TypeError)):
+                build_candidate(base_path, template, now=NOW)
+            self.assertIsNone(load_policy(base_path)[0].queue_pilot)
 
     def test_strict_adaptive_parser_rejects_unknown_boolean_and_missing(self):
         for mutation in ('unknown', 'boolean', 'missing'):

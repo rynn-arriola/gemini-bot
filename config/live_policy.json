@@ -1,5 +1,5 @@
 {
-  "policy_version": 2,
+  "policy_version": 5,
   "platform": "windows",
   "quote_quantity": "15",
   "quote_offset_ticks": 1,
@@ -17,5 +17,21 @@
   "risk_window_pending_order_policy": "fixed_40_until_stop",
   "max_inventory_age_seconds": 300,
   "force_exit_before_expiry_seconds": 300,
-  "monetary_stop_authorities": 1
+  "monetary_stop_authorities": 1,
+  "queue_pilot": {
+    "scope": "all_selected",
+    "adaptive": {
+      "warmup_seconds": "600",
+      "promotion_seconds": "60",
+      "observation_gap_seconds": "3",
+      "cancel_budget_seconds": "10",
+      "buffer_contracts": "250",
+      "burst_multiplier": "1",
+      "depth_multiplier": "1.5",
+      "minimum_requeue_gain": "250",
+      "refresh_cooldown_seconds": "10",
+      "expires_at": "2026-09-19T05:45:00-04:00",
+      "evidence_reference": "Owner-approved September 18 shared settings; all_selected scope; no claim of guaranteed queue position, fill protection or profitability"
+    }
+  }
 }

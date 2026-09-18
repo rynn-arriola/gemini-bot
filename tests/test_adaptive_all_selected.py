@@ -146,16 +146,19 @@ class SelectedStateTests(unittest.TestCase):
 class SelectedConfigTests(unittest.TestCase):
     def test_explicit_version_five_roundtrip_keeps_every_base_limit(self):
         review = dict(reviewed_at=NOW.isoformat(), incumbent_symbols=[], queue_pilot=raw_policy())
-        value = build_candidate(DEFAULT_POLICY_PATH, review, now=NOW)
-        self.assertEqual(value['policy_version'], 5)
         base = json.loads(DEFAULT_POLICY_PATH.read_text())
-        self.assertEqual({k:v for k,v in value.items() if k not in {'policy_version','queue_pilot'}},
-                         {k:v for k,v in base.items() if k != 'policy_version'})
+        base.pop('queue_pilot', None)
+        base['policy_version'] = 2
         with tempfile.TemporaryDirectory() as d:
+            base_path = Path(d)/'base.json'; base_path.write_text(json.dumps(base))
+            value = build_candidate(base_path, review, now=NOW)
+            self.assertEqual(value['policy_version'], 5)
+            self.assertEqual({k:v for k,v in value.items() if k not in {'policy_version','queue_pilot'}},
+                             {k:v for k,v in base.items() if k != 'policy_version'})
             path = Path(d)/'policy.json'; path.write_text(json.dumps(value))
             strategy, risk = load_policy(path)
             self.assertEqual(strategy.queue_pilot.scope, 'all_selected')
-            self.assertEqual(risk, load_policy()[1])
+            self.assertEqual(risk, load_policy(base_path)[1])
             value['policy_version'] = 4; path.write_text(json.dumps(value))
             with self.assertRaises(ConfigurationError): load_policy(path)
 
@@ -165,7 +168,6 @@ class SelectedConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError): parse_adaptive_policy(raw)
         with self.assertRaises(ValueError): AdaptivePolicy(('X','Y'), policy().limits, 'all_selected')
         self.assertEqual(parse_adaptive_policy(adaptive.raw_policy()).scope, 'research')
-        self.assertIsNone(load_policy()[0].queue_pilot)
 
 
 class SelectedExecutionTests(adaptive.AdaptiveExecutionTests):
