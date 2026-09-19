@@ -58,8 +58,8 @@ class CashExceptionTests(unittest.IsolatedAsyncioTestCase):
         self.journal.set_runtime_state('expected_positions', '{"TEST":"-1.01"}', updated_at=NOW)
         self.journal.connection.execute('INSERT INTO position_deadline VALUES (?,?,?,?,?)',
                                         ('TEST', 'NO', NOW.isoformat(), NOW.isoformat(), '1.01'))
-        self.journal.connection.execute('INSERT INTO execution_fill VALUES (?,?,?,?,?,?,?,?,?,?)',
-                                        ('trade', 'order', 'client', 'TEST', 'BUY', 'NO', '1.01', '.2', '.01', NOW.isoformat()))
+        self.journal.connection.execute('INSERT INTO execution_fill VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                                        ('trade', 'order', 'client', 'TEST', 'BUY', 'NO', '1.01', '.2', '.01', '-.212', NOW.isoformat()))
         before = self.protected_state()
         watermark = self.journal.get_runtime_state_record('cash_reconciliation_watermark')
         self.approve(positions={'TEST': D('-1.01')})
@@ -130,8 +130,8 @@ class CashExceptionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_new_fill_invalidates_approval(self):
         self.approve()
-        self.journal.connection.execute('INSERT INTO execution_fill VALUES (?,?,?,?,?,?,?,?,?,?)',
-                                        ('new', 'o', 'c', 'TEST', 'BUY', 'NO', '1', '.2', '.01', NOW.isoformat()))
+        self.journal.connection.execute('INSERT INTO execution_fill VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                                        ('new', 'o', 'c', 'TEST', 'BUY', 'NO', '1', '.2', '.01', '-.21', NOW.isoformat()))
         with self.assertRaises(RuntimeError): self.apply()
 
     def test_nonterminal_intent_refuses_approval(self):

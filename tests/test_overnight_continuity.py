@@ -217,6 +217,7 @@ class DiscoveryContinuityTests(unittest.IsolatedAsyncioTestCase):
         return {"status": "active", "contracts": [{
             "instrumentSymbol": symbol, "status": "active", "marketState": "open",
             "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+            "quoteAssetPrecision": 2,
             "expiryDate": (expiry or MIDNIGHT + timedelta(hours=8)).isoformat(),
             "prices": {"bestBid": ".48", "bestAsk": ".52"},
         }]}

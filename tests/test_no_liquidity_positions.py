@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock
 
-from gemini_bot.domain import Outcome
+from gemini_bot.domain import Outcome, Side
 from gemini_bot.storage import SQLiteJournal
 from gemini_bot.reconciliation import (
     build_account_snapshot, parse_positions, exposure_from_snapshot,
@@ -105,7 +105,8 @@ class NoBuyerStartupTests(unittest.IsolatedAsyncioTestCase):
             [position(marketValue='.03')] if r.account.reducer.positions else []))
         async def exit_now(leg, **kwargs):
             self.assertEqual(leg.quantity, D('1.01'))
-            self.assertEqual(leg.outcome, Outcome.NO)
+            self.assertEqual(leg.outcome, Outcome.YES)
+            self.assertEqual(leg.side, Side.BUY)
             return self.fixture.order(leg)
         r.private.exit_position.side_effect = exit_now
         await r._run_exit_worker('X')

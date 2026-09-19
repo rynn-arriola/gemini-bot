@@ -15,7 +15,7 @@ from test_review_regressions import candidate
 from gemini_bot.account_runtime import AccountRuntime
 from gemini_bot.account_state import AccountReducer
 from gemini_bot.catalog import RewardedContract
-from gemini_bot.domain import ContractRules, EngineState, RewardPool
+from gemini_bot.domain import ContractRules, EngineState, Outcome, QuoteLeg, RewardPool, Side
 from gemini_bot.execution import IntentLedger, OrderPurpose
 from gemini_bot.operational_logging import ErrorClass, OperationalLogger, configure_logging
 from gemini_bot.rest_client import ApiError
@@ -170,6 +170,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
     async def test_fill_during_rest_mark_defers_to_ws_safety_clock(self):
         async def positions():
             self.runtime.account.fill_version += 1
+            self.runtime.gate.halt()
             return []
         self.runtime.rest.positions = AsyncMock(side_effect=positions)
         self.runtime.rest.active_orders = AsyncMock(return_value=[])
@@ -191,8 +192,13 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.private.place_maker.assert_not_awaited()
         self.runtime.account.reducer.positions = {"X": D("10")}
         self.runtime.account.expected_positions = {"X": D("10")}
+        exit_intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.SELL, D(".48"), D("10")),
+            OrderPurpose.EXIT,
+        )
         self.runtime._validate_send({"params": {
-            "symbol": "X", "side": "SELL", "quantity": "10", "eventOutcome": "YES",
+            "symbol": "X", "side": "SELL", "price": ".48", "quantity": "10",
+            "eventOutcome": "YES", "clientOrderId": exit_intent.client_order_id,
         }})
         self.runtime.account.reducer.positions = {}
         self.runtime.account.expected_positions = {}

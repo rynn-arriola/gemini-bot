@@ -48,7 +48,16 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
 
     def order(self, leg, *, status="FILLED", filled=None):
         self.counter += 1
-        intent = self.r.ledger.prepare(leg, OrderPurpose.ENTRY if leg.side is Side.BUY else OrderPurpose.EXIT)
+        self.r.account.quote_asset_precision.setdefault(leg.symbol, 2)
+        signed = self.r.account.reducer.positions.get(leg.symbol, D(0))
+        purpose = (
+            OrderPurpose.EXIT
+            if leg.side is Side.SELL or (
+                signed < 0 and leg.side is Side.BUY and leg.outcome is Outcome.YES
+            )
+            else OrderPurpose.ENTRY
+        )
+        intent = self.r.ledger.prepare(leg, purpose)
         self.r.ledger.mark_sent(intent.client_order_id)
         qty = leg.quantity if filled is None else D(filled)
         self.r.account.apply({
@@ -84,7 +93,8 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.book()
         async def exit_now(leg, **kwargs):
             self.assertEqual(leg.quantity,D('1.01'))
-            self.assertEqual(leg.outcome,Outcome.NO)
+            self.assertEqual(leg.outcome,Outcome.YES)
+            self.assertEqual(leg.side,Side.BUY)
             return self.order(leg)
         r.private.exit_position.side_effect=exit_now
         await r._run_exit_worker('X')
@@ -228,12 +238,12 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.r.account.reducer.positions)
         self.assertNotIn("X", self.r.account.blocked_entries)
 
-    async def test_no_exit_uses_sell_no_and_exact_quantity(self):
+    async def test_no_exit_uses_buy_yes_and_exact_quantity(self):
         self.inventory(outcome=Outcome.NO, quantity=D(3))
         self.r.private.exit_position.side_effect = lambda leg, **_: self.order(leg)
         await self.r._run_exit_worker("X")
         leg = self.r.private.exit_position.call_args.args[0]
-        self.assertEqual((leg.side, leg.outcome, leg.quantity), (Side.SELL, Outcome.NO, D(3)))
+        self.assertEqual((leg.side, leg.outcome, leg.quantity), (Side.BUY, Outcome.YES, D(3)))
 
     async def test_unknown_ack_is_never_retried_in_another_round_or_drain(self):
         self.inventory()
@@ -410,7 +420,14 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_paced_exit_cannot_send_after_round_deadline(self):
         self.inventory()
         self.r._exit_round_deadlines["X"] = time.monotonic() - 1
-        payload = {"params": {"symbol": "X", "side": "SELL", "quantity": "10", "eventOutcome": "YES"}}
+        intent = self.r.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.SELL, D(".48"), D("10")),
+            OrderPurpose.EXIT,
+        )
+        payload = {"params": {
+            "symbol": "X", "side": "SELL", "price": ".48", "quantity": "10",
+            "eventOutcome": "YES", "clientOrderId": intent.client_order_id,
+        }}
         with self.assertRaisesRegex(EntryStateChangedBeforeSend, "round expired"):
             self.r._validate_send(payload)
 

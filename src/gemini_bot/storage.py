@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS execution_fill (
     quantity TEXT NOT NULL,
     price TEXT NOT NULL,
     fee TEXT NOT NULL,
+    cash_delta TEXT NOT NULL DEFAULT '',
     event_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS prediction_settlement (
@@ -181,6 +182,13 @@ class SQLiteJournal:
         if "purpose" not in columns:
             self.connection.execute(
                 "ALTER TABLE order_intent ADD COLUMN purpose TEXT NOT NULL DEFAULT 'legacy_unknown'"
+            )
+        fill_columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(execution_fill)")
+        }
+        if "cash_delta" not in fill_columns:
+            self.connection.execute(
+                "ALTER TABLE execution_fill ADD COLUMN cash_delta TEXT NOT NULL DEFAULT ''"
             )
 
     def close(self) -> None:
@@ -570,17 +578,21 @@ class SQLiteJournal:
         quantity: Decimal,
         price: Decimal,
         fee: Decimal,
+        cash_delta: Decimal | None = None,
         event_at: datetime,
     ) -> bool:
         if not trade_id or event_at.tzinfo is None:
             raise ValueError("fill identity and timezone-aware timestamp are required")
         changed = self.connection.execute(
             """INSERT OR IGNORE INTO execution_fill
-               (trade_id,order_id,client_order_id,symbol,side,outcome,quantity,price,fee,event_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+               (trade_id,order_id,client_order_id,symbol,side,outcome,quantity,price,fee,cash_delta,event_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trade_id, order_id, client_order_id, symbol, side, outcome,
-                str(quantity), str(price), str(fee), event_at.isoformat(),
+                str(quantity), str(price), str(fee),
+                str(((-quantity * price) if side.upper() == "BUY" else (quantity * price)) - fee)
+                if cash_delta is None else str(cash_delta),
+                event_at.isoformat(),
             ),
         ).rowcount
         return changed == 1
@@ -728,10 +740,10 @@ class SQLiteJournal:
 
         events: list[tuple[datetime, int, tuple[object, ...]]] = []
         for row in self.connection.execute(
-            """SELECT trade_id,symbol,side,outcome,quantity,price,fee,event_at
+            """SELECT trade_id,symbol,side,outcome,quantity,price,fee,cash_delta,event_at
                FROM execution_fill ORDER BY event_at,trade_id"""
         ):
-            occurred = parsed_utc(row[7])
+            occurred = parsed_utc(row[8])
             if occurred < window_end:
                 events.append((occurred, 1, tuple(row)))
         for row in self.connection.execute(
@@ -770,17 +782,17 @@ class SQLiteJournal:
                 if window_start <= occurred < window_end:
                     realized += prior[1] + Decimal(str(payout))
                 continue
-            _, symbol, side, outcome, quantity, price, fee, _ = row
+            _, symbol, side, outcome, quantity, price, fee, stored_cash_delta, _ = row
             qty = Decimal(str(quantity))
             execution_price = Decimal(str(price))
             execution_fee = Decimal(str(fee))
             outcome_sign = Decimal("1") if str(outcome).upper() == "YES" else Decimal("-1")
             side_sign = Decimal("1") if str(side).upper() == "BUY" else Decimal("-1")
             signed_delta = qty * outcome_sign * side_sign
-            cash_delta = (
-                -qty * execution_price if str(side).upper() == "BUY"
-                else qty * execution_price
-            ) - execution_fee
+            cash_delta = Decimal(str(stored_cash_delta)) if str(stored_cash_delta) else (
+                (-qty * execution_price if str(side).upper() == "BUY"
+                 else qty * execution_price) - execution_fee
+            )
             prior_qty, prior_cash = positions.get(str(symbol), (Decimal("0"), Decimal("0")))
             new_qty = prior_qty + signed_delta
             new_cash = prior_cash + cash_delta

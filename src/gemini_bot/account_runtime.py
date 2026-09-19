@@ -13,8 +13,9 @@ from copy import deepcopy
 from collections.abc import Callable
 
 from .account_state import AccountReducer, OrderTransition, OwnedOrder
-from .domain import canonical_symbol
-from .execution import IntentLedger, IntentState
+from .cash_accounting import fill_cash_delta
+from .domain import Outcome, Side, canonical_symbol
+from .execution import IntentLedger, IntentState, OrderPurpose
 from .storage import AuthenticatedCashAdjustment, AuthenticatedSettlement, SQLiteJournal
 
 
@@ -68,6 +69,12 @@ class AccountRuntime:
         self.exit_before_expiry_seconds = 300
         self.expiry: dict[str, datetime] = {}
         self.hard_exit_cutoff: dict[str, datetime] = {}
+        saved_precisions = journal.get_runtime_state("quote_asset_precision_v1")
+        self.quote_asset_precision: dict[str, int] = {} if saved_precisions is None else {
+            canonical_symbol(key): int(value)
+            for key, value in json.loads(saved_precisions).items()
+            if 0 <= int(value) <= 18
+        }
         self.fill_blocked_entries: set[str] = journal.deadline_symbols()
         self.other_entry_blocks: set[str] = set()
         self.entry_hold_reasons: dict[str, set[str]] = {}
@@ -198,6 +205,73 @@ class AccountRuntime:
         )
         self.expected_confirmed_usd = self.confirmed_usd
         return count
+
+    def reconcile_legacy_quote_precision_fills(self, *, observed_at: datetime) -> int:
+        """Repair post-watermark fills written before cash precision was stored.
+
+        The repair is accepted only when the complete candidate correction
+        exactly equals the fresh authenticated private-stream balance. Older
+        rows remain unchanged because their cash was already covered by the
+        durable reconciliation watermark or an explicit prior exception.
+        """
+        if observed_at.tzinfo is None:
+            raise ValueError("legacy fill reconciliation requires an aware timestamp")
+        if self.confirmed_usd is None or self.expected_confirmed_usd is None:
+            return 0
+        if self.expected_positions != self.reducer.positions or self.unowned_order_seen:
+            return 0
+        watermark = self.journal.get_runtime_state_record("cash_reconciliation_watermark")
+        if watermark is None:
+            return 0
+        rows = self.journal.connection.execute(
+            """SELECT f.trade_id,f.symbol,f.side,f.outcome,f.quantity,f.price,f.fee,
+                      i.purpose,f.event_at
+                 FROM execution_fill f
+                 JOIN order_intent i ON i.client_order_id=f.client_order_id
+                WHERE f.cash_delta='' AND f.event_at>=?
+                ORDER BY f.event_at,f.trade_id""",
+            (watermark[1].isoformat(),),
+        ).fetchall()
+        plans: list[tuple[str, str, Decimal]] = []
+        correction = Decimal("0")
+        for trade_id, symbol, side, outcome, quantity, price, fee, purpose, _ in rows:
+            precision = self.quote_asset_precision.get(canonical_symbol(str(symbol)))
+            if precision is None:
+                continue
+            qty, execution_price, execution_fee = (
+                Decimal(str(quantity)), Decimal(str(price)), Decimal(str(fee))
+            )
+            exact = fill_cash_delta(
+                side=Side(str(side).upper()), outcome=Outcome(str(outcome).upper()),
+                purpose=OrderPurpose(str(purpose)), quantity=qty, price=execution_price,
+                fee=execution_fee, quote_asset_precision=precision,
+            )
+            legacy = ((-qty * execution_price) if str(side).upper() == "BUY"
+                      else (qty * execution_price)) - execution_fee
+            correction += exact - legacy
+            plans.append((str(trade_id), canonical_symbol(str(symbol)), exact))
+        if not plans or self.expected_confirmed_usd + correction != self.confirmed_usd:
+            return 0
+        with self.journal.transaction():
+            changed = 0
+            for trade_id, _, exact in plans:
+                changed += self.journal.connection.execute(
+                    "UPDATE execution_fill SET cash_delta=? WHERE trade_id=? AND cash_delta=''",
+                    (str(exact), trade_id),
+                ).rowcount
+            if changed != len(plans):
+                raise RuntimeError("legacy fill precision repair lost atomic identity")
+            self.journal.set_runtime_state(
+                "expected_confirmed_usd", str(self.confirmed_usd), updated_at=observed_at,
+            )
+            self.journal.audit("legacy_fill_quote_precision_reconciled", {
+                "fill_count": changed,
+                "symbols": sorted({symbol for _, symbol, _ in plans}),
+            })
+        self.expected_confirmed_usd = self.confirmed_usd
+        self.fill_version += 1
+        self._known_account_activity()
+        return len(plans)
 
     def reconcile_authenticated_settlement(
         self,
@@ -365,6 +439,10 @@ class AccountRuntime:
         transition = self.reducer.apply_order_update(frame)
         order = self.reducer.orders[transition.order_id]
         intent = self.ledger.get(order.client_order_id)
+        purpose_value = (
+            intent.purpose.value if intent is not None
+            else self.journal.intent_purpose(order.client_order_id)
+        )
         if intent is None:
             if not self.journal.knows_client_order_id(order.client_order_id):
                 self.unowned_order_seen = True
@@ -383,7 +461,8 @@ class AccountRuntime:
                 else:
                     self.reducer.orders[order.order_id] = previous_order
                 raise
-            if recorded and transition.cancel_other_entry_orders:
+            if (recorded and transition.cancel_other_entry_orders
+                    and purpose_value == OrderPurpose.ENTRY.value):
                 self.block_entries(order.symbol, fill=True)
                 try:
                     self.safety_symbols.put_nowait(order.symbol)
@@ -425,10 +504,25 @@ class AccountRuntime:
         if not price.is_finite() or not Decimal("0") < price < Decimal("1") or not fee.is_finite():
             raise RuntimeError("fill cash cannot be classified without execution price")
         quantity = transition.newly_filled
+        intent = self.ledger.get(order.client_order_id)
+        purpose_value = (
+            intent.purpose.value if intent is not None
+            else self.journal.intent_purpose(order.client_order_id)
+        )
+        try:
+            purpose = OrderPurpose(str(purpose_value))
+        except ValueError as exc:
+            raise RuntimeError("fill purpose is not classified") from exc
+        precision = self.quote_asset_precision.get(order.symbol)
+        if precision is None:
+            raise RuntimeError("fill quote-asset precision is not classified")
+        cash_delta = fill_cash_delta(
+            side=Side(order.side.value), outcome=Outcome(order.outcome.value), purpose=purpose,
+            quantity=quantity, price=price, fee=fee, quote_asset_precision=precision,
+        )
         expected_cash = self.expected_confirmed_usd
         if expected_cash is not None:
-            cash = quantity * price
-            expected_cash += (-cash if order.side.value == "BUY" else cash) - fee
+            expected_cash += cash_delta
         expected_positions = None if self.expected_positions is None else dict(self.expected_positions)
         if expected_positions is not None:
             change = quantity * (1 if order.outcome.value == "YES" else -1) * (1 if order.side.value == "BUY" else -1)
@@ -440,7 +534,8 @@ class AccountRuntime:
             recorded = self.journal.record_fill(
                 trade_id=trade_id, order_id=order.order_id, client_order_id=order.client_order_id,
                 symbol=order.symbol, side=order.side.value, outcome=order.outcome.value,
-                quantity=quantity, price=price, fee=fee, event_at=_event_time(frame),
+                quantity=quantity, price=price, fee=fee, cash_delta=cash_delta,
+                event_at=_event_time(frame),
             )
             if not recorded:
                 return False
@@ -450,7 +545,7 @@ class AccountRuntime:
                 self.journal.set_runtime_state(
                     "expected_positions", json.dumps({k: str(v) for k, v in expected_positions.items()}), updated_at=now,
                 )
-            if transition.cancel_other_entry_orders:
+            if transition.cancel_other_entry_orders and purpose is OrderPurpose.ENTRY:
                 opened = min(_event_time(frame), now)
                 deadline = opened + timedelta(seconds=self.inventory_age_seconds)
                 if order.symbol in self.expiry:

@@ -80,6 +80,7 @@ class RuntimeReviewTests(unittest.IsolatedAsyncioTestCase):
             ContractRules("X", D(".01"), D("1"), D("1")),
             (NOW + timedelta(hours=2)).isoformat(),
         )]
+        self.runtime.account.quote_asset_precision = {"X": 2}
 
     async def asyncTearDown(self):
         await self.runtime.close()

@@ -432,6 +432,7 @@ class AccountRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             ledger.mark_sent(intent.client_order_id)
             runtime = AccountRuntime(ledger, store)
+            runtime.quote_asset_precision = {"X": 2}
             frame = {
                 "e": "orderUpdate", "i": "order-1", "c": intent.client_order_id,
                 "s": "X", "S": "BUY", "O": "YES", "q": "10", "z": "7",
@@ -474,12 +475,14 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "instrumentSymbol": event_ticker + "-WIDE", "status": "active", "marketState": "open",
                         "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                        "quoteAssetPrecision": 2,
                         "expiryDate": "2026-09-16T00:00:00Z",
                         "prices": {"bestBid": ".2", "bestAsk": ".8"},
                     },
                     {
                         "instrumentSymbol": event_ticker + "-TIGHT", "status": "active", "marketState": "open",
                         "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                        "quoteAssetPrecision": 2,
                         "expiryDate": "2026-09-16T00:00:00Z",
                         "prices": {"bestBid": ".48", "bestAsk": ".52"},
                     },
@@ -500,6 +503,7 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
                     "startTime": "2026-09-15T16:00:00Z", "contracts": [{
                         "instrumentSymbol": "GAME-X", "status": "active", "marketState": "open",
                         "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                        "quoteAssetPrecision": 2,
                         "expiryDate": "2026-09-15T19:00:00Z",
                     }],
                 }}
@@ -806,6 +810,7 @@ class ReadOnlyPreparationTests(unittest.IsolatedAsyncioTestCase):
                 return {"event": {"status": "active", "contracts": [{
                     "instrumentSymbol": "X", "status": "active", "marketState": "open",
                     "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                    "quoteAssetPrecision": 2,
                     "expiryDate": "2027-01-01T00:00:00Z",
                     "prices": {"bestBid": ".48", "bestAsk": ".52"},
                 }]}}

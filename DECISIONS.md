@@ -2,6 +2,8 @@
 
 These are current account-owner decisions. Changing one requires a new explicit owner decision and a dated update.
 
+- September 19 open-position repair: owner directed fixing the Gemini issue. Preserve the live position and canonical history; do not reset the baseline or weaken account proof. Implement contract-specific cash precision, documented collateral-return closing for NO inventory, market-local waiting when no exit liquidity exists, and recovery that lets unrelated markets continue. Local pre-send blocks must not consume the three actual IOC attempts. Verify and publish the repair; this decision does not itself authorize a blind restart through failed reconciliation or a second mutation owner.
+
 ## Approved
 
 - September 18 malformed reward-contract repair restart: owner explicitly directed restarting after the repair passed 1,020 production and 28 script tests and was pushed as `aafb76b`. Dismiss the old attention-only v27 supervisor, preserve canonical history and every existing size/breadth/exposure/exit/accounting/HARD boundary, run fresh authenticated read-only account/integrity/backup preparation, issue new exact version-7 build/policy/account authority with no uptime override, and launch through the persistent task. Verify owned size-15 best-bid orders, zero unexpected positions, five public shards, no holds/errors, and affected-market-only handling of unavailable contract metadata. Never reuse v27 authority or fabricate continuity for the stopped interval.

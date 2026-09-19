@@ -13,6 +13,7 @@ def event(symbol):
     return {'status': 'active', 'contracts': [{
         'instrumentSymbol': symbol, 'status': 'active', 'marketState': 'open',
         'priceIncrement': '.01', 'quantityMinimum': '1', 'quantityIncrement': '1',
+        'quoteAssetPrecision': 2,
         'expiryDate': '2027-01-01T00:00:00Z',
         'prices': {'bestBid': '.48', 'bestAsk': '.52'},
     }]}

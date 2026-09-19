@@ -35,7 +35,7 @@ from .discovery import RewardUniverseLoader, DISCOVERY_RANKING_VERSION, read_rew
 from .catalog import join_reward_contracts
 from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
 from .engine import LiveEngineGate
-from .execution import IntentLedger, IntentState, OrderPurpose
+from .execution import IntentLedger, IntentState, OrderPurpose, validate_exact_exit
 from .exit_pricing import exact_crossing_exit
 from .exit_recovery import ExitDeferred, ExitWait
 from .live_ws import (
@@ -777,6 +777,25 @@ class ProductionOrchestrator:
             self._sticky_recovery.restore_state(recovery, self._sticky_pool_ids)
         else:
             self._sticky_recovery.restore(self.journal.get_runtime_state("sticky_recovery_v1"), self._sticky_pool_ids)
+
+    def _sync_quote_asset_precisions(self, contracts: list[Any]) -> None:
+        """Merge fresh metadata without forgetting held or historical symbols."""
+        merged = dict(self.account.quote_asset_precision)
+        for contract in contracts:
+            symbol = canonical_symbol(contract.rules.symbol)
+            precision = int(contract.rules.quote_asset_precision)
+            if not 0 <= precision <= 18:
+                raise RuntimeError("contract quote-asset precision is invalid")
+            prior = merged.get(symbol)
+            if prior is not None and prior != precision:
+                raise RuntimeError("contract quote-asset precision changed unexpectedly")
+            merged[symbol] = precision
+        self.account.quote_asset_precision = merged
+        self.journal.set_runtime_state(
+            "quote_asset_precision_v1",
+            json.dumps(merged, separators=(",", ":"), sort_keys=True),
+            updated_at=_utc_now(),
+        )
 
     def _owner_event(self, event: str, owner: str, symbol: str, reason: str) -> None:
         fields = {"owner_key": owner, "symbol": symbol, "reason": reason}
@@ -2022,6 +2041,7 @@ class ProductionOrchestrator:
             )
             if not self.universe:
                 raise NoMarketsAvailable("no active reward pools passed discovery")
+            self._sync_quote_asset_precisions(self.universe)
             self._expiry = {item.rules.symbol: _parse_time(item.expiry) for item in self.universe}
             self._trade_start = {
                 item.rules.symbol: _parse_time(item.trade_starts_at)
@@ -2108,6 +2128,8 @@ class ProductionOrchestrator:
             after = build_account_snapshot(positions_after, orders_after)
             assert_stable_account_bracket(before, after)
             assert_position_consistency(after, self.account.reducer.positions)
+            if not self.account.equity_classification_complete:
+                self.account.reconcile_legacy_quote_precision_fills(observed_at=_utc_now())
             repair_flat = manual_flat_repair and not after.positions and not after.active_orders
             if (
                 self.account.expected_positions != self.account.reducer.positions
@@ -2408,9 +2430,18 @@ class ProductionOrchestrator:
         """Last check after rate pacing; no await between this and transport send."""
         params = payload["params"]
         symbol = str(params["symbol"])
+        client_order_id = str(params.get("clientOrderId", ""))
+        intent = self.ledger.get(client_order_id)
+        purpose = (
+            intent.purpose.value if intent is not None
+            else self.journal.intent_purpose(client_order_id)
+        )
+        if purpose not in {OrderPurpose.ENTRY.value, OrderPurpose.EXIT.value}:
+            raise RuntimeError("order mutation lacks a classified durable intent")
+        is_exit = purpose == OrderPurpose.EXIT.value
         if not self._book_fresh(symbol):
             raise QuoteChangedBeforeSend("market became stale while waiting to send")
-        if params["side"] == "BUY":
+        if not is_exit:
             if self._continue_after_override:
                 if self._reward_epoch != self._current_reward_epoch(_utc_now()):
                     raise EntryStateChangedBeforeSend("reward day/override changed; fresh ranking required")
@@ -2504,9 +2535,21 @@ class ProductionOrchestrator:
                                        or not self.account.equity_classification_complete):
                 raise EntryStateChangedBeforeSend("recovery has not proved exact exit state")
             position = self.account.reducer.positions.get(symbol, Decimal("0"))
-            if (abs(position) != Decimal(str(params["quantity"])) or position == 0
-                    or params["eventOutcome"] != ("YES" if position > 0 else "NO")):
+            try:
+                validate_exact_exit(
+                    QuoteLeg(
+                        symbol=symbol,
+                        outcome=Outcome(str(params["eventOutcome"])),
+                        side=Side(str(params["side"])),
+                        price=Decimal(str(params["price"])),
+                        quantity=Decimal(str(params["quantity"])),
+                    ),
+                    position,
+                )
+            except (ValueError, KeyError) as exc:
                 raise RuntimeError("position changed while waiting to send exact exit")
+            if intent is None and purpose != OrderPurpose.EXIT.value:
+                raise RuntimeError("exact exit lacks a durable owned intent")
 
     def _market_data_verified_at(self, symbol: str | None = None):
         if isinstance(self.public, PublicMarketShards):
@@ -3213,9 +3256,18 @@ class ProductionOrchestrator:
                 self._exit_round_deadlines[symbol] = time.monotonic() + 30
             attempt = 0
             while signed:
-                if attempt >= 3 or asyncio.get_running_loop().time() - exit_started_at >= 30:
+                elapsed = asyncio.get_running_loop().time() - exit_started_at
+                if attempt >= 3:
                     if scoped:
                         raise ExitDeferred("exit_round_exhausted")
+                    raise RuntimeError("exact IOC exit exhausted its bounded retry authority")
+                if elapsed >= 30:
+                    if scoped:
+                        raise ExitDeferred(
+                            "account_proof_pending" if attempt == 0 else "exit_round_exhausted"
+                        )
+                    if attempt == 0:
+                        raise RuntimeError("exact IOC exit remained blocked before transport send")
                     raise RuntimeError("exact IOC exit exhausted its bounded retry authority")
                 if symbol in self._exit_uncertain or self.journal.pending_exit(symbol):
                     raise TimeoutError("prior exit still requires terminal reconciliation; retry prohibited")
@@ -3234,12 +3286,12 @@ class ProductionOrchestrator:
                     raise RuntimeError("fresh full depth cannot support an exact position exit")
 
                 submitted_signed = signed
-                attempt += 1
                 self._exit_uncertain.add(symbol)
                 try:
                     client_id = await self.private.exit_position(
                         leg, signed_position=submitted_signed,
                     )
+                    attempt += 1
                 except MutationNotSentError:
                     # The guard runs after pacing but before websocket.send.
                     # Reconcile the changed position instead of converting a
@@ -3278,6 +3330,7 @@ class ProductionOrchestrator:
                         await asyncio.sleep(0.25)
                     if signed == 0:
                         break
+                    await asyncio.sleep(0.25)
                     continue
                 # A timeout here leaves the mutation ambiguous and deliberately
                 # retains _exit_uncertain, preventing emergency drain from
@@ -3388,6 +3441,7 @@ class ProductionOrchestrator:
 
     async def _risk_mark(self) -> int:
         self._risk_read_verified = False
+        started_quoting = self.gate.state is EngineState.QUOTING
         fill_version = self.account.fill_version
         snapshot = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
         now = _utc_now()
@@ -3396,7 +3450,7 @@ class ProductionOrchestrator:
         realized_pnl, history_complete = self.journal.realized_pnl_for_window(start, end)
         if not history_complete:
             raise RuntimeError("closed-fill realized P&L cannot be classified safely")
-        if self.gate.state is EngineState.QUOTING and (
+        if started_quoting and (
             not self.account.equity_classification_complete or fill_version != self.account.fill_version
         ):
             # Entries are already blocked. The independent safety clock owns
@@ -3824,6 +3878,7 @@ class ProductionOrchestrator:
                         seconds=self.config.risk.sports_exit_before_start_seconds)
                 self.public.books[symbol] = LocalBook(symbol)
             self.universe.extend(additions)
+            self._sync_quote_asset_precisions(additions)
             self.account.expiry = self._expiry
             self._permitted_symbols.update(c.rules.symbol for c in additions)
             if additions:

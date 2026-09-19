@@ -45,6 +45,7 @@ class AccountRepairTests(unittest.TestCase):
         self.store = SQLiteJournal(self.path)
         self.ledger = IntentLedger(self.store)
         self.account = AccountRuntime(self.ledger, self.store)
+        self.account.quote_asset_precision = {"X": 2}
         self.account.apply({"e": "balanceUpdate", "B": [{"a": "USD", "c": "100", "f": "100"}]})
         self.account.apply({"e": "positionReport", "P": [], "u": 1})
 
@@ -267,6 +268,7 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
             "E", candidate_pool(), candidate_rules(),
             (NOW + timedelta(hours=2)).isoformat(),
         )]
+        self.runtime.account.quote_asset_precision = {"X": 2}
         self.runtime._expiry["X"] = NOW + timedelta(hours=2)
         self.runtime._permitted_symbols = {"X"}
         self.runtime.gate.state = EngineState.QUOTING
@@ -364,9 +366,16 @@ class RuntimeRepairTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exit_send_guard_requires_same_outcome_and_exact_quantity(self):
         self.runtime.account.reducer.positions["X"] = D("-3")
-        payload = {"params": {"symbol": "X", "side": "SELL", "quantity": "3", "eventOutcome": "NO"}}
+        intent = self.runtime.ledger.prepare(
+            QuoteLeg("X", Outcome.YES, Side.BUY, D(".52"), D("3")),
+            OrderPurpose.EXIT,
+        )
+        payload = {"params": {
+            "symbol": "X", "side": "BUY", "price": ".52", "quantity": "3",
+            "eventOutcome": "YES", "clientOrderId": intent.client_order_id,
+        }}
         self.runtime._validate_send(payload)
-        payload["params"]["eventOutcome"] = "YES"
+        payload["params"]["eventOutcome"] = "NO"
         with self.assertRaises(RuntimeError):
             self.runtime._validate_send(payload)
 

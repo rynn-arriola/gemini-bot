@@ -97,15 +97,15 @@ class MakerHistoryTests(unittest.TestCase):
         self.recover(trades=[dict(self.trade,fee_amount='.03')])
         self.assertEqual(self.account.expected_confirmed_usd,D('98.77'))
 
-    def test_fractional_fill_cash_is_not_rounded_to_bypass_reconciliation(self):
+    def test_fractional_fill_cash_uses_contract_quote_precision(self):
         row = dict(self.row, filledQuantity='1.01')
         trade = dict(self.trade, amount='1.01')
         self.recover(rows=[row], trades=[trade])
-        self.assertEqual(self.account.expected_confirmed_usd, D('99.596'))
+        self.assertEqual(self.account.expected_confirmed_usd, D('99.59'))
         self.fixture.position(D('1.01'))
-        self.fixture.cash('99.60')
-        self.assertFalse(self.account.equity_classification_complete)
         self.fixture.cash('99.596')
+        self.assertFalse(self.account.equity_classification_complete)
+        self.fixture.cash('99.59')
         self.assertTrue(self.account.equity_classification_complete)
 
     def test_external_reduction_requires_explicit_authority_and_exact_owned_quantity(self):

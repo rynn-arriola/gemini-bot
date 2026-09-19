@@ -1,8 +1,10 @@
 # Gemini current status
 
-Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state guarantee.
+Updated September 19, 2026. This is a checkpoint, not a perpetual venue-state guarantee.
 
 ## Operational truth
+
+- **Production is stopped in attention state with one isolated open position and zero active orders.** The September 19 partial BUY NO fill exposed a quote-precision accounting defect: raw notional was recorded with four decimals while Gemini's authenticated USD surface settled at the contract's two-decimal quote precision. The resulting cash mismatch halted safely; three exit intents were rejected locally before transport and are terminal. Source now accounts every fill at `quoteAssetPrecision`, records its exact cash delta, repairs only post-watermark legacy rows when the complete correction exactly matches fresh authenticated balance proof, and exits negative/NO inventory through Gemini's documented BUY YES collateral-return route. Local pre-send failures no longer consume venue retry authority, and a concurrent risk mark cannot persist a false incomplete window after a fill-triggered halt. **Not restarted or deployed yet.** The current position remains market-local and consumes no pending-order slot. [Incident and repair](docs/PARTIAL_FILL_PRECISION_AND_NO_EXIT_2026-09-19.md).
 
 - **Malformed reward-contract isolation v28 is deployed and running.** The old attention-only v27 supervisor exited cleanly with its runtime `stopped_flat`. Fresh repaired-build preparation proved zero positions/orders, 32 tracked/ranked markets, 17 eligible, no holds and a verified 12,189,696-byte backup. New exact v7 authority has no uptime override. Live acceptance observed 34 acknowledged size-15 orders across 17 complete markets, all matching current ranked best-bid prices, zero positions, five healthy shards, no holds/current-process warnings or errors, no disabled queue symbols/cancellation breach and zero supervisor restarts. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
 

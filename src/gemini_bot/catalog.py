@@ -83,6 +83,7 @@ def join_reward_contracts(
                     tick_size=Decimal(str(contract["priceIncrement"])),
                     quantity_minimum=Decimal(str(contract["quantityMinimum"])),
                     quantity_increment=Decimal(str(contract["quantityIncrement"])),
+                    quote_asset_precision=int(contract["quoteAssetPrecision"]),
                     active=contract.get("status") == "active" and contract.get("marketState") == "open",
                     post_only_mode=bool(contract.get("postOnlyMode", False)),
                 )

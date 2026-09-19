@@ -299,6 +299,7 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         def contract(symbol, bid, ask):
             return {"instrumentSymbol": symbol, "status": "active", "marketState": "open",
                     "quantityMinimum": "1", "quantityIncrement": "1", "priceIncrement": ".01",
+                    "quoteAssetPrecision": 2,
                     "prices": {"bestBid": bid, "bestAsk": ask}}
         rest.event.return_value = {"status": "active", "contracts": [
             contract("BAD", ".01", ".02"), contract("GOOD", ".48", ".52"),
@@ -317,6 +318,7 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         rest.event.side_effect = lambda ticker: {"status": "active", "contracts": [{
             "instrumentSymbol": ticker, "status": "active", "marketState": "open",
             "quantityMinimum": "1", "quantityIncrement": "1", "priceIncrement": ".01",
+            "quoteAssetPrecision": 2,
             "prices": {"bestBid": ".48", "bestAsk": ".52"},
         }]}
         pinned = {market_owner_key("shared:0", f"E{i}"): (f"E{i}", f"E{i}") for i in range(8)}

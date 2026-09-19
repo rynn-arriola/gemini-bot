@@ -57,16 +57,22 @@ def expected_signed_position_delta(leg: QuoteLeg) -> Decimal:
 
 
 def validate_exact_exit(leg: QuoteLeg, signed_position: Decimal) -> None:
-    """Prove that a proposed SELL exactly flattens reconciled inventory."""
+    """Prove that a proposed order exactly flattens reconciled inventory.
+
+    Gemini collateral-return accounts reduce NO inventory by buying the
+    complementary YES outcome.  Positive YES inventory still exits by selling
+    YES.  Both forms must produce the exact opposite signed position delta.
+    """
     if signed_position == 0:
         raise ValueError("cannot exit a flat position")
-    expected_outcome = Outcome.YES if signed_position > 0 else Outcome.NO
-    if leg.side is not Side.SELL or leg.outcome is not expected_outcome:
-        raise ValueError("exit must SELL the outcome represented by the signed position")
     if leg.quantity != abs(signed_position):
         raise ValueError("exit quantity must exactly match the authenticated position")
     if signed_position + expected_signed_position_delta(leg) != 0:
         raise ValueError("exit would not flatten the authenticated position")
+    if signed_position > 0 and (leg.side is not Side.SELL or leg.outcome is not Outcome.YES):
+        raise ValueError("positive inventory must exit by selling YES")
+    if signed_position < 0 and (leg.side is not Side.BUY or leg.outcome is not Outcome.YES):
+        raise ValueError("negative inventory must exit by buying complementary YES")
 
 
 def place_request(request_id: int, intent: OrderIntent) -> dict[str, object]:
@@ -132,7 +138,7 @@ def exit_request(
         "method": "order.place",
         "params": {
             "symbol": leg.symbol,
-            "side": "SELL",
+            "side": leg.side.value,
             "type": "LIMIT",
             "timeInForce": "IOC",
             "price": format(leg.price, "f"),

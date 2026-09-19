@@ -82,6 +82,7 @@ class ContractRules:
     tick_size: Decimal
     quantity_minimum: Decimal
     quantity_increment: Decimal
+    quote_asset_precision: int = 2
     active: bool = True
     post_only_mode: bool = False
 
@@ -91,6 +92,8 @@ class ContractRules:
             raise ValueError("tick_size must be positive")
         if self.quantity_minimum <= ZERO or self.quantity_increment <= ZERO:
             raise ValueError("quantity constraints must be positive")
+        if not 0 <= self.quote_asset_precision <= 18:
+            raise ValueError("quote asset precision must be between 0 and 18")
 
 
 @dataclass(frozen=True, slots=True)

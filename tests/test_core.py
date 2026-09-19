@@ -379,8 +379,8 @@ class ExecutionTests(unittest.TestCase):
             "P": [{"t": "ec", "s": "gemi-test", "a": [{"t": "position", "v": "-3.5"}]}],
         })
         leg = reducer.exact_exit_leg("GEMI-TEST", Decimal(".40"))
-        self.assertEqual(leg.side.value, "SELL")
-        self.assertEqual(leg.outcome.value, "NO")
+        self.assertEqual(leg.side.value, "BUY")
+        self.assertEqual(leg.outcome.value, "YES")
         self.assertEqual(leg.quantity, Decimal("3.5"))
         intent = IntentLedger().prepare(leg, OrderPurpose.EXIT)
         request = exit_request(3, intent, signed_position=Decimal("-3.5"))
@@ -455,15 +455,16 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(leg.price, Decimal(".47"))
         self.assertEqual(leg.quantity, Decimal("10"))
 
-    def test_exact_no_exit_uses_complement_of_yes_asks(self) -> None:
+    def test_exact_no_exit_buys_yes_from_asks(self) -> None:
         local = LocalBook("X")
         local.apply_snapshot(
             [(Decimal(".48"), Decimal("10"))],
             [(Decimal(".52"), Decimal("10")), (Decimal(".53"), Decimal("20"))], 1, 1, NOW,
         )
         leg = exact_crossing_exit(local, Decimal("-10"), depth_haircut=Decimal(".5"))
-        self.assertEqual(leg.outcome, Outcome.NO)
-        self.assertEqual(leg.price, Decimal(".47"))
+        self.assertEqual(leg.outcome, Outcome.YES)
+        self.assertEqual(leg.side, Side.BUY)
+        self.assertEqual(leg.price, Decimal(".53"))
         self.assertEqual(leg.quantity, Decimal("10"))
 
     def test_insufficient_exit_depth_refuses_partial_close(self) -> None:
@@ -697,7 +698,7 @@ class InfrastructureTests(unittest.TestCase):
         def event(symbol: str) -> dict[str, object]:
             return {"status": "active", "contracts": [{
                 "instrumentSymbol": symbol, "priceIncrement": ".01",
-                "quantityMinimum": "1", "quantityIncrement": "1",
+                "quantityMinimum": "1", "quantityIncrement": "1", "quoteAssetPrecision": 2,
                 "status": "active", "marketState": "open", "expiryDate": "2026-09-16T00:00:00Z",
             }]}
         joined = join_reward_contracts(rewards, {"E1": event("A"), "E2": event("B")})
@@ -714,6 +715,7 @@ class InfrastructureTests(unittest.TestCase):
             {"E": {"status": "active", "contracts": [{
                 "instrumentSymbol": "X", "status": "active", "marketState": "open",
                 "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                "quoteAssetPrecision": 2,
                 "effectiveDate": "2026-09-15T12:00:00Z",
                 "expiryDate": "2026-09-16T00:00:00Z",
             }]}},
@@ -736,6 +738,7 @@ class InfrastructureTests(unittest.TestCase):
                 {
                     "instrumentSymbol": "HEALTHY", "status": "active", "marketState": "open",
                     "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                    "quoteAssetPrecision": 2,
                 },
             ]}},
         )

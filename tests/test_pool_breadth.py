@@ -84,6 +84,7 @@ class LoaderTests(unittest.IsolatedAsyncioTestCase):
             return {"status":"active", "contracts":[{
                 "instrumentSymbol":ticker + str(i), "status":"active", "marketState":"open",
                 "quantityMinimum":"1", "quantityIncrement":"1", "priceIncrement":".01",
+                "quoteAssetPrecision":2,
                 "prices":{"bestBid":".48", "bestAsk":".52"},
             } for i in range(2)]}
         rest.event.side_effect = event
@@ -99,6 +100,7 @@ class LoaderTests(unittest.IsolatedAsyncioTestCase):
             return {"status":"active", "contracts":[{
                 "instrumentSymbol":ticker + str(i), "status":"active", "marketState":"open",
                 "quantityMinimum":"1", "quantityIncrement":"1", "priceIncrement":".01",
+                "quoteAssetPrecision":2,
                 "prices":{"bestBid":".48", "bestAsk":".52"},
             } for i in range(45 if ticker == "MANY" else 2)]}
         rest.event.side_effect = event

@@ -160,5 +160,5 @@ class AccountReducer:
         signed = self.positions.get(target, Decimal("0"))
         if signed == 0:
             return None
-        outcome = Outcome.YES if signed > 0 else Outcome.NO
-        return QuoteLeg(target, outcome, Side.SELL, price, abs(signed))
+        side = Side.SELL if signed > 0 else Side.BUY
+        return QuoteLeg(target, Outcome.YES, side, price, abs(signed))

@@ -65,7 +65,8 @@ class CountParserTests(unittest.TestCase):
         rows=join_reward_contracts([{"event_ticker":"E","daily_pool_usd":"50"}], {
             "E":{"id":123,"status":"active","contracts":[{
                 "instrumentSymbol":"X","priceIncrement":".01","quantityMinimum":"1",
-                "quantityIncrement":"1","status":"active","marketState":"open",
+                "quantityIncrement":"1","quoteAssetPrecision":2,
+                "status":"active","marketState":"open",
             }]},
         })
         self.assertEqual(rows[0].event_id,"123")
