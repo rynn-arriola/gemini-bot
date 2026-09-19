@@ -2,9 +2,9 @@
 
 ## Current release
 
-- **Reward focus plus size 30 is verified; owner authorized deployment/restart.** The 70/30 preference affects vacant/released slots and preserves healthy sticky owners. Full 1,088 production/script tests passed. Complete controlled terminal/flat drain, fresh account/history/backup proof and exact v7 authority, then verify owned size-30 quotes and calibration health. All monetary/HARD limits remain. [Evidence](docs/REWARD_FOCUS_2026-09-19.md).
+- **Reward focus plus size 30 is deployed and initially accepted.** At 18:33 ET v34 had 20 owned size-30 orders/10 markets, zero positions, 18 historical event preferences, all 20 prior owners preserved, five healthy shards and no holds/errors/restarts. All 1,088 production/script tests passed. Remaining work is natural live evidence: new/released-slot selection, continuity, fills/exits and subsequent reward outcomes. Do not reset healthy owners to demonstrate ranking. All monetary/HARD limits remain. [Evidence](docs/REWARD_FOCUS_2026-09-19.md).
 
-- **Partial-depth exit candidate:** verify/publish the UK Green repair, then use only a controlled deployment with fresh account/build/policy authority. Live acceptance must prove exact position/residual handling and unaffected-market continuity; available depth does not guarantee a fill or immediate flatness. [Evidence](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).
+- **Partial-depth exit repair is deployed (v33, retained in v34).** Continue observing natural exact-position/residual handling and unaffected-market continuity; available depth does not guarantee a fill or immediate flatness. [Evidence](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).
 
 - **Correlated-stream recovery v32 is deployed and passed initial acceptance:** 20 owned size-15 best-bid orders/10 markets, zero positions/unowned orders/mismatches, five healthy shards and no holds/errors/restarts. Observe a natural multi-stream recovery without inducing a fault or crediting the gap. Initial startup does not prove that long-run path. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
 

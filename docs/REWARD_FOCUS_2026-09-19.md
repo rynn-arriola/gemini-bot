@@ -27,3 +27,15 @@ Official documentation rechecked September 19: [liquidity scoring](https://devel
 Deterministic evidence/selection/runtime cases cover stale, missing, pending, malformed, duplicate and future evidence; exact event identity; confidence/recency; no repeated event uplift; sticky/locked ownership; negative-profit refusal; pool forecast separation; and restored runtime integration. Full regression and live acceptance results are recorded below after completion.
 
 Full verification passed 1,060 production tests and 28 script tests (1,088 total), plus Python compilation, native PowerShell parsing, whitespace checks and offline Windows policy/storage validation. The final reporting addition was checked again with the reward-focus and continuous-service suites. Read-only predeployment proof found 22 owned size-15 orders, zero positions, 20 saved owners and healthy journal integrity; the active checkout stayed unchanged during construction.
+
+### V34 deployment acceptance
+
+Old v33 reached terminal-flat at 18:27:58 ET on September 19. The single-owner locked backup passed integrity and exact table/history comparison. Main and GitHub matched code `57e7036`. Post-merge 30 reward-focus/size tests and offline release validation passed. Fresh read-only preparation proved zero orders/positions, preserved economic/sticky history and complete non-HARD risk, with 32 watched/ranked and 11 actionable candidates. Calibration loaded 18 events without error. New exact v7 build/policy/account authority has no uptime override.
+
+The hypothetical empty-cohort preview produced the same first-five displayed symbols with and without history (Mbappe, Kane, Claude, Senate GOP, Senate DEM); that diagnostic did not reset or persist a new cohort. Historical preferences do not guarantee different symbols under current economic gates. The existing 20 owners were preserved for the actual launch.
+
+The persistent task launched `data/production-20260919-reward-focus-v34` and reached quoting around 18:32:35 ET. The first acceptance attempt preceded the first calibration-bearing rank report and correctly refused to claim full acceptance; the refreshed report populated normally without intervention. Authenticated acceptance at 18:33:08 ET then proved 20 owned size-30 orders across ten markets, zero positions, unchanged gross cap respected, all 20 prior owners retained, five connected/unheld public shards, no entry/stream holds and zero restarts. Build/policy matched the permit. Logs contained no warnings/errors, stderr was empty, reward program was not paused and automatic backup succeeded.
+
+A second authenticated check at 18:35:44 ET again found 20 owned size-30 orders/ten markets, zero positions, all 20 prior owners, 18 calibrated events, five healthy shards and no holds/restarts. The build and policy still matched authority after documentation-only edits.
+
+This is initial deployment acceptance. Future reward outcomes, actual newly allocated slots, natural fills/exits and uninterrupted presence remain observational evidence, not guarantees. No live fault or fill was induced and no runtime source was hot-edited.
