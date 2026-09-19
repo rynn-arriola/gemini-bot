@@ -18,7 +18,7 @@ from gemini_bot.catalog import RewardedContract
 from gemini_bot.domain import ContractRules, EngineState, Outcome, QuoteLeg, RewardPool, Side
 from gemini_bot.execution import IntentLedger, OrderPurpose
 from gemini_bot.operational_logging import ErrorClass, OperationalLogger, configure_logging
-from gemini_bot.rest_client import ApiError
+from gemini_bot.rest_client import ApiError, RewardCatalogUnstable
 from gemini_bot.live_ws import EntryStateChangedBeforeSend
 from gemini_bot.reward_ranking import RankInput, rank_candidate
 from gemini_bot.storage import SQLiteJournal
@@ -211,6 +211,65 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
             self.runtime._defer_read_failure(component, ApiError(429, "rate_limit"))
         self.runtime._complete_read_recovery("reward_metadata")
         self.assertEqual(set(self.runtime._read_recovery_attempts), {"account_audit"})
+
+    async def test_unstable_catalog_preserves_universe_and_recovers_without_halt(self):
+        old = list(self.runtime.universe)
+        self.runtime.rest.reward_config = AsyncMock(return_value={"enabled": True})
+        self.runtime.rest.reward_events = AsyncMock(side_effect=RewardCatalogUnstable())
+        self.runtime.rest.event = AsyncMock(return_value={})
+        for expected in (5, 10, 20, 40, 60, 60):
+            with self.assertRaises(RewardCatalogUnstable) as caught:
+                await self.runtime._reward_pools_still_active()
+            self.assertEqual(self.runtime._defer_read_failure("reward_metadata", caught.exception), expected)
+        self.assertEqual(self.runtime.universe, old)
+        self.assertEqual(self.runtime._permitted_symbols, {"X"})
+        self.runtime.rest.event.assert_not_awaited()
+        self.assertTrue(self.runtime.gate.may_submit)
+        with self.assertRaises(EntryStateChangedBeforeSend):
+            self.runtime._validate_send(self.fixture.payload())
+        self.runtime.rest.reward_events.side_effect = None
+        self.runtime.rest.reward_events.return_value = [{"event_ticker": "E", "daily_pool_usd": "100"}]
+        with patch("gemini_bot.orchestrator.join_reward_contracts", return_value=old):
+            self.assertTrue(await self.runtime._reward_pools_still_active())
+        self.runtime._complete_read_recovery("reward_metadata")
+        self.runtime._validate_send(self.fixture.payload())
+        self.assertFalse(self.runtime._read_recovery_attempts)
+        self.assertEqual(self.runtime._dynamic_pending_cap, 40)
+
+    async def test_catalog_retry_does_not_clear_other_read_hold(self):
+        self.runtime._defer_read_failure("account_audit", ApiError(503, "unavailable"))
+        self.runtime._defer_read_failure("reward_metadata", RewardCatalogUnstable())
+        self.runtime._complete_read_recovery("reward_metadata")
+        self.assertEqual(set(self.runtime._read_recovery_attempts), {"account_audit"})
+
+    async def test_catalog_retry_is_narrow_and_requires_fresh_classified_account(self):
+        for component, exc in (
+            ("account_audit", RewardCatalogUnstable()),
+            ("reward_metadata", ApiError(200, "unstable_reward_catalog")),
+            ("reward_metadata", ApiError(200, "invalid_reward_catalog_shape")),
+        ):
+            with self.subTest(component=component, exc=exc), self.assertRaises(ApiError):
+                self.runtime._defer_read_failure(component, exc)
+        self.runtime.account.last_position_at = 0
+        with self.assertRaises(RewardCatalogUnstable):
+            self.runtime._defer_read_failure("reward_metadata", RewardCatalogUnstable())
+        self.assertFalse(self.runtime._read_recovery_attempts)
+
+    async def test_refresh_request_cannot_bypass_metadata_backoff(self):
+        self.runtime._reward_refresh_requested = True
+        self.assertTrue(self.runtime._reward_refresh_due(1, 61))
+        self.runtime._defer_read_failure("reward_metadata", RewardCatalogUnstable())
+        self.assertFalse(self.runtime._reward_refresh_due(1, 61))
+        self.assertFalse(self.runtime._reward_refresh_due(60, 61))
+        self.assertTrue(self.runtime._reward_refresh_due(61, 61))
+        self.runtime._complete_read_recovery("reward_metadata")
+        self.assertTrue(self.runtime._reward_refresh_due(1, 61))
+        self.runtime._reward_refresh_requested = False
+        self.assertFalse(self.runtime._reward_refresh_due(1, 61))
+
+    async def test_read_recovery_respects_longer_server_cooldown(self):
+        self.assertEqual(self.runtime._defer_read_failure(
+            "reward_metadata", ApiError(429, "rate_limit", retry_after=120)), 120)
 
     async def test_response_shape_auth_and_stale_ws_cannot_enter_read_recovery(self):
         for status in (200, 400, 401, 403, 404):

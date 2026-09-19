@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 19 — inconsistent reward catalog caused a fatal drain
+
+Exhausted inconsistent pagination now emits a typed recoverable catalog-read error, without returning partial rows. Same-process metadata recovery retains safety/exits and owner history; startup may wait read-only. Refresh requests cannot bypass metadata backoff, and longer server cooldowns win. Malformed data, account uncertainty, unknown mutations and HARD remain fail-closed. All 1,059 tests/release checks and fresh flat/order-free preparation pass; no new live activation is claimed. [Evidence and snapshot impact](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
+
 ## September 19 — fractional-fill cash precision and NO-position exit crash
 
 A 5.93-contract BUY NO fill at 0.68 has raw notional 4.0324, but the contract advertises two-decimal quote precision and Gemini's authenticated balance moved by 4.04. The raw-notional ledger therefore became incomplete, a concurrent risk timer persisted that transient state, and emergency exit attempts were blocked locally while incorrectly consuming all three retry slots. Negative inventory also used SELL NO even though collateral-return accounts document BUY YES as the reduction path. The repair parses/persists `quoteAssetPrecision`, stores exact rounded cash deltas per fill, performs only an exact fresh-balance-matched post-watermark legacy repair, routes negative inventory through BUY YES, distinguishes entry BUYs from exit BUYs, preserves entry deadlines, defers concurrent risk marks, and counts only transport-submitted exit attempts. Unknown accounting, missing metadata, ambiguous sends and exhausted real IOC attempts remain fail-closed. **1,023 production + 28 script tests (1,051 total)**, compilation, PowerShell parsing, whitespace and offline release validation pass. Source is restart-ready for controlled deployment; no restart is claimed. [Evidence](docs/PARTIAL_FILL_PRECISION_AND_NO_EXIT_2026-09-19.md).

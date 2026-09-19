@@ -65,7 +65,7 @@ from .reconciliation import (
     build_account_snapshot,
     exposure_from_snapshot,
 )
-from .rest_client import ApiError, GeminiReadRestClient
+from .rest_client import ApiError, GeminiReadRestClient, RewardCatalogUnstable
 from .risk_gate import admit_quote_pair
 from .risk_gate import ExposureState
 from .risk_windows import RiskWindowPolicy
@@ -1340,19 +1340,28 @@ class ProductionOrchestrator:
         No mutation retry, identity repair, credential bypass or reconnect is
         authorized here. Existing safety/exit workers and the permit clock run.
         """
-        transient = exc.status in {429, 500, 502, 503, 504} or (
-            exc.status is None and exc.reason in {"URLError", "TimeoutError", "ConnectionError", "ConnectionResetError"}
+        transient = transient_failure(exc) and (
+            not isinstance(exc, RewardCatalogUnstable) or component == "reward_metadata"
         )
         if (not transient or self.gate.state is not EngineState.QUOTING
                 or not self.account.snapshots_fresh or not self.account.equity_classification_complete):
             raise exc
         attempt = self._read_recovery_attempts.get(component, 0) + 1
         self._read_recovery_attempts[component] = attempt
-        delay = min(60, 5 * 2 ** min(attempt - 1, 4))
+        delay = max(retry_after_seconds(exc), min(60, 5 * 2 ** min(attempt - 1, 4)))
         self.log.event(logging.WARNING, "read_recovery_wait", component=component,
                        attempt=attempt, retry_seconds=delay, http_status=exc.status,
                        entries_paused=True, exits_enabled=True)
         return float(delay)
+
+    def _reward_refresh_due(self, clock: float, next_check_at: float) -> bool:
+        # Lifecycle/depth signals may request an early refresh, but cannot
+        # defeat an outstanding metadata retry backoff. The symbol's existing
+        # lifecycle block/cancellation still applies while waiting.
+        return clock >= next_check_at or (
+            self._reward_refresh_requested
+            and "reward_metadata" not in self._read_recovery_attempts
+        )
 
     def _complete_read_recovery(self, component: str) -> None:
         if self._read_recovery_attempts.pop(component, None) is not None:
@@ -4079,9 +4088,7 @@ class ProductionOrchestrator:
                     for item in self.universe
                 ):
                     self._reward_refresh_requested = True
-                if reward_check is None and (
-                    self._reward_refresh_requested or clock >= next_reward_check_at
-                ):
+                if reward_check is None and self._reward_refresh_due(clock, next_reward_check_at):
                     self._reward_refresh_requested = False
                     reward_check = asyncio.create_task(
                         self._reward_pools_still_active(), name="gemini-reward-refresh"

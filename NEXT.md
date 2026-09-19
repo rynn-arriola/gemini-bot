@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Catalog-recovery repair is restart-ready:** all 1,059 tests/release checks and fresh authenticated flat/order-free preparation passed. Confirm restart approval before fresh build-bound activation. Observe the next natural metadata refresh after deployment; never inject live faults or count paused time as uptime. [Evidence](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
+
 - **Collateral-credit rounding v30 is deployed and passed initial acceptance.** The 5.93 NO position closed through BUY YES, the exact one-cent post-watermark correction applied once against fresh authenticated flat cash/position proof, and the new run started with 24 owned orders/12 markets, zero positions, healthy shards and no holds/errors/restarts. Continue read-only observation of natural fills/exits and cash reconciliation; never reset the baseline, reuse either earlier permit or induce a fill. [Evidence](docs/PARTIAL_FILL_PRECISION_AND_NO_EXIT_2026-09-19.md).
 
 - **Malformed reward-contract isolation v28 is deployed and passed initial acceptance.** Continue read-only observation through the next natural reward-metadata refresh. Verify any unavailable contract is held/canceled only for its symbol while healthy markets remain quoted; never induce malformed venue data or claim initial startup proves every future schema change. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).

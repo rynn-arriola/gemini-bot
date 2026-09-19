@@ -15,6 +15,7 @@ import test_overnight_continuity as overnight
 import test_stream_recovery as recovery
 from gemini_bot.activation import consume_activation_permit, finish_supervised_activation
 from gemini_bot.cli import _run_live, LiveRunnerExit
+from gemini_bot.rest_client import RewardCatalogUnstable
 from gemini_bot.continuity import RestingObservation
 from gemini_bot.domain import EngineState, Outcome
 from gemini_bot.live_ws import EntryStateChangedBeforeSend
@@ -400,14 +401,14 @@ class StartupWaitTests(unittest.IsolatedAsyncioTestCase):
             path.write_text(json.dumps({'permit_version': 7}))
             runtime = AsyncMock()
             runtime._activation_consumed = False
-            for exc in (ApiError(503, 'maintenance'), NoMarketsAvailable('empty')):
+            for exc in (ApiError(503, 'maintenance'), NoMarketsAvailable('empty'), RewardCatalogUnstable()):
                 runtime.prepare.side_effect = exc
                 with patch('gemini_bot.cli.load_live_config'), patch('gemini_bot.cli.ProductionOrchestrator', return_value=runtime):
                     with self.assertRaises(LiveRunnerExit) as result:
                         await _run_live(path, Path(directory), path, ignore_uptime_proxy=False, supervisor_session_id='s')
                 self.assertEqual(result.exception.code, 6)
             runtime.activate.assert_not_awaited()
-            self.assertEqual(runtime.close.await_count, 2)
+            self.assertEqual(runtime.close.await_count, 3)
 
     async def test_unknown_startup_failure_does_not_gain_retry_authority(self):
         with tempfile.TemporaryDirectory() as directory:

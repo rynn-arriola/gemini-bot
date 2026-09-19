@@ -27,7 +27,8 @@ from gemini_bot.execution import IntentLedger, OrderPurpose
 from gemini_bot.market_state import LocalBook
 from gemini_bot.orchestrator import ProductionOrchestrator
 from gemini_bot.rate_limits import AdmissionGovernor
-from gemini_bot.rest_client import ApiError, GeminiReadRestClient
+from gemini_bot.rest_client import ApiError, GeminiReadRestClient, RewardCatalogUnstable
+from gemini_bot.recovery_policy import transient_failure
 from gemini_bot.reward_ranking import RankInput, rank_candidate
 from gemini_bot.storage import SQLiteJournal, WindowsOwnerLock
 from gemini_bot.uptime import sample_and_load_progress
@@ -492,8 +493,24 @@ class StorageAndTransportReviewTests(unittest.IsolatedAsyncioTestCase):
                 {"events": [{"event_ticker": "B"}], "pagination": {"total": 3}},
             ])
         client.public_get = AsyncMock(side_effect=responses)
-        with self.assertRaisesRegex(ApiError, "unstable_reward_catalog"):
+        with self.assertRaisesRegex(RewardCatalogUnstable, "unstable_reward_catalog") as caught:
             await client.reward_events()
+        self.assertTrue(transient_failure(caught.exception))
+        self.assertEqual(client.public_get.await_count, 6)
+
+    async def test_malformed_catalog_is_not_retryable_instability(self):
+        client = GeminiReadRestClient(AdmissionGovernor())
+        for page in (
+            {"events": {}, "pagination": {}},
+            {"events": [{}], "pagination": {"total": 1}},
+            {"events": [], "pagination": {"total": "bad"}},
+            {"events": [], "pagination": {"total": 3001}},
+        ):
+            client.public_get = AsyncMock(return_value=page)
+            with self.subTest(page=page), self.assertRaises(ApiError) as caught:
+                await client.reward_events()
+            self.assertFalse(transient_failure(caught.exception))
+            self.assertEqual(client.public_get.await_count, 1)
 
     async def test_rest_429_installs_server_cooldown(self):
         client = GeminiReadRestClient(AdmissionGovernor())

@@ -3,7 +3,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidMessag
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import math
-from .rest_client import ApiError
+from .rest_client import ApiError, RewardCatalogUnstable
 
 
 class NoMarketsAvailable(RuntimeError):
@@ -11,6 +11,8 @@ class NoMarketsAvailable(RuntimeError):
 
 
 def transient_failure(exc: BaseException) -> bool:
+    if isinstance(exc, RewardCatalogUnstable):
+        return True
     if isinstance(exc, InvalidMessage):
         # websockets wraps an early HTTP handshake EOF in InvalidMessage.
         # Malformed complete responses remain protocol failures, not retries.

@@ -48,6 +48,17 @@ class ApiError(RuntimeError):
         self.retry_after = retry_after
 
 
+class RewardCatalogUnstable(ApiError):
+    """A complete public catalog could not be proven across offset pages.
+
+    No partial rows are usable. Only the catalog reader emits this retryable
+    condition; malformed successful responses remain ordinary fatal ApiError.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(200, "unstable_reward_catalog")
+
+
 def bounded_read(method):
     """Bound lock/admission/retries together; cooldown stays in the governor."""
     @wraps(method)
@@ -369,7 +380,7 @@ class GeminiReadRestClient:
                 raise ApiError(200, "reward_catalog_ceiling_exceeded")
             if attempt < 2:
                 await asyncio.sleep(0)
-        raise ApiError(200, "unstable_reward_catalog")
+        raise RewardCatalogUnstable()
 
     async def event(self, event_ticker: str) -> dict[str, Any]:
         safe = urllib.parse.quote(event_ticker, safe="")
