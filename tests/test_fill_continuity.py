@@ -184,16 +184,25 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("X", account.fill_blocked_entries)
         self.assertIn("X", account.blocked_entries)
 
-    async def test_thin_exit_book_waits_without_global_failure(self):
-        self.inventory()
-        self.book(depth="1")
-        deadline = self.r.journal.get_deadline("X", "YES")
+    async def test_thin_exit_book_reduces_then_reconciles_exact_residual(self):
+        self.inventory(outcome=Outcome.NO, quantity=D("15"))
+        self.book(depth="10")
+        quantities = []
+
+        async def exit(leg, **_):
+            quantities.append(leg.quantity)
+            return self.order(
+                leg,
+                status="CANCELED" if len(quantities) == 1 else "FILLED",
+                filled="10" if len(quantities) == 1 else str(leg.quantity),
+            )
+
+        self.r.private.exit_position.side_effect = exit
         await self.r._run_exit_worker("X")
-        self.assertEqual(self.r._exit_waits["X"].reason, "exit_depth_unavailable")
-        self.assertTrue(self.r.gate.may_submit)
-        self.assertTrue(self.r._isolated_exit_proof_current("X"))
-        self.assertEqual(self.r.journal.get_deadline("X", "YES"), deadline)
-        self.r.private.exit_position.assert_not_awaited()
+        self.assertEqual(quantities, [D("15"), D("5")])
+        self.assertFalse(self.r.account.reducer.positions)
+        self.assertNotIn("X", self.r.account.blocked_entries)
+        self.assertFalse(self.r._exit_waits)
 
     async def test_stale_exit_book_waits_without_sending(self):
         self.inventory()
@@ -270,7 +279,8 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_residual_increase_or_reversal_between_rounds_refuses_send(self):
         self.inventory()
         self.book(depth="1")
-        await self.r._run_exit_worker("X")
+        with patch("gemini_bot.orchestrator.exact_crossing_exit", return_value=None):
+            await self.r._run_exit_worker("X")
         self.book()
         for value in (D(11), D(-1)):
             self.r.journal.persist_deadline("X", "NO", NOW, NOW, D(1))
@@ -377,7 +387,8 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_isolated_proof_cannot_survive_account_change_or_age(self):
         self.inventory()
         self.book(depth="1")
-        await self.r._run_exit_worker("X")
+        with patch("gemini_bot.orchestrator.exact_crossing_exit", return_value=None):
+            await self.r._run_exit_worker("X")
         self.assertTrue(self.r._isolated_exit_proof_current("X"))
         self.r.account.fill_version += 1
         self.assertFalse(self.r._isolated_exit_proof_current("X"))
@@ -397,7 +408,8 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_proven_isolated_exit_allows_unrelated_guard_not_same_symbol(self):
         self.inventory()
         self.book(depth="1")
-        await self.r._run_exit_worker("X")
+        with patch("gemini_bot.orchestrator.exact_crossing_exit", return_value=None):
+            await self.r._run_exit_worker("X")
         self.book("Y")
         self.r._expiry["Y"] = self.r._expiry["X"]
         self.r._permitted_symbols.add("Y")
@@ -482,7 +494,8 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_wait_reporting_excludes_position_and_cash_values(self):
         self.inventory()
         self.book(depth="1")
-        await self.r._run_exit_worker("X")
+        with patch("gemini_bot.orchestrator.exact_crossing_exit", return_value=None):
+            await self.r._run_exit_worker("X")
         self.r._write_status("quoting", True, "synthetic test")
         import json
         status = json.loads((self.r.directory / "status.json").read_text())
@@ -498,11 +511,12 @@ class FillContinuityTests(unittest.IsolatedAsyncioTestCase):
         self.inventory()
         self.book(depth="1")
         deadline = self.r.journal.get_deadline("X", "YES")
-        for _ in range(9):
-            self.sync()
-            before = time.monotonic()
-            await self.r._run_exit_worker("X")
-            self.assertLess(self.r._exit_waits["X"].retry_at - before, 60.5)
+        with patch("gemini_bot.orchestrator.exact_crossing_exit", return_value=None):
+            for _ in range(9):
+                self.sync()
+                before = time.monotonic()
+                await self.r._run_exit_worker("X")
+                self.assertLess(self.r._exit_waits["X"].retry_at - before, 60.5)
         self.assertEqual(self.r._exit_waits["X"].rounds, 9)
         self.assertEqual(self.r.journal.get_deadline("X", "YES"), deadline)
 

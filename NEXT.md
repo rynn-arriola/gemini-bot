@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Partial-depth exit candidate:** verify/publish the UK Green repair, then use only a controlled deployment with fresh account/build/policy authority. Live acceptance must prove exact position/residual handling and unaffected-market continuity; available depth does not guarantee a fill or immediate flatness. [Evidence](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).
+
 - **Correlated-stream recovery v32 is deployed and passed initial acceptance:** 20 owned size-15 best-bid orders/10 markets, zero positions/unowned orders/mismatches, five healthy shards and no holds/errors/restarts. Observe a natural multi-stream recovery without inducing a fault or crediting the gap. Initial startup does not prove that long-run path. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
 
 - **Catalog-recovery v31 is deployed and passed initial acceptance:** 24 owned size-15 best-bid orders/12 markets, zero positions/unowned orders, five healthy shards and no holds/errors/restarts. Observe the next natural inconsistent metadata interval and recovery; never inject a live fault or count paused time as uptime. [Evidence](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).

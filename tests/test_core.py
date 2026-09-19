@@ -467,12 +467,25 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(leg.price, Decimal(".53"))
         self.assertEqual(leg.quantity, Decimal("10"))
 
-    def test_insufficient_exit_depth_refuses_partial_close(self) -> None:
+    def test_thin_exit_depth_prices_exact_position_ioc(self) -> None:
         local = LocalBook("X")
         local.apply_snapshot(
-            [(Decimal(".48"), Decimal("5"))], [(Decimal(".52"), Decimal("5"))], 1, 1, NOW,
+            [(Decimal(".48"), Decimal("5")), (Decimal(".20"), Decimal("5"))],
+            [(Decimal(".52"), Decimal("5")), (Decimal(".80"), Decimal("5"))],
+            1, 1, NOW,
         )
+        yes = exact_crossing_exit(local, Decimal("10"))
+        no = exact_crossing_exit(local, Decimal("-10"))
+        self.assertEqual((yes.side, yes.price, yes.quantity),
+                         (Side.SELL, Decimal(".48"), Decimal("10")))
+        self.assertEqual((no.side, no.outcome, no.price, no.quantity),
+                         (Side.BUY, Outcome.YES, Decimal(".52"), Decimal("10")))
+
+    def test_exit_without_executable_depth_still_waits(self) -> None:
+        local = LocalBook("X")
+        local.apply_snapshot([], [], 1, 1, NOW)
         self.assertIsNone(exact_crossing_exit(local, Decimal("10")))
+        self.assertIsNone(exact_crossing_exit(local, Decimal("-10")))
 
 
 class InventoryTests(unittest.TestCase):

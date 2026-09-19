@@ -2,6 +2,8 @@
 
 These are current account-owner decisions. Changing one requires a new explicit owner decision and a dated update.
 
+- September 19 thin-depth exit repair: after authenticated venue proof showed a 15-contract UKGEN2029-GREEN NO position with only 10 YES contracts offered at the best ask, the owner directed fixing the blocked exit. Permit a synchronized current-best-price IOC for the complete exact authenticated position when any positive executable complementary depth exists, even when haircut-adjusted depth cannot cover the whole position. The IOC may reduce only part; another bounded round requires terminal execution evidence and fresh REST/WebSocket proof of an exact same-sign, non-increasing residual. Never cross deeper prices merely because aggregate thin depth is insufficient. Zero depth remains a market-local wait. Preserve the original deadline, three-attempt/30-second round, backoff, rejection/ambiguity/accounting/HARD stops, unrelated-market service and every entry/risk limit. Verify and publish before controlled deployment; do not hot-edit the running process or create a second mutation owner.
+
 - September 19 open-position repair: owner directed fixing the Gemini issue. Preserve the live position and canonical history; do not reset the baseline or weaken account proof. Implement contract-specific cash precision, documented collateral-return closing for NO inventory, market-local waiting when no exit liquidity exists, and recovery that lets unrelated markets continue. Local pre-send blocks must not consume the three actual IOC attempts. Verify and publish the repair; this decision does not itself authorize a blind restart through failed reconciliation or a second mutation owner.
 
 ## Approved
