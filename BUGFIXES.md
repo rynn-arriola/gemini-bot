@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 19 — correlated recovery exhausted cancellation proof clocks
+
+All five shard workers canceled stale entries concurrently as the private stream also recovered. Their cancellation clocks counted time queued behind one serialized authenticated REST reader and duplicated two terminal-history reads per market, causing safe but unnecessary runner failure after 45 seconds. Active-order proof now coalesces briefly across owners and history proof coalesces by symbol. Only a correlated continuous-service outage gains bounded full-width proof headroom, capped at 180 seconds. No mutation replay, absence proof, ordinary timeout relaxation or uptime credit is allowed. All 1,062 release tests/checks pass; restart preparation remains. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
+
 ## September 19 — inconsistent reward catalog caused a fatal drain
 
 Exhausted inconsistent pagination now emits a typed recoverable catalog-read error, without returning partial rows. Same-process metadata recovery retains safety/exits and owner history; startup may wait read-only. Refresh requests cannot bypass metadata backoff, and longer server cooldowns win. Malformed data, account uncertainty, unknown mutations and HARD remain fail-closed. All 1,059 tests/release checks and fresh flat/order-free preparation passed. V31 initial live acceptance found owned best-bid orders, zero positions/unowned orders, healthy shards and no holds/errors/restarts. [Evidence and snapshot impact](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).

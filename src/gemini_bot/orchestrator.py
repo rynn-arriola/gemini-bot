@@ -91,6 +91,9 @@ _STREAM_RECOVERY_SECONDS = 60
 _EXIT_WORKER_SECONDS = 45
 _DRAIN_SECONDS = 90
 _DRAIN_JOIN_SECONDS = 50
+_CANCEL_CONFIRM_SECONDS = 45
+_CORRELATED_CANCEL_MAX_SECONDS = 180
+_CANCEL_READ_CACHE_SECONDS = .5
 
 
 def _utc_now() -> datetime:
@@ -216,6 +219,10 @@ class ProductionOrchestrator:
         self._commissioning_expected_no_price: Decimal | None = None
         self._quote_cooldown_until: dict[str, float] = {}
         self._cancel_tasks: dict[str, asyncio.Task[None]] = {}
+        self._cancel_active_read: tuple[float, asyncio.Task[list[dict[str, Any]]]] | None = None
+        self._cancel_history_reads: dict[
+            str, tuple[float, asyncio.Task[list[dict[str, Any]]]]
+        ] = {}
         self._adverse_tasks: dict[str, asyncio.Task[bool]] = {}
         self._entry_cancel_symbols: dict[str, int] = {}
         self._maker_pair_guards: dict[str, MakerPairGuard] = {}
@@ -2225,7 +2232,77 @@ class ProductionOrchestrator:
             self._write_status("halted", False, "read-only startup failed")
             raise
 
-    async def _cancel_order_and_confirm(self, order_id: str, *, timeout: float = 45) -> None:
+    def _cancel_confirmation_budget(self, requested: float) -> float:
+        """Scale only a correlated-outage proof queue, with a hard ceiling."""
+        correlated = bool(self._stream_holds) or (
+            isinstance(self.public, PublicMarketShards) and len(self.public.held) > 1
+        )
+        if (not self._continuous_service or self.gate.state is not EngineState.QUOTING
+                or requested < _CANCEL_CONFIRM_SECONDS or not correlated):
+            return requested
+        working_entries = sum(
+            1 for order in self.account.reducer.orders.values()
+            if order.working and order.side is Side.BUY
+        )
+        # Private REST is intentionally serialized. Give a full-width outage
+        # three seconds of bounded proof headroom per entry, without changing
+        # the ordinary per-market timeout or permitting any mutation replay.
+        return max(requested, min(
+            _CORRELATED_CANCEL_MAX_SECONDS,
+            _CANCEL_CONFIRM_SECONDS + 3 * working_entries,
+        ))
+
+    async def _coalesced_cancel_active_orders(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        cached = self._cancel_active_read
+        task = cached[1] if cached is not None else None
+        reusable = task is not None and (
+            not task.done() or (
+                not task.cancelled() and task.exception() is None
+                and now - cached[0] <= _CANCEL_READ_CACHE_SECONDS
+            )
+        )
+        if not reusable:
+            task = asyncio.create_task(
+                self.rest.active_orders(), name="gemini-cancel-active-orders-proof",
+            )
+            self._cancel_active_read = (now, task)
+        try:
+            return await asyncio.shield(task)
+        except BaseException:
+            if (task.done() and self._cancel_active_read is not None
+                    and self._cancel_active_read[1] is task):
+                self._cancel_active_read = None
+            raise
+
+    async def _coalesced_cancel_history(self, symbol: str | None) -> list[dict[str, Any]]:
+        key = "" if symbol is None else symbol
+        now = time.monotonic()
+        cached = self._cancel_history_reads.get(key)
+        task = cached[1] if cached is not None else None
+        reusable = task is not None and (
+            not task.done() or (
+                not task.cancelled() and task.exception() is None
+                and now - cached[0] <= _CANCEL_READ_CACHE_SECONDS
+            )
+        )
+        if not reusable:
+            task = asyncio.create_task(
+                self.rest.recent_order_history(symbol=symbol),
+                name="gemini-cancel-history-proof",
+            )
+            self._cancel_history_reads[key] = (now, task)
+        try:
+            return await asyncio.shield(task)
+        except BaseException:
+            current = self._cancel_history_reads.get(key)
+            if task.done() and current is not None and current[1] is task:
+                self._cancel_history_reads.pop(key, None)
+            raise
+
+    async def _cancel_order_and_confirm(
+        self, order_id: str, *, timeout: float = _CANCEL_CONFIRM_SECONDS,
+    ) -> None:
         # A fast public-book guard and the inventory/quote owner can request the
         # same cancellation. Share one mutation and its terminal proof.
         task = self._cancel_tasks.get(order_id)
@@ -2248,15 +2325,18 @@ class ProductionOrchestrator:
                 if self._cancel_tasks.get(order_id) is task:
                     self._cancel_tasks.pop(order_id, None)
 
-    async def _cancel_order_and_confirm_once(self, order_id: str, *, timeout: float = 45) -> None:
+    async def _cancel_order_and_confirm_once(
+        self, order_id: str, *, timeout: float = _CANCEL_CONFIRM_SECONDS,
+    ) -> None:
         # Includes admission and socket send, not just the confirmation phase.
         # A timeout remains latched in _cancel_tasks; it never authorizes replay.
-        async with asyncio.timeout(timeout):
+        effective_timeout = self._cancel_confirmation_budget(timeout)
+        async with asyncio.timeout(effective_timeout):
             send_cancel = True
             while True:
                 try:
                     await self._cancel_order_and_confirm_bounded(
-                        order_id, timeout=timeout, send_cancel=send_cancel,
+                        order_id, timeout=effective_timeout, send_cancel=send_cancel,
                     )
                     return
                 except (TransportChangedBeforeSend, AdmissionTimeoutBeforeSend) as exc:
@@ -2345,7 +2425,7 @@ class ProductionOrchestrator:
             if current is not None and not current.working:
                 return
             try:
-                rows = await self.rest.active_orders()
+                rows = await self._coalesced_cancel_active_orders()
             except ApiError as exc:
                 if exc.status is not None and exc.status not in {408, 418, 429} and not 500 <= exc.status < 600:
                     raise
@@ -2357,7 +2437,7 @@ class ProductionOrchestrator:
                     # A just-cancelled order should be on the newest page. Use
                     # the contract filter and maximum documented page size; a
                     # full page is valid and must not be mistaken for overflow.
-                    history = await self.rest.recent_order_history(
+                    history = await self._coalesced_cancel_history(
                         symbol=current.symbol if current is not None else None,
                     )
                 except ApiError as exc:
@@ -4515,6 +4595,15 @@ class ProductionOrchestrator:
             task.cancel()
         await asyncio.gather(*self._cancel_tasks.values(), return_exceptions=True)
         self._cancel_tasks.clear()
+        cancel_read_tasks = []
+        if self._cancel_active_read is not None:
+            cancel_read_tasks.append(self._cancel_active_read[1])
+        cancel_read_tasks.extend(task for _, task in self._cancel_history_reads.values())
+        for task in set(cancel_read_tasks):
+            task.cancel()
+        await asyncio.gather(*set(cancel_read_tasks), return_exceptions=True)
+        self._cancel_active_read = None
+        self._cancel_history_reads.clear()
         if self._cash_reconciliation_task is not None:
             self._cash_reconciliation_task.cancel()
             await asyncio.gather(self._cash_reconciliation_task, return_exceptions=True)

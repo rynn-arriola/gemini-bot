@@ -108,6 +108,76 @@ class AvailabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.r._cancel_order_and_confirm("o", timeout=.01)
         self.assertEqual(self.r.private.cancel.await_count, 1)
 
+    async def test_correlated_outage_cancel_budget_scales_and_stays_bounded(self):
+        from types import SimpleNamespace
+        from gemini_bot.domain import Side
+        self.r._stream_holds.add("private")
+        self.r.account.reducer.orders = {
+            str(index): SimpleNamespace(working=True, side=Side.BUY)
+            for index in range(40)
+        }
+        try:
+            self.assertEqual(self.r._cancel_confirmation_budget(45), 165)
+            self.assertEqual(self.r._cancel_confirmation_budget(.01), .01)
+            self.r.account.reducer.orders.update({
+                "extra-" + str(index): SimpleNamespace(working=True, side=Side.BUY)
+                for index in range(40)
+            })
+            self.assertEqual(self.r._cancel_confirmation_budget(45), 180)
+        finally:
+            self.r.account.reducer.orders.clear()
+            self.r._stream_holds.clear()
+        self.assertEqual(self.r._cancel_confirmation_budget(45), 45)
+
+    async def test_cancel_proof_reads_coalesce_during_full_width_recovery(self):
+        active_started, active_release = asyncio.Event(), asyncio.Event()
+        async def active_orders():
+            active_started.set()
+            await active_release.wait()
+            return []
+        self.r.rest.active_orders = AsyncMock(side_effect=active_orders)
+        active_tasks = [
+            asyncio.create_task(self.r._coalesced_cancel_active_orders())
+            for _ in range(40)
+        ]
+        await active_started.wait()
+        active_release.set()
+        self.assertEqual(await asyncio.gather(*active_tasks), [[]] * 40)
+        self.assertEqual(self.r.rest.active_orders.await_count, 1)
+
+        history_started, history_release = asyncio.Event(), asyncio.Event()
+        async def history(*, symbol):
+            history_started.set()
+            await history_release.wait()
+            return [{"symbol": symbol}]
+        self.r.rest.recent_order_history = AsyncMock(side_effect=history)
+        history_tasks = [
+            asyncio.create_task(self.r._coalesced_cancel_history("X"))
+            for _ in range(20)
+        ]
+        await history_started.wait()
+        history_release.set()
+        rows = await asyncio.gather(*history_tasks)
+        self.assertTrue(all(value == [{"symbol": "X"}] for value in rows))
+        self.assertEqual(self.r.rest.recent_order_history.await_count, 1)
+
+    async def test_cancelled_proof_waiter_does_not_orphan_shared_rest_read(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def active_orders():
+            started.set()
+            await release.wait()
+            return []
+        self.r.rest.active_orders = AsyncMock(side_effect=active_orders)
+        first = asyncio.create_task(self.r._coalesced_cancel_active_orders())
+        await started.wait()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        second = asyncio.create_task(self.r._coalesced_cancel_active_orders())
+        await asyncio.sleep(0)
+        release.set()
+        self.assertEqual(await second, [])
+        self.assertEqual(self.r.rest.active_orders.await_count, 1)
+
     async def test_cancel_task_rechecks_terminal_before_send(self):
         order = SimpleNamespace(working=True)
         self.r.account.reducer.orders["o"] = order

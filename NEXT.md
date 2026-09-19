@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Correlated-stream recovery v32 is restart-ready:** 1,062 tests/release checks pass and the prior runner stopped flat. Publish the exact build, run fresh authenticated preparation/backup, issue fresh authority and complete the already owner-requested restart. Then observe natural multi-stream recovery without inducing a fault or crediting the gap. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
+
 - **Catalog-recovery v31 is deployed and passed initial acceptance:** 24 owned size-15 best-bid orders/12 markets, zero positions/unowned orders, five healthy shards and no holds/errors/restarts. Observe the next natural inconsistent metadata interval and recovery; never inject a live fault or count paused time as uptime. [Evidence](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
 
 - **Collateral-credit rounding v30 is deployed and passed initial acceptance.** The 5.93 NO position closed through BUY YES, the exact one-cent post-watermark correction applied once against fresh authenticated flat cash/position proof, and the new run started with 24 owned orders/12 markets, zero positions, healthy shards and no holds/errors/restarts. Continue read-only observation of natural fills/exits and cash reconciliation; never reset the baseline, reuse either earlier permit or induce a fill. [Evidence](docs/PARTIAL_FILL_PRECISION_AND_NO_EXIT_2026-09-19.md).
