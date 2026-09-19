@@ -38,6 +38,8 @@ The following release-preparation notes are historical; the user has since start
 
 ## Live evidence still required
 
+**Partial-depth exit v33 is deployed and passed initial acceptance.** The manual close was reconciled from one exact authenticated SELL with the risk window preserved; the new source handles future thin depth through best-level exact-position IOC attempts plus exact residual proof. Initial live state has 24 owned size-15 orders/12 markets, zero positions, five healthy shards and no holds/errors/restarts. Continue observing natural partial exits; tests and initial flat startup do not prove a future venue fill or immediate flattening. [Evidence](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).
+
 **Initial startup acceptance is complete; long-run adaptive acceptance remains unfinished.** Observe actual joins/cancel/proof/requeue/fallback and unaffected markets under natural conditions. Minute archives cannot establish sub-second races or execution P&L. Do not require manual calibration per market or describe code tests/startup alone as long-run acceptance.
 
 - Best-bid acceptance: measure natural cancellation tails and gaps, distinguish operator drain/recovery from normal refresh, and verify reviewed policy-bound behavior. The September 18 settings review supersedes the old V18 zero-cancellation-sample checkpoint. No induced fills/faults, automatic renewal or silent research-to-all-selected policy change.
