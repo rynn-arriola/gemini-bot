@@ -2130,6 +2130,8 @@ class ProductionOrchestrator:
             assert_position_consistency(after, self.account.reducer.positions)
             if not self.account.equity_classification_complete:
                 self.account.reconcile_legacy_quote_precision_fills(observed_at=_utc_now())
+            if not self.account.equity_classification_complete:
+                self.account.reconcile_legacy_collateral_exit_rounding(observed_at=_utc_now())
             repair_flat = manual_flat_repair and not after.positions and not after.active_orders
             if (
                 self.account.expected_positions != self.account.reducer.positions

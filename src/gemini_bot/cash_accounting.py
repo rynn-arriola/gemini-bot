@@ -26,10 +26,12 @@ def fill_cash_delta(
 ) -> Decimal:
     """Return the exact USD ledger change for one authenticated fill.
 
-    Debits round away from zero and credits round toward zero at Gemini's
-    published quote-asset precision.  A BUY YES exit against owned NO
-    inventory immediately returns the paired collateral, so its net credit is
-    the complementary price rather than an ordinary purchase debit.
+    Debits round away from zero at Gemini's published quote-asset precision.
+    A BUY YES exit against owned NO inventory immediately returns the paired
+    collateral, so its net credit is the complementary price rather than an
+    ordinary purchase debit.  Gemini rounds that collateral-return credit up
+    at quote precision; this also reverses the entry-side debit rounding when
+    the two execution prices are exact complements.
     """
     if not all(value.is_finite() for value in (quantity, price, fee)):
         raise ValueError("fill economics must be finite")
@@ -38,7 +40,7 @@ def fill_cash_delta(
     quantum = _quote_quantum(quote_asset_precision)
     if purpose is OrderPurpose.EXIT and side is Side.BUY and outcome is Outcome.YES:
         gross = (quantity * (Decimal("1") - price)).quantize(
-            quantum, rounding=ROUND_FLOOR,
+            quantum, rounding=ROUND_CEILING,
         )
         return gross - fee
     gross = (quantity * price).quantize(

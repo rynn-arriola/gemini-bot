@@ -74,7 +74,7 @@ class CashPrecisionTests(unittest.TestCase):
                     "Z": "5.93", "X": "FILLED", "t": "exit-trade", "L": ".32",
                     "n": "0", "T": NOW_MS + 1000,
                 })
-                self.assertEqual(account.expected_confirmed_usd, D("99.99"))
+                self.assertEqual(account.expected_confirmed_usd, D("100.00"))
                 self.assertEqual(account.expected_positions, {})
                 self.assertTrue(account.safety_symbols.empty())
                 self.assertIsNone(journal.get_deadline("X", "YES"))
@@ -82,8 +82,57 @@ class CashPrecisionTests(unittest.TestCase):
                     journal.connection.execute(
                         "SELECT cash_delta FROM execution_fill ORDER BY event_at"
                     ).fetchall(),
-                    [("-4.04",), ("4.03",)],
+                    [("-4.04",), ("4.04",)],
                 )
+            finally:
+                journal.close()
+
+    def test_buy_yes_exit_rounds_gross_credit_up_before_exact_fee(self) -> None:
+        self.assertEqual(fill_cash_delta(
+            side=Side.BUY, outcome=Outcome.YES, purpose=OrderPurpose.EXIT,
+            quantity=D("5.93"), price=D(".32"), fee=D(".07"),
+            quote_asset_precision=2,
+        ), D("3.97"))
+
+    def test_legacy_collateral_exit_rounding_repair_requires_exact_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = SQLiteJournal(Path(directory) / "journal.sqlite")
+            try:
+                ledger = IntentLedger(journal)
+                account = AccountRuntime(ledger, journal)
+                account.quote_asset_precision = {"X": 2}
+                journal.set_runtime_state(
+                    "cash_reconciliation_watermark", "verified",
+                    updated_at=datetime(2026, 9, 19, 9, 0, tzinfo=timezone.utc),
+                )
+                intent = ledger.prepare(
+                    QuoteLeg("X", Outcome.YES, Side.BUY, D(".32"), D("5.93")),
+                    OrderPurpose.EXIT,
+                )
+                ledger.mark_sent(intent.client_order_id)
+                ledger.acknowledge(intent.client_order_id, "exit-order")
+                ledger.mark_terminal(intent.client_order_id)
+                journal.record_fill(
+                    trade_id="exit-trade", order_id="exit-order",
+                    client_order_id=intent.client_order_id, symbol="X", side="BUY",
+                    outcome="YES", quantity=D("5.93"), price=D(".32"), fee=D(".07"),
+                    cash_delta=D("3.96"),
+                    event_at=datetime(2026, 9, 19, 12, 43, tzinfo=timezone.utc),
+                )
+                account.expected_confirmed_usd = D("99.92")
+                account.confirmed_usd = D("99.93")
+                account.expected_positions = {}
+                account.reducer.positions = {}
+                self.assertEqual(account.reconcile_legacy_collateral_exit_rounding(
+                    observed_at=datetime(2026, 9, 19, 12, 45, tzinfo=timezone.utc),
+                ), 1)
+                self.assertEqual(account.expected_confirmed_usd, D("99.93"))
+                self.assertEqual(journal.connection.execute(
+                    "SELECT cash_delta FROM execution_fill WHERE trade_id='exit-trade'"
+                ).fetchone(), ("3.97",))
+                self.assertEqual(account.reconcile_legacy_collateral_exit_rounding(
+                    observed_at=datetime(2026, 9, 19, 12, 46, tzinfo=timezone.utc),
+                ), 0)
             finally:
                 journal.close()
 

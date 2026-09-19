@@ -8,12 +8,21 @@ The raw notional is 4.0324. The contract metadata reports `quoteAssetPrecision: 
 
 The old negative-position exit was also incompatible with Gemini collateral return. Gemini documents reducing NO inventory by BUY YES, not direct SELL NO, for accounts using that feature.
 
+The first controlled activation proved that route on the live account. The bot
+bought 5.93 YES at 0.32, Gemini filled the IOC, and authenticated position proof
+became flat. The fill reported a 0.07 fee. Gemini credited 3.97: the raw
+complementary credit 4.0324 rounds **up** to 4.04 at quote precision before the
+exact fee is subtracted. The first implementation rounded that credit down to
+4.03 and expected 3.96, leaving an exact one-cent mismatch. The safety clock
+correctly halted again rather than adopting the unexplained cent.
+
 ## Repair
 
 - Parse and validate each contract's `quoteAssetPrecision`; malformed or missing metadata remains isolated and untradeable.
 - Round BUY debits up and SELL credits down at quote precision, subtract authenticated fees, and persist the exact cash delta with each fill.
-- Account for BUY YES negative-position exits as the complementary net collateral credit. Such a BUY is an exit, never a new entry: it creates no new deadline, sibling cancellation or safety action.
+- Account for BUY YES negative-position exits as the complementary collateral credit rounded up at quote precision, then subtract the authenticated fee. Such a BUY is an exit, never a new entry: it creates no new deadline, sibling cancellation or safety action.
 - Persist historical symbol precision. A startup repair considers only blank fills at or after the durable cash watermark and commits only when the entire candidate correction exactly equals the fresh authenticated private-stream cash balance. It is atomic and idempotent. Older exception-covered history is untouched.
+- Repair the earlier down-rounded collateral exit only when the complete post-watermark correction exactly matches fresh authenticated cash and positions. The migration is atomic, fill-identity guarded and idempotent; it cannot reset the cash baseline.
 - Build and validate negative exact exits as BUY YES against fresh synchronized asks. Positive inventory remains SELL YES against bids.
 - Identify entry versus exit from the durable intent, not from BUY/SELL alone. Unknown purpose remains blocked.
 - Count an IOC retry only after the order reaches transport. Repeated local pre-send blocks wait within the same 30-second proof window and do not spend three venue attempts.
@@ -25,7 +34,7 @@ This does not tolerate unexplained cash, guess missing precision, replay an ambi
 
 ## Verification and deployment state
 
-The complete offline verification passed: **1,023 production tests plus 28 script tests (1,051 total)**, Python compilation, all PowerShell parse checks, whitespace checks and offline Windows policy/durable-storage release validation. Dedicated regressions cover both observed fractional-fill examples, exact complementary exit cash, BUY-exit lifecycle isolation, fresh-balance-matched/idempotent legacy repair, durable exit intent classification, the risk-mark race and pre-send retry accounting. The bot has not been restarted by this repair. Controlled deployment must preserve the canonical journal, prove the current venue bracket, create a verified backup, apply the exact balance-matched legacy correction, and use fresh build/policy/account authority before activation.
+The complete follow-up verification passed: **1,025 production tests plus 28 script tests (1,053 total)**, Python compilation, all PowerShell parse checks, whitespace checks and offline Windows policy/durable-storage release validation. Dedicated regressions cover both observed fractional-fill examples, the live fee-bearing complementary exit, BUY-exit lifecycle isolation, both fresh-balance-matched/idempotent legacy repairs, durable exit intent classification, the risk-mark race and pre-send retry accounting. The first controlled activation closed the position and then halted on the one-cent accounting discrepancy; it did not resume unrelated quoting. A second controlled deployment must prove the now-flat venue bracket, create a fresh verified backup, apply the exact one-cent migration, and use fresh build/policy/account authority before activation.
 
 Official references:
 

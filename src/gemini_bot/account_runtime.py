@@ -273,6 +273,72 @@ class AccountRuntime:
         self._known_account_activity()
         return len(plans)
 
+    def reconcile_legacy_collateral_exit_rounding(self, *, observed_at: datetime) -> int:
+        """Repair old BUY-YES exit credits only from an exact fresh cash match.
+
+        The first collateral-return exit implementation rounded the gross
+        complementary credit down.  Gemini rounds that credit up at the
+        contract quote precision.  This migration is deliberately narrow,
+        post-watermark, position-consistent, and accepted only when all
+        candidate corrections exactly explain the authenticated balance.
+        """
+        if observed_at.tzinfo is None:
+            raise ValueError("collateral exit reconciliation requires an aware timestamp")
+        if self.confirmed_usd is None or self.expected_confirmed_usd is None:
+            return 0
+        if self.expected_positions != self.reducer.positions or self.unowned_order_seen:
+            return 0
+        watermark = self.journal.get_runtime_state_record("cash_reconciliation_watermark")
+        if watermark is None:
+            return 0
+        rows = self.journal.connection.execute(
+            """SELECT f.trade_id,f.symbol,f.quantity,f.price,f.fee,f.cash_delta
+                 FROM execution_fill f
+                 JOIN order_intent i ON i.client_order_id=f.client_order_id
+                WHERE f.side='BUY' AND f.outcome='YES' AND i.purpose='exit'
+                  AND f.cash_delta<>'' AND f.event_at>=?
+                ORDER BY f.event_at,f.trade_id""",
+            (watermark[1].isoformat(),),
+        ).fetchall()
+        plans: list[tuple[str, str, Decimal, Decimal]] = []
+        correction = Decimal("0")
+        for trade_id, symbol, quantity, price, fee, stored_cash_delta in rows:
+            canonical = canonical_symbol(str(symbol))
+            precision = self.quote_asset_precision.get(canonical)
+            if precision is None:
+                continue
+            exact = fill_cash_delta(
+                side=Side.BUY, outcome=Outcome.YES, purpose=OrderPurpose.EXIT,
+                quantity=Decimal(str(quantity)), price=Decimal(str(price)),
+                fee=Decimal(str(fee)), quote_asset_precision=precision,
+            )
+            stored = Decimal(str(stored_cash_delta))
+            if exact != stored:
+                correction += exact - stored
+                plans.append((str(trade_id), canonical, stored, exact))
+        if not plans or self.expected_confirmed_usd + correction != self.confirmed_usd:
+            return 0
+        with self.journal.transaction():
+            changed = 0
+            for trade_id, _, stored, exact in plans:
+                changed += self.journal.connection.execute(
+                    "UPDATE execution_fill SET cash_delta=? WHERE trade_id=? AND cash_delta=?",
+                    (str(exact), trade_id, str(stored)),
+                ).rowcount
+            if changed != len(plans):
+                raise RuntimeError("collateral exit rounding repair lost atomic identity")
+            self.journal.set_runtime_state(
+                "expected_confirmed_usd", str(self.confirmed_usd), updated_at=observed_at,
+            )
+            self.journal.audit("legacy_collateral_exit_rounding_reconciled", {
+                "fill_count": changed,
+                "symbols": sorted({symbol for _, symbol, _, _ in plans}),
+            })
+        self.expected_confirmed_usd = self.confirmed_usd
+        self.fill_version += 1
+        self._known_account_activity()
+        return len(plans)
+
     def reconcile_authenticated_settlement(
         self,
         settlement: AuthenticatedSettlement,
