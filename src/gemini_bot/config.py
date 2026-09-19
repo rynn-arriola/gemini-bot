@@ -32,9 +32,12 @@ class StrategyConfig:
         if isinstance(self.queue_pilot, AdaptivePolicy) and not stay_best and self.quote_offset_ticks != 1:
             raise ConfigurationError("adaptive pilot requires one-tick fallback")
         if self.queue_pilot is not None and (
-            self.quote_quantity != Decimal("15") or (not stay_best and self.quote_offset_ticks not in {1, 2})
+            self.quote_quantity not in {Decimal("15"), Decimal("30")}
+            or (not stay_best and self.quote_offset_ticks not in {1, 2})
         ):
-            raise ConfigurationError("queue policy requires size 15 and its approved placement offset")
+            raise ConfigurationError(
+                "queue policy requires an approved quote size and placement offset"
+            )
         if self.quote_quantity < Decimal("10"):
             raise ConfigurationError("quote_quantity must meet Gemini's 10-contract reward minimum")
         if self.quote_offset_ticks < 0:

@@ -17,11 +17,11 @@ class OneTickTests(unittest.IsolatedAsyncioTestCase):
         # This suite exercises the one-tick fallback, independently of live pilot scope.
         strategy = replace(strategy, queue_pilot=None, quote_offset_ticks=1)
         self.assertEqual(strategy.quote_offset_ticks, 1)
-        self.assertEqual(strategy.quote_quantity, D(15))
+        self.assertEqual(strategy.quote_quantity, D(30))
         self.assertIsNone(strategy.queue_pilot)
         self.r.config = replace(self.r.config, strategy=strategy, risk=risk)
         target, _ = self.r._quote_target_state('X')
-        self.c = replace(fixtures.candidate(D(15)), quote=target)
+        self.c = replace(fixtures.candidate(D(30)), quote=target)
 
     async def asyncTearDown(self):
         await self.fx.asyncTearDown()
@@ -33,7 +33,7 @@ class OneTickTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fx.sent), 2)
         for message in self.fx.sent:
             self.assertEqual(D(message['params']['price']), D('.47'))
-            self.assertEqual(D(message['params']['quantity']), D(15))
+            self.assertEqual(D(message['params']['quantity']), D(30))
             self.assertEqual(message['params']['timeInForce'], 'MOC')
 
     async def test_exact_one_tick_pair_is_not_canceled_by_old_two_tick_boundary(self):
@@ -60,7 +60,7 @@ class OneTickTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_seven_fill_blocks_second_leg_and_keeps_deadline(self):
         def fill():
-            self.r.account.apply({**self.fx.frames['YES'], 'X':'PARTIALLY_FILLED', 'z':'8',
+            self.r.account.apply({**self.fx.frames['YES'], 'X':'PARTIALLY_FILLED', 'z':'23',
                 'Z':'7', 't':'one-tick-fill', 'L':'.47', 'n':'.00',
                 'T':int(fixtures.NOW.timestamp()*1000)})
         self.fx.at_second_admission = fill
@@ -75,17 +75,17 @@ class OneTickTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.fx.sent)
 
     async def test_capacity_still_blocks(self):
-        self.fx.add_working(39, price=D('.1'), quantity=D(15))
+        self.fx.add_working(39, price=D('.1'), quantity=D(30))
         await self.r._quote_pair_locked(self.c)
         self.assertFalse(self.fx.sent)
 
-    async def test_forty_size_fifteen_orders_fit_without_raising_gross_cap(self):
-        self.fx.add_working(38, price=D('.50'), quantity=D(15))
+    async def test_twenty_size_thirty_orders_fit_without_raising_gross_cap(self):
+        self.fx.add_working(18, price=D('.50'), quantity=D(30))
         await self.r._quote_pair_locked(self.c)
         self.assertEqual(len(self.fx.sent), 2)
         exposure = self.r._websocket_exposure()
-        self.assertEqual(exposure.pending_orders, 40)
-        self.assertEqual(exposure.gross_reservation_usd, D('299.10'))
+        self.assertEqual(exposure.pending_orders, 20)
+        self.assertEqual(exposure.gross_reservation_usd, D('298.20'))
 
     async def test_farther_pair_can_remain_sticky_without_refresh_churn(self):
         await self.r._quote_pair_locked(self.c)

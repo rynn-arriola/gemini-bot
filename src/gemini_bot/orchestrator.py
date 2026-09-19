@@ -259,9 +259,11 @@ class ProductionOrchestrator:
         self._queue_archive = ShadowArchive(self.directory)
         self._queue_watch_symbols: set[str] = set()
         self._queue_live_orders: dict[str, Any] = {}
-        self.queue_pilot = (AdaptiveQueuePilot(config.strategy.queue_pilot)
+        self.queue_pilot = (AdaptiveQueuePilot(
+                config.strategy.queue_pilot, config.strategy.quote_quantity)
             if isinstance(config.strategy.queue_pilot, AdaptivePolicy) else
-            QueuePilot(config.strategy.queue_pilot) if config.strategy.queue_pilot else None)
+            QueuePilot(config.strategy.queue_pilot, config.strategy.quote_quantity)
+            if config.strategy.queue_pilot else None)
         self._pilot_proof_tasks: dict[str, asyncio.Task] = {}
         self._pilot_next_proof: dict[str, float] = {}
         self._pilot_proved: dict[str, tuple] = {}

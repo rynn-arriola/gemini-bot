@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **Size-30 source is under isolated verification and is not deployed.** New maker legs use the exact configured 30-contract quantity while every existing monetary/risk/HARD boundary remains unchanged. At ordinary prices, expect roughly 20 orders/10 two-sided markets under the $300 gross cap. Complete full verification and publication before any controlled flat restart with fresh authority. [Evidence](docs/QUOTE_SIZE_30_2026-09-19.md).
+
 - **Partial-depth exit candidate:** verify/publish the UK Green repair, then use only a controlled deployment with fresh account/build/policy authority. Live acceptance must prove exact position/residual handling and unaffected-market continuity; available depth does not guarantee a fill or immediate flatness. [Evidence](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).
 
 - **Correlated-stream recovery v32 is deployed and passed initial acceptance:** 20 owned size-15 best-bid orders/10 markets, zero positions/unowned orders/mismatches, five healthy shards and no holds/errors/restarts. Observe a natural multi-stream recovery without inducing a fault or crediting the gap. Initial startup does not prove that long-run path. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).

@@ -34,10 +34,10 @@ def book(qty=100, seq=1, bid=".48", ask=".52"):
     return b
 
 
-def order(outcome=Outcome.YES, client_id="c", price=D(".48")):
+def order(outcome=Outcome.YES, client_id="c", price=D(".48"), quantity=D(15)):
     r = AccountReducer()
     r.apply_order_update(dict(e="orderUpdate", i=outcome.value, c=client_id, s="X", S="BUY", O=outcome.value,
-                             p=str(price), q="15", z="15", X="NEW"))
+                             p=str(price), q=str(quantity), z=str(quantity), X="NEW"))
     return r.orders[outcome.value]
 
 
@@ -70,6 +70,16 @@ class PilotStateTests(unittest.TestCase):
 
     def test_healthy_actual_anchor_is_kept(self):
         self.assertEqual(self.advice([self.anchor()]), "keep")
+
+    def test_configured_thirty_is_exact_for_queue_validation(self):
+        pilot = QueuePilot(policy(), D(30))
+        pilot.observe_book(book(), generation=(0, 0), at=NOW - timedelta(seconds=61))
+        pilot.proof_required.clear()
+        pilot.anchor_send("X", Outcome.YES, "c", D(".48"), NOW - timedelta(seconds=10))
+        self.assertEqual(pilot.advice("X", now=NOW, generation=(0, 0),
+            orders=[order(quantity=D(30))], safe=True), "keep")
+        self.assertEqual(pilot.advice("X", now=NOW, generation=(0, 0),
+            orders=[order(quantity=D(15))], safe=True), "withdraw")
 
     def test_new_depth_does_not_move_existing_anchor_back(self):
         o = self.anchor()

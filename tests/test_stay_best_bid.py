@@ -244,7 +244,7 @@ class StayBestConfigTests(unittest.TestCase):
             path.write_text(json.dumps(base))
             with self.assertRaises(ConfigurationError): build_candidate(path,review,now=NOW)
 
-    def test_candidate_default_is_explicit_zero_offset_size_fifteen(self):
+    def test_candidate_default_is_explicit_zero_offset_size_thirty(self):
         s,r=load_policy()
         self.assertEqual(s.quote_offset_ticks,0)
         self.assertEqual(s.queue_pilot.placement_mode,'stay_best')
@@ -252,7 +252,7 @@ class StayBestConfigTests(unittest.TestCase):
         self.assertEqual(s.queue_pilot.same_price_refresh_minimum_gain,D(500))
         self.assertEqual(s.queue_pilot.limits.minimum_requeue_gain,D(250))
         self.assertEqual(s.queue_pilot.limits.refresh_cooldown_seconds,D(10))
-        self.assertEqual(s.quote_quantity,D(15))
+        self.assertEqual(s.quote_quantity,D(30))
         self.assertEqual(r.max_pending_orders,40)
         self.assertEqual(r.risk_window_loss_usd,D(30))
 

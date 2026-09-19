@@ -150,9 +150,9 @@ class Evidence:
 
 
 class AdaptiveQueuePilot(QueuePilot):
-    def __init__(self, policy: AdaptivePolicy):
+    def __init__(self, policy: AdaptivePolicy, quote_quantity: D = D("15")):
         self._symbols = policy.symbols
-        super().__init__(policy)
+        super().__init__(policy, quote_quantity)
         self.evidence = {}
         self.modes = {s: self.initial_mode for s in policy.symbols}
         # Initial one-tick placement uses normal execution proofs. Transitions
@@ -317,7 +317,8 @@ class AdaptiveQueuePilot(QueuePilot):
         if ((working and symbol in self.proof_required)
                 or len(working) > 2 or len({o.outcome for o in working}) != len(working)
                 or any(o.side is not Side.BUY or o.cumulative_filled
-                    or o.remaining_quantity != D(15) or o.original_quantity != D(15) for o in working)):
+                    or o.remaining_quantity != self.quote_quantity
+                    or o.original_quantity != self.quote_quantity for o in working)):
             self.reasons[symbol] = 'fill_or_invalid_pair'
             return 'withdraw'
         since = (D(str((now-self.cooldown_at[symbol]).total_seconds()))

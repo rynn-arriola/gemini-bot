@@ -96,8 +96,12 @@ class PilotMarket:
 
 
 class QueuePilot:
-    def __init__(self, policy: PilotPolicy):
+    def __init__(self, policy: PilotPolicy, quote_quantity: D = D("15")):
+        if (not isinstance(quote_quantity, D) or not quote_quantity.is_finite()
+                or quote_quantity < D("10")):
+            raise ValueError("queue pilot quote quantity is invalid")
         self.policy = policy
+        self.quote_quantity = quote_quantity
         self.markets = {}
         self.cooldown_at = {}
         # Barriers are owned by the orchestrator; observation cannot clear them.
@@ -210,8 +214,9 @@ class QueuePilot:
             return "withdraw"
         working = [o for o in orders if o.symbol == symbol and o.working]
         if (len(working) > 2 or len({o.outcome for o in working}) != len(working)
-                or any(o.side is not Side.BUY or o.cumulative_filled or o.remaining_quantity != D(15)
-                       or o.original_quantity != D(15) for o in working)):
+                or any(o.side is not Side.BUY or o.cumulative_filled
+                       or o.remaining_quantity != self.quote_quantity
+                       or o.original_quantity != self.quote_quantity for o in working)):
             self.reasons[symbol] = "fill_or_invalid_pair"
             return "withdraw"
         if not working and symbol in self.proof_required:
@@ -234,12 +239,14 @@ class QueuePilot:
                 symbol, now, m.depths[outcome],
                 a.scenario.ahead_scenario if order is not None else m.depths[outcome],
                 flow[outcome],
+                quote_quantity=self.quote_quantity,
                 working=order is not None, best_price_changed=order is not None and order.price != m.prices[outcome],
                 observation_complete=True, safety_checks_pass=safe,
                 since_last_refresh_seconds=max(D(0), since),
             )
             advice = recommend_bid(observation, pilot_symbols=self.symbols, calibration=c,
-                maximum_symbols=MAX_ACTIVE_MARKETS if getattr(self.policy, 'scope', None) == 'all_selected' else 2)
+                maximum_symbols=MAX_ACTIVE_MARKETS if getattr(self.policy, 'scope', None) == 'all_selected' else 2,
+                expected_quote_quantity=self.quote_quantity)
             if advice.action not in {"keep", "join_best_bid_moc"}:
                 self.reasons[symbol] = advice.reason
                 return "withdraw" if working else "wait"

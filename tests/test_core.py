@@ -77,7 +77,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_approved_policy_has_one_stop_and_expected_caps(self) -> None:
         strategy, risk = load_policy()
-        self.assertEqual(strategy.quote_quantity, Decimal("15"))
+        self.assertEqual(strategy.quote_quantity, Decimal("30"))
         self.assertEqual(risk.max_gross_reservation_usd, Decimal("300"))
         self.assertEqual(risk.max_market_exposure_usd, Decimal("90"))
         self.assertEqual(risk.max_stressed_exit_loss_usd, Decimal("40"))
@@ -98,14 +98,14 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertTrue(result.allowed)
 
-    def test_approved_fifteen_contract_size_respects_unchanged_gross_cap(self) -> None:
+    def test_approved_thirty_contract_size_respects_unchanged_gross_cap(self) -> None:
         strategy, risk = load_policy()
         candidate = rank_candidate(
             RankInput(RewardPool("p", Decimal("50")), rules(), book()), now=NOW,
             quantity=strategy.quote_quantity, offset_ticks=strategy.quote_offset_ticks,
         )
-        self.assertEqual(candidate.quote.yes.quantity, Decimal("15"))
-        self.assertEqual(candidate.quote.no.quantity, Decimal("15"))
+        self.assertEqual(candidate.quote.yes.quantity, Decimal("30"))
+        self.assertEqual(candidate.quote.no.quantity, Decimal("30"))
         state = ExposureState(gross_reservation_usd=Decimal("290"))
         result = admit_quote_pair(
             risk, state, candidate.quote,

@@ -64,6 +64,7 @@ def recommend_bid(
     observation: BidObservation, *, pilot_symbols: frozenset[str],
     calibration: QueueCalibration | None,
     maximum_symbols: int = 2,
+    expected_quote_quantity: Decimal = D("15"),
 ) -> BidAdvice:
     o = observation
     aware(o.at)
@@ -81,7 +82,11 @@ def recommend_bid(
         return BidAdvice("existing_fill_exit_flow", "no_requeue_after_fill")
     if o.cancellation_pending_or_unknown:
         return BidAdvice("wait_for_reconciliation", "never_replace_unknown_cancel")
-    if not o.safety_checks_pass or not o.observation_complete or o.quote_quantity != D("15"):
+    nonnegative(expected_quote_quantity)
+    if expected_quote_quantity < D("10"):
+        raise ValueError("expected quote quantity must satisfy the reward minimum")
+    if (not o.safety_checks_pass or not o.observation_complete
+            or o.quote_quantity != expected_quote_quantity):
         return BidAdvice("withdraw_if_working_else_wait", "safety_or_evidence_unavailable", o.working)
     if calibration is None or o.at >= calibration.expires_at:
         return BidAdvice("withdraw_if_working_else_wait", "missing_or_expired_calibration", o.working)
