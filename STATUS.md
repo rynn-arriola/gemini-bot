@@ -4,7 +4,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **The bot is stopped flat; malformed reward-contract isolation is restart-ready but not deployed.** At 20:08:59 ET v27 received an event payload containing a contract without `priceIncrement`. Catalog parsing raised `KeyError`, the existing drain canceled every owned order, and fresh supervisor reconciliation reached `stopped_flat` with zero positions/orders before entering `ATTENTION_REQUIRED`. The repair skips only incomplete/invalid contracts and immediately blocks/cancels a selected affected symbol while healthy siblings and unrelated markets continue. **1,020 production + 28 script tests = 1,048 passed**, plus compilation, offline validation and whitespace. No process, permit or account mutation was performed by the repair. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
+- **Malformed reward-contract isolation v28 is deployed and running.** The old attention-only v27 supervisor exited cleanly with its runtime `stopped_flat`. Fresh repaired-build preparation proved zero positions/orders, 32 tracked/ranked markets, 17 eligible, no holds and a verified 12,189,696-byte backup. New exact v7 authority has no uptime override. Live acceptance observed 34 acknowledged size-15 orders across 17 complete markets, all matching current ranked best-bid prices, zero positions, five healthy shards, no holds/current-process warnings or errors, no disabled queue symbols/cancellation breach and zero supervisor restarts. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
 
 - **Same-price refresh churn repair v27 was deployed and passed initial acceptance before the later metadata failure.** V26 drained terminal/flat; verified policy v7 launched with fresh exact authority after a transient read-only API timeout safely halted and the retry proved zero orders/positions, healthy shards and backup. Initial acceptance observed 30 owned size-15 orders/15 pairs exactly at best bid, zero price mismatches/positions, five healthy shards, no holds/live errors/fills/restarts and explicit 300-second/500-contract optional controls. No startup optional refresh occurred. [Evidence](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
 
@@ -40,7 +40,7 @@ Updated September 18, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operator route
 
-Active runtime directory: `data/production-20260918-refresh-churn-v27`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
+Active runtime directory: `data/production-20260918-contract-schema-v28`. Its permit is bound to the exact deployed build, policy and account; never reuse an older runtime permit. Use read-only runtime/account checks for observation and the normal graceful stop route for any future deployment.
 Never reuse consumed/obsolete permits, start a second owner, reset the cohort, reinterpret history or give downtime snapshot credit.
 
 [NEXT.md](NEXT.md) lists the remaining evidence gates.

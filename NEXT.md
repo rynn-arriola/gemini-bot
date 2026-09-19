@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Malformed reward-contract isolation is verified and restart-ready; the bot remains stopped flat.** Publish the exact tested commit, then any live return requires fresh read-only account/integrity/backup preparation and new exact build/policy/account authority; never reuse the consumed v27 permit. After an owner-authorized launch, verify that incomplete contract metadata holds/cancels only its symbol and does not interrupt healthy markets. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
+- **Malformed reward-contract isolation v28 is deployed and passed initial acceptance.** Continue read-only observation through the next natural reward-metadata refresh. Verify any unavailable contract is held/canceled only for its symbol while healthy markets remain quoted; never induce malformed venue data or claim initial startup proves every future schema change. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
 
 - **Same-price churn v27 deployment completed.** Continue read-only observation after the 600-second warmup: verify no market receives two optional refresh decisions within 300 seconds, each optional decision has at least 500 estimated contracts of gain, mandatory price changes remain responsive, and unrelated pairs stay resting. Initial acceptance proves configured controls and best-bid prices, not long-run frequency, exact queue rank, rewards or profit. [Handoff](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).
 

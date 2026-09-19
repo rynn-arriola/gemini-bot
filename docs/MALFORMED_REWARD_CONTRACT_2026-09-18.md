@@ -18,4 +18,10 @@ The repair changes no quote price, quantity, owner capacity, exposure, exit, acc
 - Python compilation, offline Windows policy/storage validation and `git diff --check` passed.
 - No Gemini connection, order mutation, permit creation or restart was used for this repair.
 
-The source is restart-ready but not live. Deployment requires the standard fresh read-only account/integrity/backup preparation and new exact build/policy/account authority; the consumed v27 permit must not be reused.
+## Deployment and initial acceptance
+
+The owner authorized restart after verification. The old attention-only v27 supervisor accepted `SUPERVISOR_STOP`, exited without force, and left its existing `stopped_flat` result intact. Fresh preparation in `data/production-20260918-contract-schema-v28` completed at 20:35:48 Eastern with zero positions/orders, 32 tracked and ranked markets, 17 eligible markets, no entry/stream holds and a verified 12,189,696-byte backup.
+
+New version-7 authority is exact-build/policy/account bound, has null expiry and no uptime override. The persistent task launched supervisor 41980 and runner 39108. Initial acceptance at approximately 20:41 Eastern found 34 acknowledged size-15 BUY entry orders across 17 complete markets: 17 YES and 17 NO. Every journal price matched the current rank report's best-bid target. Runtime reported zero positions, five connected/unheld public shards, no entry/stream/inventory holds, no current-process warning/error, no disabled queue symbol or cancellation-envelope breach, and zero supervisor restarts. Optional same-price controls remained 300 seconds and 500 contracts.
+
+This checkpoint proves startup and current-payload compatibility only. The next natural metadata refresh remains a read-only observation gate; no test or startup snapshot guarantees every future venue schema, continuous reward qualification, fills, exits or profit.
