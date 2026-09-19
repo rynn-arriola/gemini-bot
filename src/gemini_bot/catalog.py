@@ -51,7 +51,7 @@ def join_reward_contracts(
     for reward in rewards:
         ticker = str(reward.get("event_ticker", "")).strip().upper()
         event = events.get(ticker)
-        if event is None:
+        if not isinstance(event, dict):
             continue
         if isinstance(event.get("event"), dict):
             event = event["event"]
@@ -67,19 +67,34 @@ def join_reward_contracts(
             qualifying_maker_count=int(reward["qualifying_maker_count"])
             if reward.get("qualifying_maker_count") is not None else None,
         )
-        for contract in event.get("contracts", []):
-            symbol = canonical_symbol(str(contract["instrumentSymbol"]))
+        contracts = event.get("contracts")
+        if not isinstance(contracts, list):
+            continue
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+            try:
+                raw_symbol = contract["instrumentSymbol"]
+                if not isinstance(raw_symbol, str):
+                    raise TypeError("contract symbol must be text")
+                symbol = canonical_symbol(raw_symbol)
+                rules = ContractRules(
+                    symbol=symbol,
+                    tick_size=Decimal(str(contract["priceIncrement"])),
+                    quantity_minimum=Decimal(str(contract["quantityMinimum"])),
+                    quantity_increment=Decimal(str(contract["quantityIncrement"])),
+                    active=contract.get("status") == "active" and contract.get("marketState") == "open",
+                    post_only_mode=bool(contract.get("postOnlyMode", False)),
+                )
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                # Gemini can briefly return an incomplete contract alongside
+                # otherwise usable siblings while event metadata is changing.
+                # Treat that contract as unavailable; callers will hold/cancel
+                # it if it was already selected, without stopping other markets.
+                continue
             if symbol in symbols:
                 raise ValueError("duplicate contract symbol in reward catalog")
             symbols.add(symbol)
-            rules = ContractRules(
-                symbol=symbol,
-                tick_size=Decimal(str(contract["priceIncrement"])),
-                quantity_minimum=Decimal(str(contract["quantityMinimum"])),
-                quantity_increment=Decimal(str(contract["quantityIncrement"])),
-                active=contract.get("status") == "active" and contract.get("marketState") == "open",
-                post_only_mode=bool(contract.get("postOnlyMode", False)),
-            )
             result.append(RewardedContract(
                 event_ticker=ticker,
                 pool=pool,

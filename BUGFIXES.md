@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 18 — incomplete reward contract stopped every market
+
+The live reward refresh passed an entire event to the catalog parser. One Gemini contract omitted `priceIncrement`, so a direct dictionary lookup raised `KeyError` and invoked the correct account-wide unknown-failure drain even though other contracts were healthy. Catalog parsing now skips only contracts whose rule rows are incomplete, non-dictionary, nonnumeric or invalid. If the unavailable contract is already selected, refresh blocks new entry and immediately cancels only that symbol; valid sibling contracts and unrelated markets continue. Duplicate valid symbols, conflicting pool budgets, mutation ambiguity, account uncertainty and HARD still fail closed. The bot remains stopped flat pending a separately authorized fresh deployment. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
+
 ## September 18 — optional same-price refresh churn
 
 V26 correctly rejoined best bid with new order identities, but the only interval was the 10-second safety cooldown shared with mandatory price-change re-entry. It produced repeated 12–26-second unquoted gaps and 35 optional refresh decisions in roughly 35 minutes. Explicit v7 policy adds a separate five-minute per-market optional decision interval and a 500-contract estimated-improvement threshold while retaining the 10-second cancellation/proof path for price tracking. The durable cancellation-breach identity is unchanged. This is an isolated candidate, not deployed behavior. [Evidence](docs/SAME_PRICE_REFRESH_CHURN_2026-09-18.md).

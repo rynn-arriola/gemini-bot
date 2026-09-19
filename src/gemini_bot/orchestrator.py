@@ -3641,6 +3641,7 @@ class ProductionOrchestrator:
                     ))
             if invalid:
                 self.account.block_entries(item.rules.symbol, reason="reward_metadata")
+                await self._cancel_symbol_entries(item.rules.symbol)
                 refreshed.append(replace(item, pool=replace(item.pool, active=False)))
                 continue
             refreshed.append(chosen)

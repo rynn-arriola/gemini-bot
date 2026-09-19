@@ -123,7 +123,7 @@ class MissingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.r._cancel_symbol_entries = AsyncMock()
         self.join = patch('gemini_bot.orchestrator.join_reward_contracts',
             side_effect=lambda rewards, events: [self.x if rewards[0]['event_ticker']=='E' else self.y])
-        self.join.start()
+        self.join_mock = self.join.start()
 
     async def asyncTearDown(self):
         self.join.stop()
@@ -149,6 +149,18 @@ class MissingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.r._reward_pools_still_active()
         self.assertEqual([c.args[0] for c in self.r.rest.event.await_args_list], ['E','HEALTHY'])
         self.assertEqual([c.args[0] for c in self.r._cancel_symbol_entries.await_args_list], ['X','Z'])
+
+    async def test_invalid_contract_metadata_cancels_only_affected_symbol(self):
+        self.r.rest.event.side_effect = lambda ticker: event('X' if ticker == 'E' else 'Y')
+        self.join_mock.side_effect = lambda rewards, events: (
+            [] if rewards[0]['event_ticker'] == 'E' else [self.y]
+        )
+        await self.r._reward_pools_still_active()
+        self.r._cancel_symbol_entries.assert_awaited_once_with('X')
+        self.assertIn('X', self.r.account.blocked_entries)
+        self.assertNotIn('Y', self.r.account.blocked_entries)
+        self.assertFalse(self.r.universe[0].pool.active)
+        self.assertTrue(self.r.universe[1].pool.active)
 
     async def test_known_inventory_and_original_deadline_are_preserved(self):
         self.r.account.reducer.positions['X'] = D(7)

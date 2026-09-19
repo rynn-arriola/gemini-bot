@@ -725,6 +725,37 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(item.pool_event_count, 23)
         self.assertEqual((item.recurring_duration_value, item.recurring_duration_unit), (5, "MINUTES"))
 
+    def test_catalog_skips_incomplete_contract_without_losing_healthy_sibling(self) -> None:
+        joined = join_reward_contracts(
+            [{"event_ticker": "E", "daily_pool_usd": "50"}],
+            {"E": {"status": "active", "contracts": [
+                {
+                    "instrumentSymbol": "BROKEN", "status": "active", "marketState": "open",
+                    "quantityMinimum": "1", "quantityIncrement": "1",
+                },
+                {
+                    "instrumentSymbol": "HEALTHY", "status": "active", "marketState": "open",
+                    "priceIncrement": ".01", "quantityMinimum": "1", "quantityIncrement": "1",
+                },
+            ]}},
+        )
+        self.assertEqual([item.rules.symbol for item in joined], ["HEALTHY"])
+
+    def test_catalog_treats_invalid_contract_numbers_as_unavailable(self) -> None:
+        joined = join_reward_contracts(
+            [{"event_ticker": "E", "daily_pool_usd": "50"}],
+            {"E": {"status": "active", "contracts": [{
+                "instrumentSymbol": "BROKEN", "status": "active", "marketState": "open",
+                "priceIncrement": "not-a-number", "quantityMinimum": "1", "quantityIncrement": "1",
+            }]}},
+        )
+        self.assertEqual(joined, [])
+
+    def test_catalog_treats_invalid_contract_container_as_unavailable(self) -> None:
+        rewards = [{"event_ticker": "E", "daily_pool_usd": "50"}]
+        self.assertEqual(join_reward_contracts(rewards, {"E": {"status": "active", "contracts": None}}), [])
+        self.assertEqual(join_reward_contracts(rewards, {"E": []}), [])
+
 
 if __name__ == "__main__":
     unittest.main()
