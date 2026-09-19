@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Size-30 source is under isolated verification and is not deployed.** New maker legs use the exact configured 30-contract quantity while every existing monetary/risk/HARD boundary remains unchanged. At ordinary prices, expect roughly 20 orders/10 two-sided markets under the $300 gross cap. Complete full verification and publication before any controlled flat restart with fresh authority. [Evidence](docs/QUOTE_SIZE_30_2026-09-19.md).
+- **Reward focus plus size 30 is verified; owner authorized deployment/restart.** The 70/30 preference affects vacant/released slots and preserves healthy sticky owners. Full 1,088 production/script tests passed. Complete controlled terminal/flat drain, fresh account/history/backup proof and exact v7 authority, then verify owned size-30 quotes and calibration health. All monetary/HARD limits remain. [Evidence](docs/REWARD_FOCUS_2026-09-19.md).
 
 - **Partial-depth exit candidate:** verify/publish the UK Green repair, then use only a controlled deployment with fresh account/build/policy authority. Live acceptance must prove exact position/residual handling and unaffected-market continuity; available depth does not guarantee a fill or immediate flatness. [Evidence](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).
 

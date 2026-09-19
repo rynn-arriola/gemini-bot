@@ -9,6 +9,7 @@ from .domain import BookTop, ContractRules, Outcome, QuoteLeg, QuotePair, Reward
 from .profitability import ProfitabilityEvidence
 from .competition import CompetitionEvidence, UNSEEN_CONTRACT_SCORE_PRIOR, distance_weight
 from .capacity import MAX_ACTIVE_MARKETS
+from .reward_uptime_report import event_identity
 
 
 MINIMUM_REWARD_SIZE = Decimal("10")
@@ -42,6 +43,7 @@ class RankInput:
     pool_competition_score: Decimal | None = None
     unobserved_competition_units: int = 1
     quote_offset_ticks: int | None = None
+    event_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +95,8 @@ class RankedCandidate:
     other_pool_daily_score_proxy: Decimal = Decimal("0")
     scoring_yes_price: Decimal | None = None
     scoring_no_price: Decimal | None = None
+    event_id: str = ""
+    selection_focus_score_proxy: Decimal | None = None
 
     @property
     def owner_key(self) -> str:
@@ -281,6 +285,7 @@ def rank_candidate(
         unobserved_competition_units=item.unobserved_competition_units,
         scoring_yes_price=quote.yes.price if quote is not None else None,
         scoring_no_price=quote.no.price if quote is not None else None,
+        event_id=item.event_id,
     )
 
 
@@ -347,6 +352,7 @@ def select_sticky_markets(
     candidates: list[RankedCandidate], *, sticky_pool_ids: set[str],
     locked_pool_ids: set[str], permitted_symbols: set[str], maximum_active_pools: int,
     actionable: Callable[[RankedCandidate], bool], entry_time_valid: Callable[[str], bool],
+    reward_focus=None,
 ) -> tuple[list[RankedCandidate], set[str]]:
     """Legacy argument names, but all owner sets contain pool+symbol keys.
 
@@ -362,6 +368,9 @@ No independence/hedging discount is applied to correlated execution costs.
               and actionable(c) and entry_time_valid(c.symbol)]
     if len({c.owner_key for c in usable}) != len(usable):
         raise ValueError("duplicate market owner")
+    identity_scopes = {}
+    for c in candidates:
+        identity_scopes.setdefault(event_identity(c.event_id), set()).add((c.event_ticker, c.pool_id))
     selected = [c for c in usable if c.owner_key in sticky_pool_ids]
     owners = locked_pool_ids | {c.owner_key for c in selected}
     if len(owners) > maximum_active_pools:
@@ -391,10 +400,16 @@ No independence/hedging discount is applied to correlated execution costs.
     remaining = [c for c in usable if c.owner_key not in owners]
     while len(owners) < maximum_active_pools and remaining:
         totals = scores()
+        economics = {c.owner_key: (marginal_reward_proxy(c, totals.get(c.pool_id, Decimal('0')))
+            - c.expected_execution_cost_usd) / max(Decimal('.01'),
+                c.capital_proxy_usd*c.planned_scoring_minutes/60) for c in remaining}
+        maximum_score = max(Decimal('.00000001'), max(economics.values()))
         def key(c: RankedCandidate) -> tuple:
-            reward = marginal_reward_proxy(c, totals.get(c.pool_id, Decimal("0")))
-            hours = max(Decimal(".01"), c.capital_proxy_usd * c.planned_scoring_minutes / 60)
-            return (-(reward - c.expected_execution_cost_usd) / hours,
+            score = economics[c.owner_key]/maximum_score
+            if (reward_focus is not None and event_identity(c.event_id) is not None
+                    and len(identity_scopes[event_identity(c.event_id)]) == 1):
+                score = reward_focus.score(c, score, selected)
+            return (-score,
                     _maker_tiebreak(c), c.pool_id, c.symbol)
         chosen = min(remaining, key=key)
         remaining.remove(chosen)
@@ -406,7 +421,8 @@ No independence/hedging discount is applied to correlated execution costs.
             c, totals[c.pool_id] - c.own_daily_score_proxy + chosen.own_daily_score_proxy,
         ) <= c.expected_execution_cost_usd for c in selected):
             continue
-        selected.append(chosen)
+        selected.append(replace(chosen, selection_focus_score_proxy=-key(chosen)[0])
+                        if reward_focus is not None else chosen)
         owners.add(chosen.owner_key)
     totals = scores()
     return [replace(c, other_pool_daily_score_proxy=totals[c.pool_id] - c.own_daily_score_proxy,

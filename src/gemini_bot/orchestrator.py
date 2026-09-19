@@ -79,6 +79,7 @@ from .storage import (
 )
 from .uptime import sample_and_load_progress, eastern_day_window, locally_qualifying
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
+from .reward_focus import RewardFocus
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
 from .ws_requests import WebSocketRequestRejected
@@ -822,10 +823,14 @@ class ProductionOrchestrator:
         )
 
     def _select_with_reserved_owners(self, reserved: set[str], maximum: int):
+        if not hasattr(self, '_reward_focus'):
+            self._reward_focus = RewardFocus()
+        self._reward_focus.update(self.exchange_reward_uptime.reward_results, now=_utc_now())
         return select_sticky_markets(
             self.ranked, sticky_pool_ids=self._sticky_pool_ids, locked_pool_ids=reserved,
             permitted_symbols=self._permitted_symbols, maximum_active_pools=maximum,
             actionable=self._candidate_actionable, entry_time_valid=self._entry_time_valid,
+            reward_focus=self._reward_focus if self._continuous_service else None,
         )
 
     def _owner_failure_reason(self, symbol: str) -> str:
@@ -1408,6 +1413,8 @@ class ProductionOrchestrator:
             "exchange_uptime_by_event": views,
             "selected_portfolio_model": getattr(self, "_selected_portfolio_report", None),
             "exchange_reward_results": self.exchange_reward_uptime.reward_results,
+            "reward_focus_calibration": (self._reward_focus.report()
+                if hasattr(self, '_reward_focus') else None),
             "exchange_reward_results_stale": self.exchange_reward_uptime.metadata(now=now)["stale"],
             "reward_history_scope": "last_14_reported_dates_not_proof_of_continuous_coverage",
             "reward_history_incomplete": self.exchange_reward_uptime.history_incomplete,
@@ -4248,6 +4255,12 @@ class ProductionOrchestrator:
                         locked_pools, permit.maximum_active_pools)
                     self._sticky_pool_ids = set(desired_pools)
                     self._selected_portfolio_report = portfolio_reward_report(desired)
+                    self._selected_portfolio_report['selection_preferences'] = [
+                        {'symbol': c.symbol, 'event_id': c.event_id,
+                         'vacant_slot_focus_score_proxy': str(c.selection_focus_score_proxy)
+                             if c.selection_focus_score_proxy is not None else None,
+                         'incumbent_retained': c.owner_key in self._sticky_markets}
+                        for c in desired]
                     self._save_sticky_markets(desired, reserved_pools)
                     candidates_by_symbol = {item.symbol: item for item in desired}
                     await self._cancel_ineligible_working_entries(candidates_by_symbol)

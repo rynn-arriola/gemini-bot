@@ -126,6 +126,7 @@ def rank_live_universe(
             ),
             profitability=evidence,
             event_ticker=contract.event_ticker,
+            event_id=contract.event_id,
             event_category=contract.event_category,
             pool_source=contract.pool_source,
             pool_event_count=max(contract.pool_event_count or 1, len(pool_events[contract.pool.pool_id])),
@@ -236,6 +237,9 @@ def public_rank_rows(candidates: list[RankedCandidate], *, target_uptime: Decima
             "payout_floor_scope": "account_daily_total_reporting_only",
             "exact_shared_pool_allocation_known": False,
             "event_ticker": item.event_ticker,
+            "event_id": item.event_id,
+            "selection_focus_score_proxy": (str(item.selection_focus_score_proxy)
+                if item.selection_focus_score_proxy is not None else None),
             "symbol": item.symbol,
             "eligible_now": item.eligible_now,
             "uptime_feasible": item.uptime_feasible,
