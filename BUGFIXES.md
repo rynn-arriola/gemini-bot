@@ -2,7 +2,7 @@
 
 ## September 19 — correlated recovery exhausted cancellation proof clocks
 
-All five shard workers canceled stale entries concurrently as the private stream also recovered. Their cancellation clocks counted time queued behind one serialized authenticated REST reader and duplicated two terminal-history reads per market, causing safe but unnecessary runner failure after 45 seconds. Active-order proof now coalesces briefly across owners and history proof coalesces by symbol. Only a correlated continuous-service outage gains bounded full-width proof headroom, capped at 180 seconds. No mutation replay, absence proof, ordinary timeout relaxation or uptime credit is allowed. All 1,062 release tests/checks pass; restart preparation remains. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
+All five shard workers canceled stale entries concurrently as the private stream also recovered. Their cancellation clocks counted time queued behind one serialized authenticated REST reader and duplicated two terminal-history reads per market, causing safe but unnecessary runner failure after 45 seconds. Active-order proof now coalesces briefly across owners and history proof coalesces by symbol. Only a correlated continuous-service outage gains bounded full-width proof headroom, capped at 180 seconds. No mutation replay, absence proof, ordinary timeout relaxation or uptime credit is allowed. All 1,062 release tests/checks and fresh preparation passed; V32 initial live acceptance found owned best-bid orders, zero positions/unowned orders/mismatches, healthy shards and no holds/errors/restarts. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
 
 ## September 19 — inconsistent reward catalog caused a fatal drain
 

@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Correlated-stream recovery v32 is restart-ready:** 1,062 tests/release checks pass and the prior runner stopped flat. Publish the exact build, run fresh authenticated preparation/backup, issue fresh authority and complete the already owner-requested restart. Then observe natural multi-stream recovery without inducing a fault or crediting the gap. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
+- **Correlated-stream recovery v32 is deployed and passed initial acceptance:** 20 owned size-15 best-bid orders/10 markets, zero positions/unowned orders/mismatches, five healthy shards and no holds/errors/restarts. Observe a natural multi-stream recovery without inducing a fault or crediting the gap. Initial startup does not prove that long-run path. [Evidence](docs/CORRELATED_STREAM_RECOVERY_2026-09-19.md).
 
 - **Catalog-recovery v31 is deployed and passed initial acceptance:** 24 owned size-15 best-bid orders/12 markets, zero positions/unowned orders, five healthy shards and no holds/errors/restarts. Observe the next natural inconsistent metadata interval and recovery; never inject a live fault or count paused time as uptime. [Evidence](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
 

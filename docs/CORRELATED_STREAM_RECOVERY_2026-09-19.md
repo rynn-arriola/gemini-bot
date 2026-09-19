@@ -63,5 +63,20 @@ same-symbol history fan-in, waiter cancellation without orphaning, bounded
 full-width scaling, unchanged short/ordinary timeouts, ambiguity latching, all
 five shards, private recovery and drain behavior.
 
-The bot is stopped flat pending commit publication, fresh authenticated
-preparation, exact new authority and the owner-requested restart.
+Source commit `3d00648` was pushed and verified on `origin/main`. Fresh read-only
+preparation completed at 11:34:48 ET with zero positions/orders, 32
+tracked/ranked, 13 eligible, no holds, healthy journal integrity, complete
+non-HARD risk and the unchanged 40-order cap. A verified 13,885,440-byte backup
+succeeded; normal retention removed one older managed snapshot only after the
+replacement passed verification.
+
+Fresh exact v7 authority binds that build, the unchanged policy and current
+account, with null expiry, no uptime override and at most two supervised flat
+recoveries. Initial live acceptance at 11:37 ET found 20 canonically owned
+size-15 orders across 10 markets (10 YES and 10 NO), zero positions/unowned
+orders and zero ranked-price mismatches. The engine was quoting with all five
+public shards connected/unheld, no read/stream/catalog holds, no reward pause,
+no backup error, no current-process warnings/errors and zero supervisor
+restarts. Concrete economics reserved the unused capacity; 40 remains a ceiling,
+not a placement target. This is initial deployment health, not proof of a future
+natural correlated-outage recovery or guaranteed rewards/profit.
