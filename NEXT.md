@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **Deploy the verified September 19 collateral-credit rounding follow-up.** The first activation successfully closed the 5.93 NO position through BUY YES; current authenticated state is flat/order-free. Preserve the canonical journal. Read-only preparation must apply the exact one-cent post-watermark correction only when it matches fresh authenticated cash and flat positions, then complete risk classification. Require a fresh verified backup and new exact build/policy/account authority before activation. Do not reset the cash baseline, reuse either earlier permit or reinterpret the fill fee. [Checklist](docs/PARTIAL_FILL_PRECISION_AND_NO_EXIT_2026-09-19.md).
+- **Collateral-credit rounding v30 is deployed and passed initial acceptance.** The 5.93 NO position closed through BUY YES, the exact one-cent post-watermark correction applied once against fresh authenticated flat cash/position proof, and the new run started with 24 owned orders/12 markets, zero positions, healthy shards and no holds/errors/restarts. Continue read-only observation of natural fills/exits and cash reconciliation; never reset the baseline, reuse either earlier permit or induce a fill. [Evidence](docs/PARTIAL_FILL_PRECISION_AND_NO_EXIT_2026-09-19.md).
 
 - **Malformed reward-contract isolation v28 is deployed and passed initial acceptance.** Continue read-only observation through the next natural reward-metadata refresh. Verify any unavailable contract is held/canceled only for its symbol while healthy markets remain quoted; never induce malformed venue data or claim initial startup proves every future schema change. [Evidence](docs/MALFORMED_REWARD_CONTRACT_2026-09-18.md).
 

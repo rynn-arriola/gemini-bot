@@ -34,7 +34,18 @@ This does not tolerate unexplained cash, guess missing precision, replay an ambi
 
 ## Verification and deployment state
 
-The complete follow-up verification passed: **1,025 production tests plus 28 script tests (1,053 total)**, Python compilation, all PowerShell parse checks, whitespace checks and offline Windows policy/durable-storage release validation. Dedicated regressions cover both observed fractional-fill examples, the live fee-bearing complementary exit, BUY-exit lifecycle isolation, both fresh-balance-matched/idempotent legacy repairs, durable exit intent classification, the risk-mark race and pre-send retry accounting. The first controlled activation closed the position and then halted on the one-cent accounting discrepancy; it did not resume unrelated quoting. A second controlled deployment must prove the now-flat venue bracket, create a fresh verified backup, apply the exact one-cent migration, and use fresh build/policy/account authority before activation.
+The complete follow-up verification passed: **1,025 production tests plus 28 script tests (1,053 total)**, Python compilation, all PowerShell parse checks, whitespace checks and offline Windows policy/durable-storage release validation. Dedicated regressions cover both observed fractional-fill examples, the live fee-bearing complementary exit, BUY-exit lifecycle isolation, both fresh-balance-matched/idempotent legacy repairs, durable exit intent classification, the risk-mark race and pre-send retry accounting. The first controlled activation closed the position and then halted on the one-cent accounting discrepancy; it did not resume unrelated quoting.
+
+The second controlled deployment completed from remote-matched `main` commit
+`cf36373`. Fresh read-only preparation proved flat/order-free state, applied the
+one-cent correction exactly once, completed the non-HARD risk window, tracked
+32 markets and found 12 eligible at that checkpoint. A verified post-migration
+backup preceded fresh exact build/policy/account v7 authority with no uptime
+override. Initial live acceptance at 08:58 ET found 24 canonically owned orders
+across 12 markets, zero positions, all five public shards connected, no
+read/stream holds, backup error, current-process warning/error or supervisor
+restart. This is initial acceptance, not a guarantee of future fills, rewards
+or uninterrupted venue availability.
 
 Official references:
 
