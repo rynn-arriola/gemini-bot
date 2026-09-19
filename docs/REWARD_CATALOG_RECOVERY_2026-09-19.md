@@ -56,4 +56,14 @@ Independent read-only journal checks found healthy integrity, complete risk
 classification and the unchanged non-HARD 40-order cap. Automatic verified
 backup succeeded (13,725,696 bytes); normal retention removed one older managed
 snapshot after the replacement passed verification. No history was reset.
-No new live activation has occurred; restart approval was requested.
+The owner then explicitly authorized restart. Fresh exact v7 authority was bound
+to pushed commit `3a17009`, the unchanged policy and the current account, with
+null expiry, no uptime override and a two-restart supervisor ceiling. Initial
+live acceptance at 10:31 ET found 24 canonically owned size-15 orders across 12
+markets (12 YES and 12 NO), zero positions and zero unowned orders. All 24
+prices matched the current ranked best-bid prices. The engine was quoting with
+all five public shards connected/unheld, no read/stream/catalog holds, no reward
+program pause, no backup error, no current-process warnings/errors and zero
+supervisor restarts. This proves initial deployment health, not uninterrupted
+future quoting, reward qualification or profitability. Observe the next natural
+catalog inconsistency; do not inject one or credit any paused interval.

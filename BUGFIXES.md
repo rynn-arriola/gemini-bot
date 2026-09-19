@@ -2,7 +2,7 @@
 
 ## September 19 — inconsistent reward catalog caused a fatal drain
 
-Exhausted inconsistent pagination now emits a typed recoverable catalog-read error, without returning partial rows. Same-process metadata recovery retains safety/exits and owner history; startup may wait read-only. Refresh requests cannot bypass metadata backoff, and longer server cooldowns win. Malformed data, account uncertainty, unknown mutations and HARD remain fail-closed. All 1,059 tests/release checks and fresh flat/order-free preparation pass; no new live activation is claimed. [Evidence and snapshot impact](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
+Exhausted inconsistent pagination now emits a typed recoverable catalog-read error, without returning partial rows. Same-process metadata recovery retains safety/exits and owner history; startup may wait read-only. Refresh requests cannot bypass metadata backoff, and longer server cooldowns win. Malformed data, account uncertainty, unknown mutations and HARD remain fail-closed. All 1,059 tests/release checks and fresh flat/order-free preparation passed. V31 initial live acceptance found owned best-bid orders, zero positions/unowned orders, healthy shards and no holds/errors/restarts. [Evidence and snapshot impact](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
 
 ## September 19 — fractional-fill cash precision and NO-position exit crash
 

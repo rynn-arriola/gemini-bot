@@ -4,7 +4,7 @@ Updated September 19, 2026. This is a checkpoint, not a perpetual venue-state gu
 
 ## Operational truth
 
-- **Production is stopped; catalog-recovery repair is restart-ready.** Repeated inconsistent public reward-catalog pages caused the 10:00:48 ET terminal-flat drain. The repair narrowly retries that condition without terminating, preserves owners/history and honors retry backoff. All **1,059 production/script tests** and release checks pass. Fresh 10:20:37 ET read-only preparation proved zero positions/orders, 32 tracked/ranked, 15 eligible, no holds and a verified backup; canonical integrity and complete non-HARD risk are healthy. The attention-only supervisor is stopped. Restart approval was requested; no fresh permit or activation occurred. [Incident and repair](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
+- **Production is running on catalog-recovery v31.** Repeated inconsistent public reward-catalog pages caused the 10:00:48 ET terminal-flat drain; the repaired build now pauses/retries that exact read condition while preserving owners/history. All **1,059 production/script tests** and release checks passed, followed by fresh flat/order-free preparation and verified backup. Owner-approved exact v7 activation from remote-matched commit `3a17009` has no uptime override. Initial 10:31 ET acceptance found 24 canonically owned size-15 best-bid orders across 12 markets, zero positions/unowned orders, five healthy shards, no holds/reward pause/current-process warnings or errors, and zero supervisor restarts. [Incident, repair and deployment](docs/REWARD_CATALOG_RECOVERY_2026-09-19.md).
 
 ## Earlier deployment checkpoints (superseded by the stopped status above)
 
