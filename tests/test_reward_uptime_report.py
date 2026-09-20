@@ -173,7 +173,11 @@ class ReportingWiringTests(unittest.IsolatedAsyncioTestCase):
         report=json.loads((r.directory/"rank-report.json").read_text())
         row=report["candidates"][0]
         view=row.pop("exchange_reported_uptime")
+        estimate=row.pop("qualification_estimate")
         self.assertEqual(view["current_percentage"],"53.3333")
+        self.assertFalse(estimate["current_venue_qualification_confirmed"])
+        self.assertFalse(estimate["used_as_order_permission"])
+        self.assertEqual(estimate["local_minutes_used_for_selected_funding_priority"], r._continuous_service)
         self.assertEqual(row,before[0])
         self.assertEqual((r.gate.state,r._dynamic_pending_cap,dict(r._uptime)),state)
         self.assertIs(r.reward_reporting_rest.governor,r.governor)
@@ -187,6 +191,7 @@ class ReportingWiringTests(unittest.IsolatedAsyncioTestCase):
         report=json.loads((r.directory/"rank-report.json").read_text())
         for view in report["exchange_uptime_by_event"].values():
             self.assertIsNone(view["current_percentage"])
+        self.assertIsNone(report["candidates"][0]["qualification_estimate"]["latest_exchange_report"])
 
     async def test_background_refresh_failure_does_not_halt_and_close_cancels_task(self):
         r=self.runtime
