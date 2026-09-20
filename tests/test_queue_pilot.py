@@ -398,6 +398,7 @@ class PilotConfigTests(unittest.TestCase):
         from pathlib import Path
         from dataclasses import asdict
         raw = json.loads(DEFAULT_POLICY_PATH.read_text())
+        raw.pop('entry_quality', None)
         # This is the earlier two-tick nonpilot/v3 fixture, not the current
         # one-tick measurement policy (whose queue pilot remains disabled).
         raw['quote_offset_ticks'] = 2

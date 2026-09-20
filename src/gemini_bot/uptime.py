@@ -96,12 +96,16 @@ def estimated_reward_window(
 def quote_cutoff(
     contract: RewardedContract, venue_end: datetime, *,
     exit_before_expiry_seconds: int = 300, sports_exit_before_start_seconds: int = 1200,
+    crypto_entry_before_expiry_seconds: int = 300,
 ) -> datetime:
     """Last local quote opportunity; not evidence that venue scoring ends."""
     ends = [venue_end]
     expiry = _parse_optional_timestamp(contract.expiry)
     if expiry is not None:
-        ends.append(expiry - timedelta(seconds=exit_before_expiry_seconds))
+        entry_offset = (max(exit_before_expiry_seconds, crypto_entry_before_expiry_seconds)
+                        if contract.event_category.casefold() == "crypto"
+                        else exit_before_expiry_seconds)
+        ends.append(expiry - timedelta(seconds=entry_offset))
     if contract.event_category.casefold() == "sports":
         start = _parse_optional_timestamp(contract.event_starts_at)
         if start is None or contract.event_is_live:
@@ -150,6 +154,7 @@ def sample_and_load_progress(
     market_data_verified_at: datetime | dict[str, datetime | None] | None = None,
     exit_before_expiry_seconds: int = 300,
     sports_exit_before_start_seconds: int = 1200,
+    crypto_entry_before_expiry_seconds: int = 300,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -181,6 +186,7 @@ def sample_and_load_progress(
         cutoffs = {c.rules.symbol: quote_cutoff(
             c, w[1], exit_before_expiry_seconds=exit_before_expiry_seconds,
             sports_exit_before_start_seconds=sports_exit_before_start_seconds,
+            crypto_entry_before_expiry_seconds=crypto_entry_before_expiry_seconds,
         ) for c, w in valid}
         cutoff = max(cutoffs.values())
         if start <= now < end:

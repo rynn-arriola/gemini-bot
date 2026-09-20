@@ -8,6 +8,7 @@ import os
 from .capacity import MAX_PENDING_ORDERS
 from .queue_pilot import PilotPolicy, parse_pilot_policy
 from .adaptive_queue import AdaptivePolicy, parse_adaptive_policy
+from .entry_quality import EntryQualityPolicy
 
 
 class ConfigurationError(ValueError):
@@ -24,6 +25,7 @@ class StrategyConfig:
     reward_size_cap: Decimal = Decimal("250")
     stale_book_seconds: Decimal = Decimal("3")
     queue_pilot: PilotPolicy | AdaptivePolicy | None = None
+    entry_quality: EntryQualityPolicy | None = None
 
     def validate(self) -> None:
         stay_best = isinstance(self.queue_pilot, AdaptivePolicy) and self.queue_pilot.placement_mode == 'stay_best'
@@ -46,6 +48,11 @@ class StrategyConfig:
             raise ConfigurationError("target_uptime must be between 0.50 and 1.00")
         if self.target_uptime < self.minimum_uptime:
             raise ConfigurationError("target_uptime cannot be below minimum_uptime")
+        if self.entry_quality is not None:
+            try:
+                self.entry_quality.validate()
+            except ValueError as exc:
+                raise ConfigurationError("invalid entry-quality policy") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +155,11 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         "max_inventory_age_seconds", "force_exit_before_expiry_seconds", "monetary_stop_authorities",
     }
     version = raw.get("policy_version")
-    if version in {3, 4, 5, 6, 7}:
+    if version in {3, 4, 5, 6, 7, 8}:
         required.add("queue_pilot")
-    if set(raw) != required or version not in {2, 3, 4, 5, 6, 7} or raw["platform"] != "windows":
+    if version == 8:
+        required.add("entry_quality")
+    if set(raw) != required or version not in {2, 3, 4, 5, 6, 7, 8} or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
         raise ConfigurationError("risk-window clock does not match approved Eastern windows")
@@ -163,23 +172,44 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
     if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
         raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
     try:
-        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version in {4, 5, 6, 7}
+        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version in {4, 5, 6, 7, 8}
                  else parse_pilot_policy(raw.get("queue_pilot")))
-        if version in {4, 5, 6, 7} and pilot.scope != ('all_selected' if version in {5, 6, 7} else 'research'):
+        if version in {4, 5, 6, 7, 8} and pilot.scope != ('all_selected' if version in {5, 6, 7, 8} else 'research'):
             raise ValueError('adaptive scope requires its exact policy version')
-        if version in {4, 5, 6, 7} and pilot.placement_mode != ('stay_best' if version in {6, 7} else 'adaptive'):
+        if version in {4, 5, 6, 7, 8} and pilot.placement_mode != ('stay_best' if version in {6, 7, 8} else 'adaptive'):
             raise ValueError('placement mode requires its exact policy version')
-        if version in {4, 5, 6, 7} and pilot.same_price_refresh_minimum_seconds != (Decimal('300') if version == 7 else 0):
+        if version in {4, 5, 6, 7, 8} and pilot.same_price_refresh_minimum_seconds != (Decimal('300') if version in {7, 8} else 0):
             raise ValueError('same-price refresh interval requires its exact policy version')
-        if version in {4, 5, 6, 7} and pilot.same_price_refresh_minimum_gain != (Decimal('500') if version == 7 else 0):
+        if version in {4, 5, 6, 7, 8} and pilot.same_price_refresh_minimum_gain != (Decimal('500') if version in {7, 8} else 0):
             raise ValueError('same-price refresh gain requires its exact policy version')
     except (ValueError, TypeError, ArithmeticError, AttributeError) as exc:
         raise ConfigurationError("invalid queue pilot calibration") from exc
+    quality = None
+    if version == 8:
+        value = raw["entry_quality"]
+        if not isinstance(value, dict) or set(value) != {
+            "minimum_exit_depth_fraction", "minimum_retained_value_fraction",
+            "depth_haircut", "crypto_entry_before_expiry_seconds",
+        }:
+            raise ConfigurationError("invalid entry-quality policy schema")
+        try:
+            if type(value["crypto_entry_before_expiry_seconds"]) is not int:
+                raise ValueError("crypto cutoff must be an integer")
+            quality = EntryQualityPolicy(
+                Decimal(value["minimum_exit_depth_fraction"]),
+                Decimal(value["minimum_retained_value_fraction"]),
+                Decimal(value["depth_haircut"]),
+                value["crypto_entry_before_expiry_seconds"],
+            )
+            quality.validate()
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise ConfigurationError("invalid entry-quality policy") from exc
     strategy = StrategyConfig(
         quote_quantity=Decimal(raw["quote_quantity"]),
         quote_offset_ticks=int(raw["quote_offset_ticks"]),
         target_uptime=Decimal(raw["target_uptime"]),
         queue_pilot=pilot,
+        entry_quality=quality,
     )
     risk = RiskConfig(
         max_gross_reservation_usd=Decimal(raw["max_gross_reservation_usd"]),

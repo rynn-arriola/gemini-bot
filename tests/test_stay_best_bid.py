@@ -227,7 +227,7 @@ class StayBestExecutionTests(fx.PilotIntegrationTests):
 class StayBestConfigTests(unittest.TestCase):
     def test_staging_requires_explicit_zero_offset_and_roundtrips_v7(self):
         active=json.loads(DEFAULT_POLICY_PATH.read_text())
-        base={k:v for k,v in active.items() if k!='queue_pilot'}
+        base={k:v for k,v in active.items() if k not in {'queue_pilot','entry_quality'}}
         base['policy_version']=2
         review={'reviewed_at':NOW.isoformat(),'incumbent_symbols':['X'],
                 'queue_pilot':active['queue_pilot']}
@@ -266,6 +266,7 @@ class StayBestConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError): load_policy(path)
             legacy=json.loads(DEFAULT_POLICY_PATH.read_text())
             legacy['policy_version']=6
+            legacy.pop('entry_quality', None)
             legacy['queue_pilot'].pop('same_price_refresh_minimum_seconds')
             legacy['queue_pilot'].pop('same_price_refresh_minimum_gain')
             path.write_text(json.dumps(legacy))

@@ -148,6 +148,7 @@ class SelectedConfigTests(unittest.TestCase):
         review = dict(reviewed_at=NOW.isoformat(), incumbent_symbols=[], queue_pilot=raw_policy())
         base = json.loads(DEFAULT_POLICY_PATH.read_text())
         base.pop('queue_pilot', None)
+        base.pop('entry_quality', None)
         base['policy_version'] = 2
         base['quote_offset_ticks'] = 1
         with tempfile.TemporaryDirectory() as d:

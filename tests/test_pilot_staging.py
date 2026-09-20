@@ -31,6 +31,7 @@ class StagingTests(unittest.TestCase):
         self.base.parent.mkdir()
         baseline = json.loads(DEFAULT_POLICY_PATH.read_text())
         baseline.pop('queue_pilot', None)
+        baseline.pop('entry_quality', None)
         baseline['policy_version'] = 2
         baseline['quote_offset_ticks'] = 1
         self.baseline = json.dumps(baseline).encode()

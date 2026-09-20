@@ -10,6 +10,7 @@ from .market_state import LocalBook
 from .account_state import AccountReducer
 from .domain import Outcome, QuotePair, QuoteLeg, Side
 from .profitability import ProfitabilityEvidence, ProfitabilityTracker
+from .entry_quality import external_book
 from .competition import measure_competition
 from .reward_ranking import (
     RANKING_VERSION,
@@ -50,17 +51,7 @@ def rank_live_universe(
         contract_offset = (symbol_offsets or {}).get(contract.rules.symbol, offset_ticks)
         book = books.get(contract.rules.symbol)
         if book is not None and account is not None:
-            book = LocalBook(book.symbol, dict(book.bids), dict(book.asks), book.last_update_id, book.synchronized, book.observed_at)
-            for order in account.orders.values():
-                if order.symbol != book.symbol or not order.working:
-                    continue
-                is_bid = (order.outcome is Outcome.YES) == (order.side.value == "BUY")
-                levels = book.bids if is_bid else book.asks
-                price = order.price if order.outcome is Outcome.YES else 1 - order.price
-                if price in levels:
-                    levels[price] -= order.remaining_quantity
-                    if levels[price] <= 0:
-                        levels.pop(price)
+            book = external_book(book, account)
         top = book.top() if book is not None else None
         if top is None:
             continue

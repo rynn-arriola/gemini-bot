@@ -173,6 +173,7 @@ class ReportingWiringTests(unittest.IsolatedAsyncioTestCase):
         report=json.loads((r.directory/"rank-report.json").read_text())
         row=report["candidates"][0]
         view=row.pop("exchange_reported_uptime")
+        self.assertIsNone(row.pop("entry_quality"))
         self.assertEqual(view["current_percentage"],"53.3333")
         self.assertEqual(row,before[0])
         self.assertEqual((r.gate.state,r._dynamic_pending_cap,dict(r._uptime)),state)

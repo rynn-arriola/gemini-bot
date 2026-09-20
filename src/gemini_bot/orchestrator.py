@@ -37,6 +37,7 @@ from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_s
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose, validate_exact_exit
 from .exit_pricing import exact_crossing_exit
+from .entry_quality import evaluate_entry_quality
 from .exit_recovery import ExitDeferred, ExitWait
 from .live_ws import (
     EntryStateChangedBeforeSend,
@@ -732,6 +733,10 @@ class ProductionOrchestrator:
     def _current_reward_epoch(self, now: datetime) -> tuple[str, bool]:
         return eastern_day_window(now)[0].isoformat(), self._override_active(now)
 
+    def _crypto_entry_cutoff_seconds(self) -> int:
+        policy = self.config.strategy.entry_quality
+        return policy.crypto_entry_before_expiry_seconds if policy is not None else 300
+
     def _advance_reward_epoch(self, now: datetime) -> bool:
         """Rebuild day-specific eligibility before admitting any new-day entry."""
         epoch = self._current_reward_epoch(now)
@@ -743,6 +748,7 @@ class ProductionOrchestrator:
             market_data_verified_at=self._market_data_verified_at(),
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
+            crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
         )
         self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=now,
@@ -838,10 +844,19 @@ class ProductionOrchestrator:
             return "entry_time_unavailable"
         candidate = next((c for c in self.ranked if c.symbol == symbol), None)
         if candidate is None:
-            return "rank_candidate_missing:" + self._quote_target_state(symbol)[1]
+            target, target_reason = self._quote_target_state(symbol)
+            if target is not None:
+                quality_reason = self._entry_quality_reason(symbol, target)
+                if quality_reason is not None:
+                    return quality_reason
+            return "rank_candidate_missing:" + target_reason
         reasons = tuple(r for r in candidate.reasons if r != _UPTIME_PROXY_REJECTION)
         if reasons:
             return "; ".join(reasons)
+        if candidate.quote is not None:
+            quality_reason = self._entry_quality_reason(symbol, candidate.quote)
+            if quality_reason is not None:
+                return quality_reason
         return "non_positive_marginal_pool_economics"
 
     async def _select_recovery_cohort(self, locked: set[str], maximum: int):
@@ -1384,6 +1399,33 @@ class ProductionOrchestrator:
 
     def _write_rank_report(self, now: datetime) -> None:
         rows = public_rank_rows(self.ranked)
+        quality_policy = self.config.strategy.entry_quality
+        quality_passed = quality_considered = 0
+        otherwise_actionable = otherwise_actionable_passed = 0
+        for candidate, row in zip(self.ranked, rows):
+            if quality_policy is None:
+                row["entry_quality"] = None
+                continue
+            quality_considered += 1
+            book = self.public.books.get(candidate.symbol)
+            quality = (evaluate_entry_quality(book, candidate.quote, quality_policy,
+                       account=self.account.reducer)
+                       if book is not None and candidate.quote is not None
+                       and self._book_fresh(candidate.symbol) else None)
+            passed = quality is not None and quality.allowed
+            quality_passed += int(passed)
+            row["entry_quality"] = {
+                "passed": passed,
+                "reason": quality.reason if quality is not None else "exit_book_unavailable",
+                "yes_exit_depth_fraction": str(quality.yes.depth_fraction) if quality is not None else None,
+                "no_exit_depth_fraction": str(quality.no.depth_fraction) if quality is not None else None,
+                "yes_retained_value_fraction": str(quality.yes.retained_value_fraction) if quality is not None else None,
+                "no_retained_value_fraction": str(quality.no.retained_value_fraction) if quality is not None else None,
+            }
+            concrete_ok = candidate.eligible_now or tuple(candidate.reasons) == (_UPTIME_PROXY_REJECTION,)
+            if concrete_ok and self._entry_time_valid(candidate.symbol):
+                otherwise_actionable += 1
+                otherwise_actionable_passed += int(passed)
         identities = {item.event_ticker: item.event_id for item in self.universe}
         tickers_by_id: dict[str, set[str]] = {}
         for ticker, raw_id in identities.items():
@@ -1401,6 +1443,14 @@ class ProductionOrchestrator:
             row["exchange_reported_uptime"] = views.get(str(row["event_ticker"]))
         atomic_write_json(self.directory / "rank-report.json", {
             "generated_at": now.isoformat(), "candidates": rows,
+            "entry_quality_summary": ({
+                "ranked_passed": quality_passed,
+                "ranked_considered": quality_considered,
+                "otherwise_actionable_passed": otherwise_actionable_passed,
+                "otherwise_actionable_considered": otherwise_actionable,
+                "as_of": now.isoformat(),
+                "point_in_time_not_reward_qualification": True,
+            } if quality_policy is not None else None),
             "queue_shadow": self._queue_shadow_report(now, rows),
             "queue_pilot": self.queue_pilot.report() if self.queue_pilot else {"configured": False},
             "discovery_ranking": {
@@ -2058,7 +2108,9 @@ class ProductionOrchestrator:
                 1,
                 self.config.risk.max_tracked_markets - len(before.positions),
             )
-            self.universe = await RewardUniverseLoader(self.rest, self._record_missing_reward_event).load(
+            self.universe = await RewardUniverseLoader(
+                self.rest, self._record_missing_reward_event, self._crypto_entry_cutoff_seconds(),
+            ).load(
                 maximum_pools=discovery_capacity,
                 preferred=self._sticky_markets, now=_utc_now(),
                 quantity=self.config.strategy.quote_quantity,
@@ -2202,6 +2254,7 @@ class ProductionOrchestrator:
                 market_data_verified_at=self._market_data_verified_at(),
                 exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
                 sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
+                crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
             )
             self.ranked = self._rank_live_universe(
                 self.universe, self.public.books, now=now,
@@ -2516,6 +2569,10 @@ class ProductionOrchestrator:
         if trade_start is not None and _utc_now() < trade_start:
             return False
         cutoff = expiry - timedelta(seconds=self.config.risk.force_exit_before_expiry_seconds)
+        quality = self.config.strategy.entry_quality
+        if (quality is not None and metadata is not None
+                and metadata.event_category.casefold() == "crypto"):
+            cutoff = min(cutoff, expiry - timedelta(seconds=quality.crypto_entry_before_expiry_seconds))
         sports_start = self._sports_start.get(symbol)
         if sports_start is not None:
             cutoff = min(
@@ -2580,6 +2637,9 @@ class ProductionOrchestrator:
                         or Decimal(str(params["quantity"])) != leg.quantity
                         or symbol in self._entry_cancel_symbols):
                     raise QuoteChangedBeforeSend("maker quote changed before send")
+                quality_reason = self._entry_quality_reason(symbol, target)
+                if quality_reason is not None:
+                    raise QuoteChangedBeforeSend(quality_reason)
             if self._permit_policy_digest is not None and policy_digest(DEFAULT_POLICY_PATH) != self._permit_policy_digest:
                 raise RuntimeError("policy changed after approval")
             if symbol not in self._permitted_symbols:
@@ -2691,6 +2751,8 @@ class ProductionOrchestrator:
         )
         return bool(
             reward_or_proxy_ok
+            and candidate.quote is not None
+            and self._entry_quality_reason(candidate.symbol, candidate.quote) is None
             and (
                 self._commissioning_expected_yes_price is None
                 or (
@@ -2706,6 +2768,18 @@ class ProductionOrchestrator:
                 )
             )
         )
+
+    def _entry_quality_reason(self, symbol: str, quote: QuotePair) -> str | None:
+        policy = self.config.strategy.entry_quality
+        if policy is None:
+            return None
+        if not self._book_fresh(symbol):
+            return "entry_quality:exit_book_unavailable"
+        book = self.public.books.get(symbol)
+        if book is None:
+            return "entry_quality:exit_book_unavailable"
+        result = evaluate_entry_quality(book, quote, policy, account=self.account.reducer)
+        return None if result.allowed else "entry_quality:" + result.reason
 
     async def _quote_pair_locked(self, candidate: Any) -> None:
         try:
@@ -3076,6 +3150,10 @@ class ProductionOrchestrator:
             QuoteLeg(candidate.symbol, outcome, Side.BUY, orders[outcome].price, orders[outcome].remaining_quantity)
             for outcome in (Outcome.YES, Outcome.NO)
         ))
+        quality_reason = self._entry_quality_reason(candidate.symbol, pair)
+        if quality_reason is not None:
+            self._retention_reason = quality_reason
+            return False
         contract = next(c for c in self.universe if c.rules.symbol == candidate.symbol)
         self._retention_reason = "inside_configured_tick_distance_or_invalid_price"
         if not resting_quote_safe(pair, target, contract.rules, self.config.strategy.quote_quantity):
@@ -3828,6 +3906,7 @@ class ProductionOrchestrator:
             market_data_verified_at=self._market_data_verified_at(),
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
+            crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
         )
         self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
                        usable_permitted_symbol=usable_permitted_symbol)
@@ -3890,7 +3969,9 @@ class ProductionOrchestrator:
             if pair[1] in self._inventory_catalog_holds
             or pair[1] not in {c.rules.symbol for c in self.universe}
         })
-        proposed = await RewardUniverseLoader(self.rest, self._record_missing_reward_event).load(
+        proposed = await RewardUniverseLoader(
+            self.rest, self._record_missing_reward_event, self._crypto_entry_cutoff_seconds(),
+        ).load(
             maximum_pools=self.config.risk.max_tracked_markets, preferred=preferred,
             now=_utc_now(), rewards=rewards,
             quantity=self.config.strategy.quote_quantity,
@@ -4204,6 +4285,7 @@ class ProductionOrchestrator:
                             market_data_verified_at=self._market_data_verified_at(),
                             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
                             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
+                            crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
                         )
                         self.journal.set_runtime_state(
                             "profitability_telemetry_v1",

@@ -129,6 +129,7 @@ def _headline_spread(contract: dict[str, Any]) -> Decimal:
 class RewardUniverseLoader:
     rest: DiscoveryRest
     on_event_missing: Callable[[str], None] | None = None
+    crypto_entry_before_expiry_seconds: int = 300
     missing_events: set[str] = field(default_factory=set, init=False)
 
     def _event_missing(self, ticker: str) -> None:
@@ -266,7 +267,9 @@ class RewardUniverseLoader:
                 continue
             if now is not None:
                 start, end, _ = estimated_reward_window(item, now)
-                if end <= start or now < start or now >= quote_cutoff(item, end):
+                if end <= start or now < start or now >= quote_cutoff(
+                    item, end, crypto_entry_before_expiry_seconds=self.crypto_entry_before_expiry_seconds,
+                ):
                     continue
             is_incumbent = (ticker, item.rules.symbol) in preferred
             if not is_incumbent:

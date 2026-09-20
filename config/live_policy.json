@@ -1,5 +1,5 @@
 {
-  "policy_version": 7,
+  "policy_version": 8,
   "platform": "windows",
   "quote_quantity": "30",
   "quote_offset_ticks": 0,
@@ -18,6 +18,12 @@
   "max_inventory_age_seconds": 300,
   "force_exit_before_expiry_seconds": 300,
   "monetary_stop_authorities": 1,
+  "entry_quality": {
+    "minimum_exit_depth_fraction": "0.70",
+    "minimum_retained_value_fraction": "0.70",
+    "depth_haircut": "0.50",
+    "crypto_entry_before_expiry_seconds": 900
+  },
   "queue_pilot": {
     "scope": "all_selected",
     "placement_mode": "stay_best",
