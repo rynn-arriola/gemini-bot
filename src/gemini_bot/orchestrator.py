@@ -33,7 +33,7 @@ from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAv
 from .reconciliation_errors import ExternalOrderPresent, InventoryMarketUnavailable
 from .discovery import RewardUniverseLoader, DISCOVERY_RANKING_VERSION, read_reward_event
 from .catalog import join_reward_contracts
-from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol
+from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_symbol, uptime_progress_key
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose, validate_exact_exit
 from .exit_pricing import exact_crossing_exit
@@ -80,6 +80,7 @@ from .storage import (
 )
 from .uptime import sample_and_load_progress, eastern_day_window, locally_qualifying
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
+from .qualification_estimator import estimate_50_percent, order_for_resting_focus
 from .reward_focus import RewardFocus
 from .market_state import LocalBook
 from .stream_recovery import RecoveryPending, terminal_history_status
@@ -1441,6 +1442,17 @@ class ProductionOrchestrator:
         }
         for row in rows:
             row["exchange_reported_uptime"] = views.get(str(row["event_ticker"]))
+            identity = event_identity(row.get("event_id"))
+            if identity is not None and len(tickers_by_id.get(identity, set())) != 1:
+                identity = None
+            row["qualification_estimate"] = estimate_50_percent(
+                identity,
+                self._uptime.get(uptime_progress_key(
+                    str(row["event_ticker"]), str(row["pool_id"]),
+                )),
+                self.exchange_reward_uptime.reward_results, now=now,
+            )
+            row["qualification_estimate"]["local_minutes_used_for_selected_funding_priority"] = self._continuous_service
         atomic_write_json(self.directory / "rank-report.json", {
             "generated_at": now.isoformat(), "candidates": rows,
             "entry_quality_summary": ({
@@ -4335,6 +4347,16 @@ class ProductionOrchestrator:
                     # the daily uptime needed for any reward.
                     desired, desired_pools, reserved_pools = await self._select_recovery_cohort(
                         locked_pools, permit.maximum_active_pools)
+                    if self._continuous_service:
+                        working_buy_counts = Counter(
+                            order.symbol for order in self.account.reducer.orders.values()
+                            if order.working and order.side is Side.BUY
+                        )
+                        desired = order_for_resting_focus(
+                            desired, progress_by_key=self._uptime,
+                            working_buy_counts=working_buy_counts,
+                            incumbent_symbols={symbol for _, symbol in self._sticky_markets.values()},
+                        )
                     self._sticky_pool_ids = set(desired_pools)
                     self._selected_portfolio_report = portfolio_reward_report(desired)
                     self._selected_portfolio_report['selection_preferences'] = [
