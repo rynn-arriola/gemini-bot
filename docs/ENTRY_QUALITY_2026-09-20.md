@@ -10,7 +10,7 @@ Policy v8 binds the parameters to the exact build/account permit. Version 7 and 
 
 ## Availability and limits
 
-The gate may cancel an affected working pair or prevent re-entry, losing real resting time and potentially Gemini qualifying snapshots. A market that recovers may rejoin through the existing terminal-cancel, flat-proof, cooldown and sticky-owner paths; unrelated markets remain available. It does not infer or improve the unpublished 50% scoring-window start and cannot guarantee prevention of a later price collapse. Full-depth live counts are exposed only by the v8 rank report after controlled deployment.
+The gate may cancel an affected working pair or prevent re-entry, losing real resting time and potentially Gemini qualifying snapshots. A market that recovers may rejoin through the existing terminal-cancel, flat-proof, cooldown and sticky-owner paths; unrelated markets remain available. It does not infer or improve the unpublished 50% scoring-window start and cannot guarantee prevention of a later price collapse. The deployed v8 rank report exposes point-in-time full-depth counts, not reward qualification.
 
 At 18:54 ET, the existing v34 archive showed 29 ranked markets. A conservative *top-level-only* calculation passed 28; among 14 markets with otherwise positive current economics (ignoring the reporting-only uptime proxy), 13 passed. The one failure had complete aggregate depth according to a separate ratio, but the archive lacks its deeper price levels. Therefore the exact full-book pass count was 28–29 ranked and 13–14 otherwise actionable at that instant. The active bot remained v34; no live policy activation or restart was performed to obtain this estimate.
 
@@ -18,6 +18,12 @@ At 19:11 ET, a newer archive showed 21 of 22 ranked and 14 of 15 otherwise actio
 
 ## Verification and deployment boundary
 
-Offline tests cover both outcome formulas, shallow depth, price collapse despite ample quantity, own-order subtraction, missing book, legacy-policy exclusion, entry timing, final pre-send recheck, market-local cancellation and reducer independence. The final 1,074-test production suite and 28 script tests, compilation, native PowerShell parsing and offline Windows release validation pass. Deployment requires terminal-flat old owner, fresh authenticated account/journal proof, new build/policy/account-bound v7 permit and an explicit owner decision to activate. No old v34 permit may authorize policy v8.
+Offline tests cover both outcome formulas, shallow depth, price collapse despite ample quantity, own-order subtraction, missing book, legacy-policy exclusion, entry timing, final pre-send recheck, market-local cancellation and reducer independence. The final 1,074-test production suite and 28 script tests, compilation, native PowerShell parsing and offline Windows release validation pass. No old v34 permit may authorize policy v8.
+
+## V35 controlled deployment and initial acceptance
+
+The owner explicitly requested restart. V34 reached `stopped_flat` at 19:32:58 ET with no orders/positions; its supervisor and runner exited. Main and GitHub matched tested commit `2bbb37a`. Main repeated the 14 focused tests and offline release validation. Fresh read-only preparation on the canonical journal proved no orders/positions, a successful verified backup, and 29/29 ranked plus 14/14 otherwise actionable synchronized full-depth gate passes. A fresh v7 permit bound the exact v8 policy, build and account, with no uptime override. The persistent task began v35 quoting; first NEW was 19:37:34 ET, 276 seconds after the old stopped-flat record. This interval earns no snapshot credit.
+
+At 19:39 ET, authenticated REST found 20 canonically owned size-30 BUY entries across ten markets and zero positions. All five public shards were connected/unheld; the runner had no read/stream holds or reward pause, supervisor restart count zero, no live warning/error/critical log and empty stderr. The live gate report showed 15/15 otherwise actionable candidates passing at 19:38 ET. These are initial observations, not proof of future reward qualification, loss prevention or long-run recovery. The separate 50% estimator branch was not merged.
 
 Gemini source: [liquidity rewards and 50% snapshot requirement](https://developer.gemini.com/prediction-markets/liquidity-rewards-program); [public depth streams](https://developer.gemini.com/trading/websocket/streams).
