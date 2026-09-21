@@ -1,7 +1,7 @@
 """Six-socket isolation tests; all network and mutation endpoints are fake."""
 import asyncio
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -121,6 +121,16 @@ class ShardAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(event.error)
         await frames.aclose()
         self.assertFalse(p._readers)
+
+    async def test_liveness_pings_only_quiet_shards(self):
+        p = self.public
+        for socket in p.sockets:
+            socket.prove_liveness = AsyncMock()
+        p.sockets[0].last_message_at = datetime.now(timezone.utc)
+        await p.prove_liveness(timeout=5)
+        p.sockets[0].prove_liveness.assert_not_awaited()
+        for socket in p.sockets[1:]:
+            socket.prove_liveness.assert_awaited_once_with(timeout=5)
 
     async def test_shared_429_blocks_every_socket_and_connection_attempt(self):
         observe_response(self.governor, 'public_ws', {'status':429})

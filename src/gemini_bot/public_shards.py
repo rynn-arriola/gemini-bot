@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from typing import Any
 
@@ -204,6 +204,11 @@ class PublicMarketShards:
 
     async def prove_liveness(self, *, timeout=2):
         async def ping(shard):
+            observed = self.sockets[shard].last_message_at
+            if observed is not None and observed.tzinfo is not None:
+                age = (datetime.now(timezone.utc) - observed).total_seconds()
+                if 0 <= age < 1:
+                    return  # Recent depth/account-independent traffic proves this shard alive.
             generation = self.generations[shard]
             try:
                 await self.sockets[shard].prove_liveness(timeout=timeout)

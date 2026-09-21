@@ -1652,7 +1652,7 @@ class ProductionOrchestrator:
                     continue
                 generation = self._stream_generation["public"]
                 try:
-                    await self.public.prove_liveness(timeout=2)
+                    await self.public.prove_liveness(timeout=5)
                 except (ConnectionClosed, ConnectionError, TimeoutError, OSError) as exc:
                     await self._recover_stream("public", exc, generation=generation)
         except asyncio.CancelledError:
@@ -4538,8 +4538,9 @@ class ProductionOrchestrator:
         await asyncio.gather(self._reconnect_stream('public', for_drain=True),
                              self._reconnect_stream('private', for_drain=True))
         self._tasks = [asyncio.create_task(self._public_pump()), asyncio.create_task(self._private_pump())]
-        if hasattr(self.public, 'prove_liveness'):
-            self._tasks.append(asyncio.create_task(self._public_liveness_pump()))
+        # Drain readers are bounded by the account proof and drain deadline.
+        # Starting the quoting-only ping worker here can inject a shard-fault
+        # event after the gate has entered DRAINING and abort shutdown proof.
         await self._wait_ready(15)
         while True:
             try:

@@ -2,7 +2,7 @@
 
 ## Current release
 
-- **September 21 recovery candidate:** v36 stopped after a public-shard/pre-send race and failed drain-consumer replacement. Authenticated account proof found zero orders/positions; the attention-only supervisor is dismissed. The tested source repair still needs publication, fresh preparation and one owner-authorized controlled restart. After deployment, observe natural shard faults and exact terminal/flat drain without inducing a fault; other shards should remain active only when no mutation is unknown. [Defect](BUGFIXES.md).
+- **September 21 liveness candidate:** v37's tested pre-send repair launched, but another two-second public ping timeout coincided with an actually attempted maker send; unknown-mutation safety drained flat. V38 quiet-only/five-second pings and no drain ping worker need full verification, publication, fresh preparation and one controlled restart. After deployment, observe natural shard faults and exact terminal/flat drain without inducing a fault; other shards should remain active only when no mutation is unknown. [Defects](BUGFIXES.md).
 
 - **Qualification focus plus entry-quality v8 was deployed in v36.** Initial authenticated acceptance found 20 owned size-30 orders/ten markets, zero positions, five healthy shards and no holds/restarts; 16/16 otherwise-actionable markets passed the synchronized live gate check. Observe natural gate failures, affected-market cancellation/recovery, resting continuity, later fills/exits and reward snapshots without inducing trades or faults. Do not infer future protection or 50% qualification from initial acceptance. [Design and deployment](docs/QUALIFICATION_FOCUS_2026-09-20.md).
 

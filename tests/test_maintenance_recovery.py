@@ -75,6 +75,7 @@ class MaintenanceFlowTests(unittest.IsolatedAsyncioTestCase):
         r._recovery_account_proof.assert_awaited_once()
         r._drain_bounded.assert_awaited_once()
         self.assertEqual(r.gate.state, EngineState.DRAINING)
+        self.assertEqual(len(r._tasks), 2)
         self.assertFalse(r._stream_holds)
         r.private.place_maker.assert_not_awaited()
 

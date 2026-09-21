@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 21 — overactive public ping caused another stop during quoting
+
+V37 reached live quoting but a public ping timed out roughly 15 seconds later while an order had crossed the network-send boundary and was awaiting acknowledgement. The existing global unknown-mutation halt was correct; exact drain later proved flat/order-free. The five public sockets had been pinged every second with a two-second pong timeout even when live depth traffic already proved a shard active. The follow-up checks pings only on shards quiet for at least one second and allows five seconds for a pong. A stale shard still fails its existing quote-freshness gate; this change does not forgive a truly unknown send or grant downtime credit. Drain reconnect no longer starts the quoting-only ping worker, avoiding a secondary fault after the gate is already draining.
+
 ## September 21 — public-shard fault raced a paced maker send and drain
 
 At 17:00 ET a public ping timeout arrived while a second maker leg was durably marked `sent_unknown` but still queued before its socket send. Shard recovery treated it as an attempted unknown mutation, halted all markets, and the send guard proved that leg unsent. Emergency drain then failed because the terminated public pump retained its async-generator consumer; a replacement consumer was refused. Recovery now distinguishes only exact pre-network-send IDs, holds the affected shard, and waits a finite period for definite non-send terminalization. An actual attempted/unknown send still halts globally. The public pump closes its prior generator on failure and stream replacement, allowing drain readers to reconnect. Shutdown still needs authenticated terminal/flat proof; no uptime is credited during holds or downtime.
