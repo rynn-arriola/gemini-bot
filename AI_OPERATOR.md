@@ -14,27 +14,6 @@ This repository is managed operationally by AI on native Windows. The human acco
 
 The canonical venue surface is [GEMINI_PREDICTIONS_API_REFERENCE.md](GEMINI_PREDICTIONS_API_REFERENCE.md). Re-check official Gemini documentation before live protocol or reward-rule changes.
 
-## Mandatory model selection
-
-Only GPT-6 Astra and GPT-5.6 Sol are used for this repository. Before every substantive task, tell the owner which model to use in exactly one of these forms, with one short reason:
-
-`Recommended agent: Astra — [reason]`
-
-`Recommended agent: 5.6 Sol — [reason]`
-
-GPT-5.6 Sol is the default. Use Sol for approved-plan implementation, focused fixes with an established cause, tests and verification, routine logs/status/reports/data checks, documentation and formatting, deployment/restart/standard operations, and fixes requested by an Astra review.
-
-Use GPT-6 Astra only when deeper reasoning is materially needed: new feature architecture or end-to-end design; strategy, risk or business-logic changes; difficult incidents with an uncertain cause; cross-system concurrency, recovery, security or account-state problems; API research that may affect architecture, strategy, compliance or risk; and final review of meaningful or high-risk live-money code changes.
-
-For meaningful development, keep each phase on one model and use this handoff:
-
-1. Astra analyzes and designs only, then stops.
-2. Sol implements the approved design, tests and verifies, then stops.
-3. Astra reviews the implementation for architectural violations, races, security problems, edge cases and incorrect assumptions, then stops.
-4. Sol implements the review findings and reruns verification.
-
-Do not use Astra for routine work Sol can reliably complete. Escalate from Sol only when evidence reveals material architectural uncertainty or risk, and do not switch models repeatedly within one phase. If the selected model does not match the recommendation, stop before development so the owner can switch. Urgent safety action—such as stopping a live bot or preventing exposure—never waits for a model switch. Small low-risk changes may be implemented and verified by Sol without Astra review. This routing changes no safety, testing, deployment, restart or activation requirement below.
-
 ## Authority split
 
 The account owner decides capital, loss limits, position limits, active breadth, quote placement policy, timing policy, and whether live activation is allowed. AI may recommend values, but recommendations are not authority.
