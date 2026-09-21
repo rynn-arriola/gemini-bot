@@ -1445,11 +1445,12 @@ class ProductionOrchestrator:
             identity = event_identity(row.get("event_id"))
             if identity is not None and len(tickers_by_id.get(identity, set())) != 1:
                 identity = None
+            ticker, pool_id = row.get("event_ticker"), row.get("pool_id")
+            progress = (self._uptime.get(uptime_progress_key(ticker, pool_id))
+                        if isinstance(ticker, str) and ticker
+                        and isinstance(pool_id, str) and pool_id else None)
             row["qualification_estimate"] = estimate_50_percent(
-                identity,
-                self._uptime.get(uptime_progress_key(
-                    str(row["event_ticker"]), str(row["pool_id"]),
-                )),
+                identity, progress,
                 self.exchange_reward_uptime.reward_results, now=now,
             )
             row["qualification_estimate"]["local_minutes_used_for_selected_funding_priority"] = self._continuous_service

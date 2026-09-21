@@ -1,8 +1,9 @@
-# Local 50% estimator and incumbent funding priority — prepared
+# Local 50% estimator and incumbent funding priority — integration candidate
 
 The owner requested a 50% estimator and more focus on markets that already
-accumulated resting time. This source is prepared in an isolated checkout; it
-has not been deployed to the live v34 runner. No live orders or limits changed.
+accumulated resting time. The prepared source has been integrated with the
+live v35 entry-quality code in an isolated checkout. Deployment, if completed,
+requires a controlled terminal-flat handoff and new exact-build permit.
 
 Gemini's daily summary supplies per-event `snapshot_count` and
 `total_snapshots`. The report now shows the latest available counts, the
@@ -22,8 +23,8 @@ breaks ties. This only affects which otherwise-safe owner gets limited capital
 first; it never releases a sticky owner, cancels an order, creates more slots,
 changes price/size or counts downtime as resting.
 
-Focused reporting/priority tests pass. A deliberate reversed local-minute
-sort failed the new regression and was restored. The complete isolated
-Windows suite passed 1,066 tests, compilation and offline release validation.
-The running bot still uses the prior build; activation requires a separate
-controlled terminal/flat deployment with fresh exact-build authority.
+The integrated release passed 1,080 production tests, 28 script tests,
+compilation and offline release validation. Integration also hardened rank
+reporting for a candidate lacking event/pool identity: that row gets no local
+scenario rather than a runtime exception. A stopped or paused interval is not
+local resting time or a Gemini reward snapshot.

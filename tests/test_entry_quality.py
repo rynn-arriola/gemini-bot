@@ -178,3 +178,4 @@ class EntryQualityRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report['entry_quality_summary']['ranked_passed'], 1)
         self.assertEqual(report['entry_quality_summary']['ranked_considered'], 1)
         self.assertTrue(report['candidates'][0]['entry_quality']['passed'])
+        self.assertIsNone(report['candidates'][0]['qualification_estimate']['local_eastern_day_scenario'])
