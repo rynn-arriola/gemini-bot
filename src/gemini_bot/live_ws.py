@@ -73,6 +73,9 @@ class LiveWebSocket:
         self._request_id = 0
         self._send_lock = asyncio.Lock()
         self._send_waiters: dict[object, Priority] = {}
+        # Intents still before their final transport send. Remove each ID
+        # immediately before socket.send, with no intervening await.
+        self.pending_place_ids: set[str] = set()
         self._send_changed = asyncio.Event()
         self._initial_frames: list[dict[str, Any]] = []
         self.mutation_guard = None
@@ -162,6 +165,11 @@ class LiveWebSocket:
                                     raise
                                 except Exception as exc:
                                     raise MutationNotSentError(str(exc)) from exc
+                            if payload.get("method") == "order.place":
+                                # No await separates this transition from the
+                                # socket send. From here an interruption is an
+                                # unknown mutation, never a paced pre-send.
+                                self.pending_place_ids.discard(str(payload["params"]["clientOrderId"]))
                             self._requests.register(payload["id"], payload["method"])
                             state["attempted"] = True
                             await connection.send(json.dumps(payload, separators=(",", ":")))
@@ -213,11 +221,14 @@ class LiveWebSocket:
         # Persist/own the intent before the only network mutation. Once send is
         # attempted its outcome is ambiguous until account reconciliation.
         self._ledger.mark_sent(intent.client_order_id)
+        self.pending_place_ids.add(intent.client_order_id)
         try:
             await self._send(payload, Priority.ORDER_SAFETY)
         except MutationNotSentError:
             self._ledger.mark_terminal(intent.client_order_id)
             raise
+        finally:
+            self.pending_place_ids.discard(intent.client_order_id)
         return intent.client_order_id
 
     async def place_ioc_entry(self, leg: QuoteLeg) -> str:

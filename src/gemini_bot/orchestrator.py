@@ -1026,7 +1026,8 @@ class ProductionOrchestrator:
             return
         if self.gate.state is not EngineState.QUOTING or self._recovery_stop_requested():
             raise RuntimeError('public shard loss outside active session') from event.error
-        if self.journal.unresolved_ids():
+        unresolved = set(self.journal.unresolved_ids())
+        if unresolved and not unresolved.issubset(self.private.pending_place_ids):
             raise RuntimeError('shard loss during unknown mutation requires reconciliation') from event.error
         self.public.invalidate(event.shard)
         task = self._shard_restarts.get(event.shard)
@@ -1043,9 +1044,20 @@ class ProductionOrchestrator:
 
     async def _recover_public_shard(self, shard: int) -> None:
         try:
+            presend_deadline = time.monotonic() + self.private.send_timeout_seconds + 5
             while True:
                 if self._recovery_stop_requested():
                     return  # Hold remains; drain never grants entry permission.
+                unresolved = set(self.journal.unresolved_ids())
+                if unresolved:
+                    # The held shard invalidates the queued quote's final-send
+                    # guard. Wait only for those exact pre-send intents to
+                    # terminalize; an attempted/unknown send stays global-fatal.
+                    if (not unresolved.issubset(self.private.pending_place_ids)
+                            or time.monotonic() >= presend_deadline):
+                        raise RuntimeError('shard loss left an unknown mutation')
+                    await asyncio.sleep(.05)
+                    continue
                 if self._stream_holds or not self.account.snapshots_fresh:
                     await asyncio.sleep(.25)
                     continue
@@ -1557,6 +1569,7 @@ class ProductionOrchestrator:
                 raise RuntimeError("contract lifecycle safety queue is full") from exc
 
     async def _public_pump(self) -> None:
+        frames = None
         try:
             frames = self.public.frames()
             generation = self._stream_generation["public"]
@@ -1567,14 +1580,17 @@ class ProductionOrchestrator:
                     if not transient_failure(exc):
                         raise
                     await self._recover_stream("public", exc, generation=generation)
+                    await frames.aclose()
                     frames, generation = self.public.frames(), self._stream_generation["public"]
                     continue
                 except (StopAsyncIteration, ConnectionClosed, ConnectionError, TimeoutError, OSError) as exc:
                     await self._recover_stream("public", exc, generation=generation)
+                    await frames.aclose()
                     frames, generation = self.public.frames(), self._stream_generation["public"]
                     continue
                 if generation != self._stream_generation["public"]:
                     await self._recover_stream("public", ConnectionError("obsolete stream"), generation=generation)
+                    await frames.aclose()
                     frames, generation = self.public.frames(), self._stream_generation["public"]
                     continue
                 shard_event = frame if isinstance(frame, ShardEvent) else None
@@ -1614,6 +1630,7 @@ class ProductionOrchestrator:
                                                             error=ConnectionError('depth sequence gap')))
                         continue
                     await self._recover_stream("public", ConnectionError("depth sequence gap"), generation=generation)
+                    await frames.aclose()
                     frames, generation = self.public.frames(), self._stream_generation["public"]
         except asyncio.CancelledError:
             raise
@@ -1622,6 +1639,9 @@ class ProductionOrchestrator:
             self.log.exception("public_stream_failed", ErrorClass.TRANSPORT, exc)
             self._write_status("halted", False, "public stream lost; approval is required after reconciliation")
             raise
+        finally:
+            if frames is not None:
+                await frames.aclose()
 
     async def _public_liveness_pump(self) -> None:
         """Prove quiet public transport with WebSocket ping/pong once per second."""

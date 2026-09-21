@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 21 — public-shard fault raced a paced maker send and drain
+
+At 17:00 ET a public ping timeout arrived while a second maker leg was durably marked `sent_unknown` but still queued before its socket send. Shard recovery treated it as an attempted unknown mutation, halted all markets, and the send guard proved that leg unsent. Emergency drain then failed because the terminated public pump retained its async-generator consumer; a replacement consumer was refused. Recovery now distinguishes only exact pre-network-send IDs, holds the affected shard, and waits a finite period for definite non-send terminalization. An actual attempted/unknown send still halts globally. The public pump closes its prior generator on failure and stream replacement, allowing drain readers to reconnect. Shutdown still needs authenticated terminal/flat proof; no uptime is credited during holds or downtime.
+
 ## September 19 — partial executable depth left reducible inventory untouched
 
 A live 15-contract UKGEN2029-GREEN NO fill had 10 YES contracts available at the best ask. The collateral-return direction was correct, but `exact_crossing_exit` returned no order unless haircut-adjusted depth could cover all 15, so the market-local worker waited without reducing risk. The repair keeps the IOC quantity equal to the exact authenticated position but permits it at the current best executable price whenever positive depth exists. A partial fill must become a terminal, freshly reconciled same-sign smaller residual before another bounded attempt. If aggregate depth is insufficient, the fallback never sweeps deeper prices; zero depth still waits. Existing deadlines, three-attempt/30-second rounds, backoff, ambiguity/rejection/accounting/HARD boundaries and unrelated-market service remain unchanged. [Evidence and deployment boundary](docs/PARTIAL_DEPTH_EXIT_2026-09-19.md).

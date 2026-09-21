@@ -31,6 +31,7 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
         async def send(raw):
             payload = json.loads(raw)
+            self.assertNotIn(payload['params']['clientOrderId'], self.r.private.pending_place_ids)
             self.sent.append(payload)
             if self.fail_second_send and len(self.sent) == 2:
                 raise ConnectionError('fake send outcome unknown')
@@ -53,6 +54,12 @@ class PairAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
     def cancel_first(self):
         self.r.account.apply({**self.frames['YES'], 'X': 'CANCELED'})
+
+    async def test_paced_intent_is_pre_send_only_until_transport_attempt(self):
+        self.at_second_admission = lambda: self.assertEqual(len(self.r.private.pending_place_ids), 1)
+        await self.r._quote_pair_locked(fixtures.candidate())
+        self.assertEqual(len(self.sent), 2)
+        self.assertFalse(self.r.private.pending_place_ids)
 
     async def assert_second_blocked(self):
         await self.r._quote_pair_locked(fixtures.candidate())

@@ -209,6 +209,57 @@ class ShardOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             self.r._begin_shard_recovery(ShardEvent(0,0,error=ConnectionError()))
         self.assertFalse(self.r._shard_restarts)
 
+    async def test_shard_loss_during_paced_unsent_entry_waits_for_terminalization(self):
+        from gemini_bot.execution import OrderPurpose
+        r = self.r
+        intent = r.ledger.prepare(fixtures.candidate().quote.yes, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.private.pending_place_ids.add(intent.client_order_id)
+        r._begin_shard_recovery(ShardEvent(0, 0, error=ConnectionError('synthetic')))
+        self.assertIn(0, r.public.held)
+        await asyncio.sleep(.01)
+        r._cancel_symbol_entries.assert_not_awaited()
+        # The final-send guard sees the invalidated shard and proves no send.
+        r.ledger.mark_terminal(intent.client_order_id)
+        r.private.pending_place_ids.discard(intent.client_order_id)
+        await asyncio.wait_for(r._shard_restarts[0], 1)
+        self.assertEqual(r.gate.state, EngineState.QUOTING)
+        self.assertNotIn(0, r.public.held)
+
+    async def test_real_paced_place_terminalizes_after_shard_invalidation(self):
+        from gemini_bot.live_ws import EntryStateChangedBeforeSend
+        r = self.r
+        release = asyncio.Event()
+
+        async def paced_send(*_args):
+            await release.wait()
+            raise EntryStateChangedBeforeSend('held shard invalidated quote')
+
+        r.private._send = AsyncMock(side_effect=paced_send)
+        place = asyncio.create_task(r.private.place_maker(fixtures.candidate().quote.yes))
+        await asyncio.sleep(0)
+        self.assertEqual(set(r.journal.unresolved_ids()), r.private.pending_place_ids)
+        r._begin_shard_recovery(ShardEvent(0, 0, error=ConnectionError('synthetic')))
+        release.set()
+        with self.assertRaises(EntryStateChangedBeforeSend):
+            await place
+        self.assertFalse(r.private.pending_place_ids)
+        self.assertFalse(r.journal.unresolved_ids())
+        await asyncio.wait_for(r._shard_restarts[0], 1)
+        self.assertEqual(r.gate.state, EngineState.QUOTING)
+
+    async def test_shard_loss_during_paced_entry_still_halts_if_send_is_unknown(self):
+        from gemini_bot.execution import OrderPurpose
+        r = self.r
+        intent = r.ledger.prepare(fixtures.candidate().quote.yes, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.private.pending_place_ids.add(intent.client_order_id)
+        r._begin_shard_recovery(ShardEvent(0, 0, error=ConnectionError('synthetic')))
+        r.private.pending_place_ids.discard(intent.client_order_id)
+        with self.assertRaisesRegex(RuntimeError, 'unknown mutation'):
+            await asyncio.wait_for(r._shard_restarts[0], 1)
+        self.assertEqual(r.gate.state, EngineState.HALTED)
+
     async def test_private_hold_defers_recovery_and_blocks_all_entry(self):
         r = self.r
         r._stream_holds.add('private')
@@ -280,6 +331,14 @@ class ShardOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await asyncio.wait_for(pump,1)
         self.assertEqual(r.gate.state,EngineState.HALTED)
+        self.assertFalse(r.public._consuming)
+        # A shutdown proof may now construct a new consumer without colliding
+        # with the failed pump's generator.
+        frames = r.public.frames()
+        pending = asyncio.create_task(anext(frames))
+        await r.public.sockets[1].queue.put({'e':'contractStatus','s':'B'})
+        await asyncio.wait_for(pending,1)
+        await frames.aclose()
 
     async def test_private_and_shard_recovery_do_not_wait_on_each_other(self):
         r = self.r
