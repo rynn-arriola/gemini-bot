@@ -15,11 +15,12 @@ NOW = datetime(2026,9,19,22,tzinfo=timezone.utc)
 def day(date='2026-09-19', status='PAID', events=None, paid_at=None):
     return parse_reward_results([dict(payout_date=date, payout_status=status,
         total_reward_usd='3', paid_at=paid_at or date+'T21:45:00+00:00',
-        events=events if events is not None else [event('1','2'), event('2','.01')])])[0]
+        events=events if events is not None else [
+            event('1','2',normalized='.02'), event('2','.01',normalized='.0001')])])[0]
 
-def event(identity, reward, snapshots=1000, total=1440):
+def event(identity, reward, snapshots=1000, total=1440, normalized='.01'):
     return dict(event_id=identity, event_reward_usd=reward,
-        snapshot_count=snapshots,total_snapshots=total,normalized_score='.01')
+        snapshot_count=snapshots,total_snapshots=total,normalized_score=normalized)
 
 def candidate(symbol, identity, cost='0'):
     return replace(rank_candidate(fx.item(symbol, symbol, cost=cost), now=fx.NOW), event_id=identity)
@@ -42,11 +43,22 @@ class EvidenceTests(unittest.TestCase):
             day(events=[event('1','1')])],now=NOW)['1']
         self.assertLess(result.mean_reward_per_qualified_day,D(10))
 
-    def test_unqualified_does_not_become_zero_quality_but_reliability_is_visible(self):
+    def test_unqualified_evidence_lowers_reliability_without_becoming_a_gate(self):
         result = build_evidence([day('2026-09-18',events=[event('1','0',100)]),day()],now=NOW)
         self.assertEqual(result['1'].mean_reward_per_qualified_day,D(2))
         self.assertLess(result['1'].qualification_reliability,D(1))
-        self.assertNotIn('3',build_evidence([day(events=[event('3','0',100)])],now=NOW))
+        weak = build_evidence([day(events=[event('3','0',100,1440,'0')])],now=NOW)['3']
+        self.assertEqual(weak.qualified_days,0)
+        self.assertEqual(weak.preference,0)
+        self.assertGreater(weak.confidence,0)
+
+    def test_normalized_score_rate_retains_precision_lost_by_rounded_reward(self):
+        result = build_evidence([day(events=[
+            event('1','0.00',1000,1440,'.002'),
+            event('2','0.00',1000,1440,'.0002'),
+        ])],now=NOW)
+        self.assertEqual(result['1'].mean_reward_per_qualified_day,0)
+        self.assertGreater(result['1'].preference,result['2'].preference)
 
     def test_pending_unknown_future_payment_and_zero_denominator_are_unused(self):
         for row in [day(status='PENDING'),day(status='UNKNOWN'),
@@ -122,6 +134,25 @@ class SelectionTests(unittest.TestCase):
         self.assertGreater(score,D('.1'))
         self.assertEqual(self.focus.score(self.good,D('.1'),[self.good]),D('.1'))
 
+    def test_local_below_threshold_is_a_soft_discount_not_a_ban(self):
+        below=replace(self.good,best_possible_uptime=D('.49'))
+        normal=replace(self.good,best_possible_uptime=D('.75'))
+        discounted=self.focus.score(below,D('.2'),[])
+        self.assertEqual(discounted,self.focus.score(normal,D('.2'),[])*D('.5'))
+        self.assertGreater(discounted,0)
+
+    def test_realized_data_can_outrank_large_unqualified_live_proxy(self):
+        history=[]
+        for date in ('2026-09-18','2026-09-19'):
+            history.append(day(date,events=[
+                event('15','2.73',1415,1440,'.0109405946'),
+                event('258610','0',607,1440,'0'),
+            ]))
+        focus=RewardFocus(); focus.update(history,now=NOW)
+        senate=replace(candidate('SENATE','15'),best_possible_uptime=D('.98'))
+        zec=replace(candidate('ZEC','258610'),best_possible_uptime=D('.42'))
+        self.assertGreater(focus.score(senate,D('.08'),[]),focus.score(zec,D('1'),[]))
+
     def test_ambiguous_current_event_mapping_is_neutral(self):
         conflict=replace(self.weak,event_id='1')
         selected,_=choose([conflict,self.good],self.focus)
@@ -136,13 +167,17 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(result.reasons,original.reasons)
             self.assertEqual(result.own_daily_score_proxy,original.own_daily_score_proxy)
 
-    def test_blend_change_bounded_to_thirty_percent(self):
+    def test_blend_change_bounded_to_fifty_percent_without_local_discount(self):
         for model in [D(0),D('.2'),D(1)]:
             for c in [self.good,self.weak]:
-                self.assertLessEqual(abs(self.focus.score(c,model,[])-model),D('.30'))
+                c=replace(c,best_possible_uptime=D('.75'))
+                self.assertLessEqual(abs(self.focus.score(c,model,[])-model),D('.50'))
 
     def test_report_does_not_claim_forecast_or_contract_dollars(self):
         report=self.focus.report()
+        self.assertEqual(report['version'],2)
+        self.assertEqual(report['history_weight'],'.50')
+        self.assertTrue(report['local_discount_is_not_an_entry_gate'])
         self.assertFalse(report['forecast_dollars_calibrated'])
         self.assertFalse(report['contract_attribution_available'])
 

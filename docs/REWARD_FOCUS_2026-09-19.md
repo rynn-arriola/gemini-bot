@@ -1,5 +1,13 @@
 # Realized reward focus and size-30 deployment
 
+## September 21 v2 direct calibration
+
+The September 21 authenticated report paid $4.96. Senate and House control supplied $4.55 (91.7%); across the four paid dates they supplied $13.99 of $16.50 (84.8%). The final pre-publication v36 selected-pool proxy was $37.56. ZEC and BTC contributed $29.42 of that proxy but reported only 607/1440 and 646/1440 snapshots, below 50%, and earned zero. The same proxy understated Senate and House while materially overstating several other qualified events. This comparison is event/pool evidence, not contract attribution or a promise that the next competition set is unchanged.
+
+The owner directed using the evidence directly. V2 replaces rounded-dollar history with authenticated `normalized_score / snapshot_count` on qualified event-days and multiplies it by weighted qualification reliability. It keeps pre-September-18 regime downweighting, recency, bounded 14-date history, exact event identity and neutral missing history. Unqualified-only evidence now produces a confidence-bounded negative preference rather than disappearing. Current live marginal economics and realized evidence each receive 50%; a positive event uplift still applies once, not once per sibling. A local best-possible ratio below the published 50% threshold halves only the vacant-slot ranking score. It cannot reject an entry, cancel or release an incumbent, or claim venue qualification.
+
+This remains a market-selection calibration, not a calibrated dollar forecast. Current pool budget, capital, depth, costs and shared-pool marginal allocation stay in the live model. Healthy incumbents remain sticky, so deployment does not reset the cohort merely to demonstrate a different ranking. New/released slots use v2 immediately after activation.
+
 The owner approved a 70% live-model / 30% historical preference and a controlled restart together with the already verified 30-contract maker size. Existing healthy owners remain sticky. The calibration orders new/released slots within the existing watched universe; it does not reset the cohort or expand discovery/rate limits.
 
 ## Evidence and formula
