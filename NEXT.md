@@ -2,6 +2,8 @@
 
 ## Current release
 
+- **September 21 v39 candidate:** v38 stopped when a public pong timeout overlapped a maker order awaiting acknowledgement even though the exact private `NEW` arrived in the same second. The candidate globally pauses new entries for bounded exact acknowledgement, then performs affected-shard recovery while preserving unrelated resting orders; unresolved evidence remains fatal. Complete verification/publication, fresh preparation and controlled restart, then observe natural recovery without fault injection. [Defect](BUGFIXES.md).
+
 - **September 21 v38 is deployed and passed initial acceptance:** after v37's flat drain, v38's quiet-only/five-second pings and no drain ping worker passed full verification, publication, fresh preparation and controlled restart. Initial authenticated REST found 20 owned size-30 orders/ten complete pairs and no positions or unknown orders; five shards were healthy with no holds/errors/restarts. Observe natural shard faults, fill/exit and terminal/flat drain without inducing a fault. Other shards continue only when no mutation is unknown; initial acceptance does not prove long-run uptime. [Defects](BUGFIXES.md).
 
 - **Qualification focus plus entry-quality v8 was deployed in v36.** Initial authenticated acceptance found 20 owned size-30 orders/ten markets, zero positions, five healthy shards and no holds/restarts; 16/16 otherwise-actionable markets passed the synchronized live gate check. Observe natural gate failures, affected-market cancellation/recovery, resting continuity, later fills/exits and reward snapshots without inducing trades or faults. Do not infer future protection or 50% qualification from initial acceptance. [Design and deployment](docs/QUALIFICATION_FOCUS_2026-09-20.md).

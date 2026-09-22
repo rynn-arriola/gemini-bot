@@ -1027,8 +1027,12 @@ class ProductionOrchestrator:
         if self.gate.state is not EngineState.QUOTING or self._recovery_stop_requested():
             raise RuntimeError('public shard loss outside active session') from event.error
         unresolved = set(self.journal.unresolved_ids())
-        if unresolved and not unresolved.issubset(self.private.pending_place_ids):
-            raise RuntimeError('shard loss during unknown mutation requires reconciliation') from event.error
+        if unresolved:
+            # The private account stream can still supply the exact NEW or
+            # terminal event after an unrelated public shard reports failure.
+            # Block every new entry while that evidence is pending; never
+            # replay the mutation or assume it was sent/not sent.
+            self._read_recovery_attempts['pending_mutation_confirmation'] = 1
         self.public.invalidate(event.shard)
         task = self._shard_restarts.get(event.shard)
         if task is not None and not task.done():
@@ -1044,20 +1048,26 @@ class ProductionOrchestrator:
 
     async def _recover_public_shard(self, shard: int) -> None:
         try:
-            presend_deadline = time.monotonic() + self.private.send_timeout_seconds + 5
+            mutation_deadline: float | None = None
             while True:
                 if self._recovery_stop_requested():
                     return  # Hold remains; drain never grants entry permission.
                 unresolved = set(self.journal.unresolved_ids())
                 if unresolved:
-                    # The held shard invalidates the queued quote's final-send
-                    # guard. Wait only for those exact pre-send intents to
-                    # terminalize; an attempted/unknown send stays global-fatal.
-                    if (not unresolved.issubset(self.private.pending_place_ids)
-                            or time.monotonic() >= presend_deadline):
+                    self._read_recovery_attempts['pending_mutation_confirmation'] = 1
+                    if mutation_deadline is None:
+                        mutation_deadline = time.monotonic() + self.private.send_timeout_seconds + 5
+                    # Await exact private acknowledgement/terminal evidence.
+                    # No new entry is permitted account-wide during this wait.
+                    # A mutation that stays unknown remains globally fatal.
+                    if time.monotonic() >= mutation_deadline:
                         raise RuntimeError('shard loss left an unknown mutation')
                     await asyncio.sleep(.05)
                     continue
+                mutation_deadline = None
+                if self._read_recovery_attempts.pop('pending_mutation_confirmation', None) is not None:
+                    self.log.event(logging.INFO, 'pending_mutation_confirmed_during_shard_recovery',
+                                   shard=shard, mutation_replayed=False)
                 if self._stream_holds or not self.account.snapshots_fresh:
                     await asyncio.sleep(.25)
                     continue

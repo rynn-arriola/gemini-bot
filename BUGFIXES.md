@@ -1,5 +1,9 @@
 # Bug fixes
 
+## September 21 — acknowledged order arrived just after public-shard fault
+
+V38 stopped at 20:02:36 ET when a public pong exceeded five seconds while one maker mutation was `sent_unknown`. The authenticated private stream reported that exact order `NEW` in the same second, but shard recovery had already raised globally. Drain nevertheless completed flat/order-free. The repair invalidates the failed shard and installs an account-wide new-entry hold while waiting a bounded period for exact private acknowledgement/terminal evidence. Evidence clears the hold and permits affected-shard recovery without canceling unrelated resting markets; no evidence still halts globally. Public frames arriving during a late-pong probe also suppress that false outage because the socket proved itself readable. No mutation replay, absence inference, risk/HARD relaxation or uptime credit is introduced.
+
 ## September 21 — overactive public ping caused another stop during quoting
 
 V37 reached live quoting but a public ping timed out roughly 15 seconds later while an order had crossed the network-send boundary and was awaiting acknowledgement. The existing global unknown-mutation halt was correct; exact drain later proved flat/order-free. The five public sockets had been pinged every second with a two-second pong timeout even when live depth traffic already proved a shard active. The follow-up checks pings only on shards quiet for at least one second and allows five seconds for a pong. A stale shard still fails its existing quote-freshness gate; this change does not forgive a truly unknown send or grant downtime credit. Drain reconnect no longer starts the quoting-only ping worker, avoiding a secondary fault after the gate is already draining.

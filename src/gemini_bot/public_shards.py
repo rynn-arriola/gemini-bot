@@ -215,6 +215,14 @@ class PublicMarketShards:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # A data/control frame received while the protocol pong was
+                # late proves the socket remained readable. Do not convert a
+                # slow pong into a false shard outage.
+                latest = self.sockets[shard].last_message_at
+                if (latest is not None and latest.tzinfo is not None
+                        and (observed is None or latest > observed)
+                        and 0 <= (datetime.now(timezone.utc) - latest).total_seconds() <= timeout):
+                    return
                 await self._events.put(ShardEvent(shard, generation, error=exc))
         await asyncio.gather(*(ping(i) for i in sorted(self.connected)))
 

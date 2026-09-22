@@ -132,6 +132,22 @@ class ShardAdapterTests(unittest.IsolatedAsyncioTestCase):
         for socket in p.sockets[1:]:
             socket.prove_liveness.assert_awaited_once_with(timeout=5)
 
+    async def test_late_pong_is_not_a_fault_when_a_frame_arrives_during_probe(self):
+        p = self.public
+        socket = p.sockets[0]
+        observed = socket.last_message_at
+
+        async def late_pong(*, timeout):
+            socket.last_message_at = datetime.now(timezone.utc)
+            raise TimeoutError('synthetic late pong')
+
+        socket.prove_liveness = AsyncMock(side_effect=late_pong)
+        for other in p.sockets[1:]:
+            other.last_message_at = datetime.now(timezone.utc)
+        await p.prove_liveness(timeout=5)
+        self.assertGreater(socket.last_message_at, observed)
+        self.assertTrue(p._events.empty())
+
     async def test_shared_429_blocks_every_socket_and_connection_attempt(self):
         observe_response(self.governor, 'public_ws', {'status':429})
         self.assertGreater(self.governor.admit_websocket_connection(), 0)
@@ -211,13 +227,25 @@ class ShardOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.public.assignments,before)
         r.rest.reward_events.assert_not_awaited()
 
-    async def test_unknown_send_never_becomes_scoped_retry(self):
+    async def test_unknown_send_pauses_all_entry_until_private_ack_then_recovers_shard(self):
         from gemini_bot.execution import OrderPurpose
-        intent = self.r.ledger.prepare(fixtures.candidate().quote.yes,OrderPurpose.ENTRY)
-        self.r.ledger.mark_sent(intent.client_order_id)
-        with self.assertRaisesRegex(RuntimeError,'unknown mutation'):
-            self.r._begin_shard_recovery(ShardEvent(0,0,error=ConnectionError()))
-        self.assertFalse(self.r._shard_restarts)
+        from gemini_bot.execution import place_request
+        r = self.r
+        intent = r.ledger.prepare(fixtures.candidate().quote.yes, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r._begin_shard_recovery(ShardEvent(0, 0, error=ConnectionError()))
+        self.assertIn('pending_mutation_confirmation', r._read_recovery_attempts)
+        healthy = replace(fixtures.candidate().quote.yes, symbol='B')
+        r._permitted_symbols.add('B')
+        r._continue_after_override = False
+        blocked = r.ledger.prepare(healthy, OrderPurpose.ENTRY)
+        with self.assertRaisesRegex(RuntimeError, 'read recovery pauses'):
+            r._validate_send(place_request(1, blocked))
+        r.ledger.acknowledge(intent.client_order_id, 'acknowledged-order')
+        r.ledger.mark_terminal(intent.client_order_id)
+        await asyncio.wait_for(r._shard_restarts[0], 1)
+        self.assertNotIn('pending_mutation_confirmation', r._read_recovery_attempts)
+        self.assertEqual(r.gate.state, EngineState.QUOTING)
 
     async def test_shard_loss_during_paced_unsent_entry_waits_for_terminalization(self):
         from gemini_bot.execution import OrderPurpose
@@ -264,6 +292,7 @@ class ShardOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         intent = r.ledger.prepare(fixtures.candidate().quote.yes, OrderPurpose.ENTRY)
         r.ledger.mark_sent(intent.client_order_id)
         r.private.pending_place_ids.add(intent.client_order_id)
+        r.private.send_timeout_seconds = -4.99
         r._begin_shard_recovery(ShardEvent(0, 0, error=ConnectionError('synthetic')))
         r.private.pending_place_ids.discard(intent.client_order_id)
         with self.assertRaisesRegex(RuntimeError, 'unknown mutation'):
