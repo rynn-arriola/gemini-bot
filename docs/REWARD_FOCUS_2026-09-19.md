@@ -8,6 +8,10 @@ The owner directed using the evidence directly. V2 replaces rounded-dollar histo
 
 This remains a market-selection calibration, not a calibrated dollar forecast. Current pool budget, capital, depth, costs and shared-pool marginal allocation stay in the live model. Healthy incumbents remain sticky, so deployment does not reset the cohort merely to demonstrate a different ranking. New/released slots use v2 immediately after activation.
 
+V40 deployed the direct calibration after 1,089 production and 28 script tests plus release checks. V39 drained flat before source promotion. Fresh preparation found zero orders/positions, and the new v7 permit had no uptime override. Initial authenticated acceptance found 20 exact owned size-30 orders in ten complete pairs, zero unknown orders/positions, five healthy shards and no holds/errors/restarts. The live report showed version 2 with six authenticated reward dates. This checkpoint does not establish later qualification, payout or profit.
+
+## Original September 19 v1 release
+
 The owner approved a 70% live-model / 30% historical preference and a controlled restart together with the already verified 30-contract maker size. Existing healthy owners remain sticky. The calibration orders new/released slots within the existing watched universe; it does not reset the cohort or expand discovery/rate limits.
 
 ## Evidence and formula
