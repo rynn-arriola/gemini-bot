@@ -134,6 +134,101 @@ class MaintenanceFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(r._stream_holds)
         self.assertEqual(r.gate.state, EngineState.QUOTING)
 
+    async def test_adverse_cancel_does_not_halt_while_proven_unsent_reconnect_exceeds_old_clock(self):
+        r = self.r
+        leg = fixtures.recovery.candidate().quote.yes
+        intent = r.ledger.prepare(leg, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.ledger.acknowledge(intent.client_order_id, 'o')
+        frame = {'e':'orderUpdate','i':'o','c':intent.client_order_id,'s':'X','S':'BUY',
+                 'O':'YES','q':'10','p':str(leg.price),'z':'10','Z':'0','X':'OPEN','T':1}
+        r.account.apply(frame)
+        active = [dict(orderId='o',clientOrderId=intent.client_order_id,symbol='X',side='BUY',
+                       outcome='YES',quantity='10',remainingQuantity='10',price=str(leg.price),status='OPEN')]
+        r.rest.active_orders = AsyncMock(return_value=active)
+        attempts = 0
+
+        async def cancel(_):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise TransportChangedBeforeSend('rotated before send')
+            r.account.apply({**frame,'z':'0','X':'CANCELED','T':2})
+
+        async def delayed_replacement(_):
+            # Longer than the original attempt budget: this is an availability
+            # wait after a proven-unsent mutation, not an unknown send.
+            await asyncio.sleep(.03)
+
+        async def adverse_cancel(_):
+            await r._cancel_order_and_confirm('o', timeout=.01)
+            return True
+
+        r.private.cancel = AsyncMock(side_effect=cancel)
+        r._await_private_cancel_replacement = AsyncMock(side_effect=delayed_replacement)
+        r._cancel_too_aggressive_quote = AsyncMock(side_effect=adverse_cancel)
+
+        self.assertTrue(await r._run_adverse_cancel('X'))
+
+        self.assertEqual(r.private.cancel.await_count, 2)
+        self.assertFalse(r.account.reducer.orders['o'].working)
+        self.assertNotIn('o', r._cancel_tasks)
+        self.assertEqual(r.gate.state, EngineState.QUOTING)
+
+    async def test_unsent_cancel_reconciliation_remains_stop_responsive(self):
+        r = self.r
+        r.directory.joinpath('STOP').touch()
+        with self.assertRaisesRegex(RuntimeError, 'interrupted by stop or expiry'):
+            await r._reconcile_unsent_cancel('o')
+        r.rest.active_orders.assert_not_awaited()
+
+    async def test_unsent_cancel_absent_from_rest_still_requires_terminal_history_proof(self):
+        r = self.r
+        leg = fixtures.recovery.candidate().quote.yes
+        intent = r.ledger.prepare(leg, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.ledger.acknowledge(intent.client_order_id, 'o')
+        r.account.reducer.orders['o'] = OwnedOrder(
+            'o', intent.client_order_id, 'X', Side.BUY, Outcome.YES,
+            leg.price, D(10), D(10), D(0), 'OPEN', 1,
+        )
+        r.private.cancel = AsyncMock(side_effect=AdmissionTimeoutBeforeSend('not sent'))
+        r.rest.active_orders = AsyncMock(return_value=[])
+        r.rest.recent_order_history = AsyncMock(return_value=[
+            dict(orderId='o',clientOrderId=intent.client_order_id,symbol='X',side='BUY',
+                 outcome='YES',quantity='10',filledQuantity='0',price=str(leg.price),
+                 status='CANCELED'),
+        ])
+
+        await r._cancel_order_and_confirm('o', timeout=.5)
+
+        r.private.cancel.assert_awaited_once_with('o')
+        r.rest.recent_order_history.assert_awaited()
+        self.assertFalse(r.account.reducer.orders['o'].working)
+
+    async def test_repeated_unsent_admission_failure_keeps_original_total_clock(self):
+        r = self.r
+        leg = fixtures.recovery.candidate().quote.yes
+        intent = r.ledger.prepare(leg, OrderPurpose.ENTRY)
+        r.ledger.mark_sent(intent.client_order_id)
+        r.ledger.acknowledge(intent.client_order_id, 'o')
+        r.account.reducer.orders['o'] = OwnedOrder(
+            'o', intent.client_order_id, 'X', Side.BUY, Outcome.YES,
+            leg.price, D(10), D(10), D(0), 'OPEN', 1,
+        )
+        r.private.cancel = AsyncMock(side_effect=AdmissionTimeoutBeforeSend('not sent'))
+        r.rest.active_orders = AsyncMock(return_value=[
+            dict(orderId='o',clientOrderId=intent.client_order_id,symbol='X',side='BUY',
+                 outcome='YES',quantity='10',remainingQuantity='10',price=str(leg.price),
+                 status='OPEN'),
+        ])
+
+        with self.assertRaises(TimeoutError):
+            await r._cancel_order_and_confirm('o', timeout=.02)
+
+        self.assertGreater(r.private.cancel.await_count, 1)
+        self.assertIn('o', r._cancel_tasks)
+
     async def test_unsent_cancel_refuses_retry_when_rest_identity_disagrees(self):
         r = self.r
         leg = fixtures.recovery.candidate().quote.yes

@@ -2433,26 +2433,45 @@ class ProductionOrchestrator:
     async def _cancel_order_and_confirm_once(
         self, order_id: str, *, timeout: float = _CANCEL_CONFIRM_SECONDS,
     ) -> None:
-        # Includes admission and socket send, not just the confirmation phase.
-        # A timeout remains latched in _cancel_tasks; it never authorizes replay.
+        # Bound each admission/send/confirmation attempt. A transport rotation
+        # can prove that no cancel byte was sent; continuous-service recovery is
+        # allowed to wait for that replacement outside the expired attempt's
+        # clock, then fresh REST must prove whether retry is still necessary.
+        # Any attempted/ambiguous send still times out and remains latched in
+        # _cancel_tasks, so this never converts an unknown mutation into replay.
+        send_cancel = True
+        loop = asyncio.get_running_loop()
         effective_timeout = self._cancel_confirmation_budget(timeout)
-        async with asyncio.timeout(effective_timeout):
-            send_cancel = True
-            while True:
-                try:
+        deadline = loop.time() + effective_timeout
+        while True:
+            try:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("order cancellation attempt exceeded its deadline")
+                async with asyncio.timeout(remaining):
                     await self._cancel_order_and_confirm_bounded(
-                        order_id, timeout=effective_timeout, send_cancel=send_cancel,
+                        order_id, timeout=remaining, send_cancel=send_cancel,
                     )
-                    return
-                except (TransportChangedBeforeSend, AdmissionTimeoutBeforeSend) as exc:
-                    # These exceptions prove that no byte of the cancel request
-                    # reached Gemini. They are the only cancel failures that may
-                    # be retried, and only after fresh authenticated REST state
-                    # proves whether the exact owned order is still active.
-                    if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
-                        raise
-                    if isinstance(exc, TransportChangedBeforeSend):
-                        await self._await_private_cancel_replacement(exc)
+                return
+            except TransportChangedBeforeSend as exc:
+                # This proves no byte reached Gemini. A continuous-service
+                # transport outage may outlive the attempt clock; after the
+                # replacement, fresh REST is mandatory before a new attempt.
+                if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
+                    raise
+                await self._await_private_cancel_replacement(exc)
+                send_cancel = await self._reconcile_unsent_cancel(order_id)
+                effective_timeout = self._cancel_confirmation_budget(timeout)
+                deadline = loop.time() + effective_timeout
+            except AdmissionTimeoutBeforeSend:
+                # Admission also proves unsent, but it is not a transport
+                # replacement and therefore retains the original total clock.
+                if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("order cancellation admission exceeded its deadline")
+                async with asyncio.timeout(remaining):
                     send_cancel = await self._reconcile_unsent_cancel(order_id)
 
     async def _await_private_cancel_replacement(self, cause: BaseException) -> None:
@@ -2475,6 +2494,8 @@ class ProductionOrchestrator:
     async def _reconcile_unsent_cancel(self, order_id: str) -> bool:
         """Return True only when fresh REST proves the exact order still active."""
         while True:
+            if self._recovery_stop_requested():
+                raise RuntimeError("unsent cancel reconciliation interrupted by stop or expiry")
             current = self.account.reducer.orders.get(order_id)
             if current is not None and not current.working:
                 return False
