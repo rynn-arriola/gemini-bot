@@ -143,6 +143,7 @@ class RewardUniverseLoader:
     per_pool_reads: int = 3
     prefer_uncontested: bool = False
     day_boundary_hour: int = 0
+    allow_sports_futures: bool = False
     missing_events: set[str] = field(default_factory=set, init=False)
 
     def _excluded(self, *categories: object) -> bool:
@@ -303,6 +304,7 @@ class RewardUniverseLoader:
                 start, end, _ = estimated_reward_window(item, now, day_boundary_hour=self.day_boundary_hour)
                 if end <= start or now < start or now >= quote_cutoff(
                     item, end, crypto_entry_before_expiry_seconds=self.crypto_entry_before_expiry_seconds,
+                    allow_sports_futures=self.allow_sports_futures,
                 ):
                     continue
             is_incumbent = (ticker, item.rules.symbol) in preferred

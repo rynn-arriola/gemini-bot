@@ -80,7 +80,7 @@ from .storage import (
     WindowsOwnerLock,
     shared_control_directory,
 )
-from .uptime import sample_and_load_progress, eastern_day_window, locally_qualifying
+from .uptime import sample_and_load_progress, eastern_day_window, locally_qualifying, sports_future
 from .reward_uptime_report import ExchangeRewardUptime, REFRESH_SECONDS, event_identity
 from .qualification_estimator import estimate_50_percent, order_for_resting_focus
 from .reward_focus import RewardFocus
@@ -864,6 +864,7 @@ class ProductionOrchestrator:
             loader.per_pool_reads = 24
             loader.prefer_uncontested = True
             loader.day_boundary_hour = self._scoring_boundary_hour()
+            loader.allow_sports_futures = True
         return loader
 
     def _crypto_entry_cutoff_seconds(self) -> int:
@@ -883,6 +884,7 @@ class ProductionOrchestrator:
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
             day_boundary_hour=self._scoring_boundary_hour(),
+            allow_sports_futures=self._shielded(),
         )
         self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=now,
@@ -2466,6 +2468,7 @@ class ProductionOrchestrator:
                 sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
                 crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
                 day_boundary_hour=self._scoring_boundary_hour(),
+                allow_sports_futures=self._shielded(),
             )
             self.ranked = self._rank_live_universe(
                 self.universe, self.public.books, now=now,
@@ -2792,7 +2795,8 @@ class ProductionOrchestrator:
     def _entry_time_valid(self, symbol: str) -> bool:
         metadata = next((item for item in self.universe if item.rules.symbol == symbol), None)
         if metadata is not None and metadata.event_category.casefold() == "sports":
-            if metadata.event_is_live or not metadata.event_starts_at:
+            if not (self._shielded() and sports_future(metadata, _utc_now())) and (
+                    metadata.event_is_live or not metadata.event_starts_at):
                 return False
         expiry = self._expiry.get(symbol)
         if expiry is None:
@@ -4253,6 +4257,7 @@ class ProductionOrchestrator:
                     or not chosen.pool.active or not chosen.rules.active or chosen.rules.post_only_mode
                     or (
                         chosen.event_category.casefold() == "sports"
+                        and not (self._shielded() and sports_future(chosen, now))
                         and (
                             chosen.event_is_live
                             or not chosen.event_starts_at
@@ -4274,7 +4279,7 @@ class ProductionOrchestrator:
             # and timing metadata for ranking. Never silently rotate live pools.
             if chosen.trade_starts_at:
                 self._trade_start[item.rules.symbol] = _parse_time(chosen.trade_starts_at)
-            if chosen.event_category.casefold() == "sports":
+            if chosen.event_category.casefold() == "sports" and chosen.event_starts_at:
                 self._sports_start[item.rules.symbol] = _parse_time(chosen.event_starts_at)
                 cutoff = self._sports_start[item.rules.symbol] - timedelta(seconds=self.config.risk.sports_exit_before_start_seconds)
                 old = self.account.hard_exit_cutoff.get(item.rules.symbol)
@@ -4299,6 +4304,7 @@ class ProductionOrchestrator:
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
             day_boundary_hour=self._scoring_boundary_hour(),
+            allow_sports_futures=self._shielded(),
         )
         self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
                        usable_permitted_symbol=usable_permitted_symbol)
@@ -4677,6 +4683,7 @@ class ProductionOrchestrator:
                             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
                             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
                             day_boundary_hour=self._scoring_boundary_hour(),
+                            allow_sports_futures=self._shielded(),
                         )
                         self.journal.set_runtime_state(
                             "profitability_telemetry_v1",

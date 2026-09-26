@@ -99,10 +99,27 @@ def estimated_reward_window(
     return start, min(ends), source
 
 
+SPORTS_FUTURE_MINIMUM_LIFE = timedelta(days=7)
+
+
+def sports_future(contract: RewardedContract, reference: datetime) -> bool:
+    """Season-long sports market: no single game start, not live, long expiry.
+
+    Policy v9 may quote these like other long-dated events; a game market
+    with an unknown start remains unquotable.
+    """
+    if contract.event_category.casefold() != "sports" or contract.event_is_live:
+        return False
+    if _parse_optional_timestamp(contract.event_starts_at) is not None:
+        return False
+    expiry = _parse_optional_timestamp(contract.expiry)
+    return expiry is not None and expiry - reference >= SPORTS_FUTURE_MINIMUM_LIFE
+
+
 def quote_cutoff(
     contract: RewardedContract, venue_end: datetime, *,
     exit_before_expiry_seconds: int = 300, sports_exit_before_start_seconds: int = 1200,
-    crypto_entry_before_expiry_seconds: int = 300,
+    crypto_entry_before_expiry_seconds: int = 300, allow_sports_futures: bool = False,
 ) -> datetime:
     """Last local quote opportunity; not evidence that venue scoring ends."""
     ends = [venue_end]
@@ -112,6 +129,8 @@ def quote_cutoff(
                         if contract.event_category.casefold() == "crypto"
                         else exit_before_expiry_seconds)
         ends.append(expiry - timedelta(seconds=entry_offset))
+    if allow_sports_futures and sports_future(contract, venue_end):
+        return min(ends)
     if contract.event_category.casefold() == "sports":
         start = _parse_optional_timestamp(contract.event_starts_at)
         if start is None or contract.event_is_live:
@@ -162,6 +181,7 @@ def sample_and_load_progress(
     sports_exit_before_start_seconds: int = 1200,
     crypto_entry_before_expiry_seconds: int = 300,
     day_boundary_hour: int = 0,
+    allow_sports_futures: bool = False,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -195,6 +215,7 @@ def sample_and_load_progress(
             c, w[1], exit_before_expiry_seconds=exit_before_expiry_seconds,
             sports_exit_before_start_seconds=sports_exit_before_start_seconds,
             crypto_entry_before_expiry_seconds=crypto_entry_before_expiry_seconds,
+            allow_sports_futures=allow_sports_futures,
         ) for c, w in valid}
         cutoff = max(cutoffs.values())
         if start <= now < end:

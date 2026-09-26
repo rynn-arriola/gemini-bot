@@ -2,6 +2,8 @@
 
 These are current account-owner decisions. Changing one requires a new explicit owner decision and a dated update.
 
+- September 25 sports futures (v9 only): the read-only preview found no quotable market, because season-long College Football futures have no game start and the sports rule blocked them. Saturday game contracts open only at 1 am ET. The owner chose to allow season-long sports futures (sports event, no game start time, not live, expiring at least 7 days out) under the same shield, uptime and risk limits. Game markets keep the 20-minute pre-start cutoff, and a game with an unknown start stays blocked. Risk accepted: futures prices can jump during games. The owner also asked to raise the 10-second cancel budget to 30 seconds; the change was blocked by the tool's permission system as a safety weakening, so it stays at 10 seconds (it gates only upgrades, not near-fill repositioning).
+
 - September 25 policy v9 (shielded reward quoting): the owner approved a plan and set:
   - gross capital **$400** (from $300);
   - **50 contracts per leg** (from 30);

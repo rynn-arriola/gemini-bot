@@ -264,6 +264,32 @@ def repair_contract():
                             (NOW + timedelta(hours=2)).isoformat())
 
 
+class SportsFutureTests(unittest.TestCase):
+    def contract(self, *, starts="", live=False, days=60):
+        base = repair_contract()
+        return replace(base, event_category="Sports", event_starts_at=starts, event_is_live=live,
+                       expiry=(NOW + timedelta(days=days)).isoformat())
+
+    def test_season_future_is_quotable_only_when_allowed(self):
+        from gemini_bot.uptime import quote_cutoff, sports_future
+        future = self.contract()
+        self.assertTrue(sports_future(future, NOW))
+        end = NOW + timedelta(hours=20)
+        self.assertEqual(quote_cutoff(future, end, allow_sports_futures=True), end)
+        self.assertEqual(quote_cutoff(future, end).year, 1)  # legacy: blocked
+
+    def test_game_live_or_short_markets_stay_blocked(self):
+        from gemini_bot.uptime import quote_cutoff, sports_future
+        end = NOW + timedelta(hours=20)
+        for contract in (self.contract(live=True), self.contract(days=3)):
+            self.assertFalse(sports_future(contract, NOW))
+            self.assertEqual(quote_cutoff(contract, end, allow_sports_futures=True).year, 1)
+        game = self.contract(starts=(NOW + timedelta(hours=5)).isoformat())
+        self.assertFalse(sports_future(game, NOW))
+        self.assertEqual(quote_cutoff(game, end, allow_sports_futures=True),
+                         NOW + timedelta(hours=5) - timedelta(seconds=1200))
+
+
 class V9RankingTests(unittest.TestCase):
     def item(self, makers, depth):
         return RankInput(
