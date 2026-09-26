@@ -221,7 +221,7 @@ class V9DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         loader.excluded_categories = frozenset({"bitcoin", "crypto"})
         loader.per_pool_reads = 24
         loader.prefer_uncontested = True
-        await loader.load(maximum_pools=8, now=NOW)
+        await loader.load(maximum_pools=8, now=datetime(2026, 9, 25, 22, 0, tzinfo=timezone.utc))
         self.assertNotIn("BTC1", read)
         # Near-term and season-long events interleave; fewest makers first within each.
         self.assertEqual(read, ["CF-C", "CF-B", "CF-A"])
