@@ -72,7 +72,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(value.quote_quantity, Decimal("10"))
 
     def test_pending_cap_cannot_exceed_forty(self) -> None:
-        risk = RiskConfig(Decimal("100"), Decimal("20"), Decimal("10"), Decimal("5"), max_pending_orders=41)
+        from gemini_bot.capacity import MAX_PENDING_ORDERS
+        risk = RiskConfig(Decimal("100"), Decimal("20"), Decimal("10"), Decimal("5"),
+                          max_pending_orders=MAX_PENDING_ORDERS + 1)
         with self.assertRaises(ConfigurationError):
             risk.validate()
 

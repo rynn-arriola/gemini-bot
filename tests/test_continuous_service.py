@@ -38,9 +38,10 @@ class ContinuousPermitTests(unittest.TestCase):
         self.assertEqual(p.uptime_override_until, overnight.MIDNIGHT)
 
     def test_v7_twenty_owner_ceiling(self):
-        self.fixture.value['maximum_active_pools'] = 20
-        self.assertEqual(self.fixture.load(overnight.MIDNIGHT).maximum_active_pools, 20)
-        self.fixture.value['maximum_active_pools'] = 21
+        from gemini_bot.capacity import MAX_ACTIVE_MARKETS
+        self.fixture.value['maximum_active_pools'] = MAX_ACTIVE_MARKETS
+        self.assertEqual(self.fixture.load(overnight.MIDNIGHT).maximum_active_pools, MAX_ACTIVE_MARKETS)
+        self.fixture.value['maximum_active_pools'] = MAX_ACTIVE_MARKETS + 1
         with self.assertRaises(ValueError):
             self.fixture.load(overnight.MIDNIGHT)
 

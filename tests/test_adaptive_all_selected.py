@@ -82,7 +82,9 @@ class SelectedStateTests(unittest.TestCase):
             self.assertTrue(set(mapping) <= names)
 
     def test_scope_rejects_excess_and_malformed_without_partial_changes(self):
-        for names in (SYMBOLS | {'EXCESS'}, {' x'}, {1}):
+        from gemini_bot.capacity import MAX_ACTIVE_MARKETS
+        excess = SYMBOLS | {f'EXCESS{i}' for i in range(MAX_ACTIVE_MARKETS - len(SYMBOLS) + 1)}
+        for names in (excess, {' x'}, {1}):
             with self.assertRaises(ValueError): self.p.sync_selected(names)
             self.assertEqual(self.p.symbols, SYMBOLS)
 

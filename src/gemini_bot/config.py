@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 import os
-from .capacity import MAX_PENDING_ORDERS
+from .capacity import LEGACY_PENDING_ORDERS, MAX_PENDING_ORDERS
 from .queue_pilot import PilotPolicy, parse_pilot_policy
 from .adaptive_queue import AdaptivePolicy, parse_adaptive_policy
 from .entry_quality import EntryQualityPolicy
@@ -101,7 +101,7 @@ class RiskConfig:
         if self.max_gross_reservation_usd <= 0:
             raise ConfigurationError("max_gross_reservation_usd must be positive")
         if not 2 <= self.max_pending_orders <= MAX_PENDING_ORDERS:
-            raise ConfigurationError("max_pending_orders exceeds the approved cap of 40")
+            raise ConfigurationError(f"max_pending_orders exceeds the approved cap of {MAX_PENDING_ORDERS}")
         if not Decimal("0") < self.max_market_exposure_usd <= self.max_gross_reservation_usd:
             raise ConfigurationError("market exposure must be positive and no greater than gross exposure")
         if not Decimal("0") < self.max_stressed_exit_loss_usd < self.max_market_exposure_usd:
@@ -199,9 +199,10 @@ def load_policy(path: Path | None = None) -> tuple[StrategyConfig, RiskConfig]:
         raise ConfigurationError("policy must contain exactly one monetary stop authority")
     if raw["risk_window_accounting"] != "closed_fill_realized_pnl":
         raise ConfigurationError("risk-window accounting must use closed-fill realized P&L")
-    if raw["risk_window_pending_order_policy"] != "fixed_40_until_stop":
+    pending_orders = MAX_PENDING_ORDERS if version == 9 else LEGACY_PENDING_ORDERS
+    if raw["risk_window_pending_order_policy"] != f"fixed_{pending_orders}_until_stop":
         raise ConfigurationError("risk-window pending-order policy must remain fixed until stop")
-    if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
+    if raw["max_pending_orders"] != pending_orders:
         raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
     try:
         adaptive_versions = {4, 5, 6, 7, 8, 9}

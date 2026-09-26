@@ -60,7 +60,8 @@ class V9ConfigTests(unittest.TestCase):
         self.assertEqual(risk.max_gross_reservation_usd, D(400))
         self.assertEqual(risk.max_market_exposure_usd, D(90))
         self.assertEqual(risk.risk_window_loss_usd, D(30))
-        self.assertEqual(risk.max_pending_orders, 40)
+        self.assertEqual(risk.max_pending_orders, 60)
+        self.assertEqual(risk.max_two_sided_quotes, 30)
         self.assertEqual(strategy.shield, SHIELD)
         self.assertEqual(strategy.scoring_day_boundary_hour, 17)
         self.assertIn("crypto", strategy.excluded_categories)
@@ -263,6 +264,42 @@ def repair_contract():
     from gemini_bot.catalog import RewardedContract
     return RewardedContract("E", repair.candidate_pool(), repair.candidate_rules(),
                             (NOW + timedelta(hours=2)).isoformat())
+
+
+class WorstCaseDenominatorTests(unittest.TestCase):
+    """Game books trade before effectiveDate; Gemini may count the whole day."""
+
+    def progress_for(self, kickoff_utc, worst_case):
+        from gemini_bot.account_state import AccountReducer
+        from gemini_bot.storage import SQLiteJournal
+        from gemini_bot.uptime import sample_and_load_progress
+        now = datetime(2026, 9, 26, 5, 30, tzinfo=timezone.utc)  # 1:30 am ET Saturday
+        contract = replace(repair_contract(), event_ticker="G", event_category="Sports",
+                           trade_starts_at="2026-09-26T05:00:00+00:00",
+                           event_starts_at=kickoff_utc.isoformat(),
+                           expiry=(kickoff_utc + timedelta(hours=24)).isoformat())
+        with tempfile.TemporaryDirectory() as d:
+            store = SQLiteJournal(Path(d) / "j.sqlite")
+            try:
+                result = sample_and_load_progress(store, [contract], AccountReducer(), now=now,
+                                                  day_boundary_hour=17, allow_sports_futures=True,
+                                                  worst_case_denominator=worst_case)
+            finally:
+                store.close()
+        return classify(result[uptime_progress_key("G", contract.pool.pool_id)], LEDGER)
+
+    def test_noon_game_is_not_admitted_under_the_worst_case(self):
+        noon = datetime(2026, 9, 26, 16, 0, tzinfo=timezone.utc)
+        self.assertTrue(admission_allowed(self.progress_for(noon, False), LEDGER))
+        state = self.progress_for(noon, True)
+        self.assertEqual(state.total_minutes, 1440)
+        self.assertFalse(admission_allowed(state, LEDGER))
+
+    def test_evening_game_still_admitted_under_the_worst_case(self):
+        evening = datetime(2026, 9, 26, 23, 30, tzinfo=timezone.utc)
+        state = self.progress_for(evening, True)
+        self.assertEqual(state.remaining, 929)  # 1:30 am to the 5 pm window end, current minute counted
+        self.assertTrue(admission_allowed(state, LEDGER))
 
 
 class SportsFutureTests(unittest.TestCase):

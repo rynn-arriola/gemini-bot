@@ -67,6 +67,7 @@ def estimated_reward_window(
     *,
     exit_before_expiry_seconds: int = 300,
     day_boundary_hour: int = 0,
+    ignore_trade_start: bool = False,
 ) -> tuple[datetime, datetime, str]:
     """Estimated venue denominator, never shortened by a local exit policy.
 
@@ -86,7 +87,9 @@ def estimated_reward_window(
     expiry = _parse_optional_timestamp(contract.expiry)
 
     starts = [(day_start, "eastern_day_conservative_reward_start")]
-    if trade_start is not None:
+    # Policy v9 worst case: books trade before the contract's effectiveDate,
+    # so Gemini may count the whole scoring day in the denominator.
+    if trade_start is not None and not ignore_trade_start:
         starts.append((trade_start, "contract_effective_date_conservative_reward_start"))
     if reward_start is not None:
         starts.append((reward_start, "published_reward_start"))
@@ -182,6 +185,7 @@ def sample_and_load_progress(
     crypto_entry_before_expiry_seconds: int = 300,
     day_boundary_hour: int = 0,
     allow_sports_futures: bool = False,
+    worst_case_denominator: bool = False,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -197,7 +201,8 @@ def sample_and_load_progress(
         seen.add(key)
         peers = grouped[key]
         windows = [(c, estimated_reward_window(c, now, exit_before_expiry_seconds=exit_before_expiry_seconds,
-                                               day_boundary_hour=day_boundary_hour))
+                                               day_boundary_hour=day_boundary_hour,
+                                               ignore_trade_start=worst_case_denominator))
                    for c in peers]
         valid = [(c, w) for c, w in windows if w[1] > w[0]]
         if valid:
@@ -236,7 +241,12 @@ def sample_and_load_progress(
         # Inactive/missing observations must not forgive elapsed minutes.
         eligible = max(eligible, elapsed)
         venue_remaining = max(0, total - eligible)
-        remaining = min(venue_remaining, max(0, int((cutoff - max(now, start)).total_seconds() // 60)))
+        # We can only quote once the contract is effective, even when the
+        # worst-case denominator counts earlier minutes.
+        trade_starts = [_parse_optional_timestamp(c.trade_starts_at) for c, _ in valid]
+        quote_start = max([now, start] + ([min(t for t in trade_starts if t is not None)]
+                                          if any(t is not None for t in trade_starts) else []))
+        remaining = min(venue_remaining, max(0, int((cutoff - quote_start).total_seconds() // 60)))
         observed_elapsed = None
         if first_observed_at is not None:
             first = max(first_observed_at, start)

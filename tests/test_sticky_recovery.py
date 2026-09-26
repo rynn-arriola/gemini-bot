@@ -67,10 +67,11 @@ class RecoveryClockTests(unittest.TestCase):
 
     def test_twenty_owners_bound_and_stale_owner_cleanup(self):
         r = StickyRecovery()
-        for i in range(20):
+        from gemini_bot.capacity import MAX_ACTIVE_MARKETS
+        for i in range(MAX_ACTIVE_MARKETS):
             r.observe(str(i), 'bad', NOW)
         with self.assertRaises(ValueError):
-            r.observe('21', 'bad', NOW)
+            r.observe('extra', 'bad', NOW)
         restored = StickyRecovery()
         restored.restore(r.dumps(), {'0'})
         self.assertEqual(set(restored.failures), {'0'})
@@ -79,7 +80,7 @@ class RecoveryClockTests(unittest.TestCase):
         self.assertTrue(pending_capacity(38, 2, 40))
         self.assertFalse(pending_capacity(39, 2, 40))
         with self.assertRaises(ValueError):
-            pending_capacity(0, 1, 41)
+            pending_capacity(0, 1, 61)
         policy = RiskWindowPolicy(D(30), 40)
         self.assertEqual(policy.pending_order_cap(D('29.99')), 40)
         self.assertEqual(policy.pending_order_cap(D(30)), 0)

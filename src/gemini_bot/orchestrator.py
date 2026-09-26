@@ -28,7 +28,7 @@ from .queue_pilot import QueuePilot
 from .adaptive_queue import AdaptivePolicy, AdaptiveQueuePilot
 from .journal_backup import JournalBackups, verify_journal
 from .sticky_recovery import StickyRecovery, RECOVERY_GRACE_SECONDS
-from .capacity import MAX_ACTIVE_MARKETS
+from .capacity import MAX_ACTIVE_MARKETS, MAX_PENDING_ORDERS
 from .recovery_policy import transient_failure, retry_after_seconds, NoMarketsAvailable
 from .reconciliation_errors import ExternalOrderPresent, InventoryMarketUnavailable
 from .discovery import RewardUniverseLoader, DISCOVERY_RANKING_VERSION, read_reward_event
@@ -628,7 +628,7 @@ class ProductionOrchestrator:
             self._queue_watch_symbols = {c.rules.symbol for c in self.universe}
             observer.retain(self._queue_watch_symbols)
             self._queue_live_orders = {o.order_id: o for o in self.account.reducer.orders.values() if o.working}
-            if len(self._queue_live_orders) > 40:
+            if len(self._queue_live_orders) > MAX_PENDING_ORDERS:
                 raise ValueError("shadow working-order bound exceeded")
             # Quiet synchronized books are still current when their own stream
             # is verified. Seed missing observers here, never backfill warmup.
@@ -757,7 +757,7 @@ class ProductionOrchestrator:
                     self._queue_live_orders[order.order_id] = order
                 else:
                     self._queue_live_orders.pop(order.order_id, None)
-                if len(self._queue_live_orders) > 40:
+                if len(self._queue_live_orders) > MAX_PENDING_ORDERS:
                     raise RuntimeError("working-order cache exceeds approved capacity")
                 if (self.queue_pilot is not None and symbol in self.queue_pilot.symbols
                         and self._leg_replacements.get(order.order_id) == symbol
@@ -792,7 +792,7 @@ class ProductionOrchestrator:
                             self._queue_live_orders[order.order_id] = order
                         else:
                             self._queue_live_orders.pop(order.order_id, None)
-                        if len(self._queue_live_orders) > 40:
+                        if len(self._queue_live_orders) > MAX_PENDING_ORDERS:
                             raise ValueError("shadow working-order bound exceeded")
                         # Private/public publication ordering is uncertain;
                         # never carry a queue scenario across our own mutation.
@@ -866,6 +866,7 @@ class ProductionOrchestrator:
             loader.day_boundary_hour = self._scoring_boundary_hour()
             loader.allow_sports_futures = True
             loader.max_contracts_per_event = 2
+            loader.worst_case_denominator = True
         return loader
 
     def _crypto_entry_cutoff_seconds(self) -> int:
@@ -886,6 +887,7 @@ class ProductionOrchestrator:
             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
             day_boundary_hour=self._scoring_boundary_hour(),
             allow_sports_futures=self._shielded(),
+            worst_case_denominator=self._shielded(),
         )
         self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=now,
@@ -2470,6 +2472,7 @@ class ProductionOrchestrator:
                 crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
                 day_boundary_hour=self._scoring_boundary_hour(),
                 allow_sports_futures=self._shielded(),
+                worst_case_denominator=self._shielded(),
             )
             self.ranked = self._rank_live_universe(
                 self.universe, self.public.books, now=now,
@@ -4306,6 +4309,7 @@ class ProductionOrchestrator:
             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
             day_boundary_hour=self._scoring_boundary_hour(),
             allow_sports_futures=self._shielded(),
+            worst_case_denominator=self._shielded(),
         )
         self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
                        usable_permitted_symbol=usable_permitted_symbol)
@@ -4685,6 +4689,7 @@ class ProductionOrchestrator:
                             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
                             day_boundary_hour=self._scoring_boundary_hour(),
                             allow_sports_futures=self._shielded(),
+                            worst_case_denominator=self._shielded(),
                         )
                         self.journal.set_runtime_state(
                             "profitability_telemetry_v1",

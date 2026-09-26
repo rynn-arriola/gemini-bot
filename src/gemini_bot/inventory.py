@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 
+from .capacity import MAX_PENDING_ORDERS
 from .domain import Outcome, canonical_symbol
 
 
@@ -91,6 +92,6 @@ def pending_capacity(current_pending_orders: int, requested_orders: int, cap: in
     """Filled positions are intentionally not inputs to this order-count gate."""
     if min(current_pending_orders, requested_orders) < 0:
         raise ValueError("order counts cannot be negative")
-    if cap > 40:
+    if cap > MAX_PENDING_ORDERS:
         raise ValueError("cap exceeds the operator-approved maximum")
     return current_pending_orders + requested_orders <= cap

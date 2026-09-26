@@ -147,6 +147,7 @@ class RewardUniverseLoader:
     # Keep one many-outcome event (e.g. a 50-player award) from filling every
     # watched slot; incumbents are always kept.
     max_contracts_per_event: int | None = None
+    worst_case_denominator: bool = False
     missing_events: set[str] = field(default_factory=set, init=False)
 
     def _excluded(self, *categories: object) -> bool:
@@ -328,7 +329,8 @@ class RewardUniverseLoader:
             if not item.pool.active or item.rules.post_only_mode:
                 continue
             if now is not None:
-                start, end, _ = estimated_reward_window(item, now, day_boundary_hour=self.day_boundary_hour)
+                start, end, _ = estimated_reward_window(item, now, day_boundary_hour=self.day_boundary_hour,
+                                                        ignore_trade_start=self.worst_case_denominator)
                 if end <= start or now < start or now >= quote_cutoff(
                     item, end, crypto_entry_before_expiry_seconds=self.crypto_entry_before_expiry_seconds,
                     allow_sports_futures=self.allow_sports_futures,

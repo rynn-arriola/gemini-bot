@@ -76,10 +76,11 @@ class DailyClockTests(unittest.TestCase):
 
     def test_capacity_pruning_and_malformed_state(self):
         r = StickyRecovery()
-        for i in range(20):
+        from gemini_bot.capacity import MAX_ACTIVE_MARKETS
+        for i in range(MAX_ACTIVE_MARKETS):
             r.protect_economics(str(i), ECONOMIC, NOW)
         with self.assertRaises(ValueError):
-            r.protect_economics('21', ECONOMIC, NOW)
+            r.protect_economics('extra', ECONOMIC, NOW)
         restored = StickyRecovery()
         restored.restore_state(r.dumps_state(), {'0'})
         self.assertEqual(set(restored.economic_holds), {'0'})
@@ -88,7 +89,7 @@ class DailyClockTests(unittest.TestCase):
                     dict(base, economic_holds=[]), dict(base, economic_holds={'a':None}),
                     dict(base, economic_holds={'a':'2026-09-18'}),
                     dict(base, economic_holds={'a':'nonsense'}),
-                    dict(base, economic_holds={str(i):NOW.isoformat() for i in range(21)})):
+                    dict(base, economic_holds={str(i):NOW.isoformat() for i in range(31)})):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 StickyRecovery().restore_state(json.dumps(raw), {'a'})
 
