@@ -97,8 +97,12 @@ def volume_at_or_better(book: LocalBook, outcome: Outcome, price: D) -> D:
 
 
 class Shadow:
-    def __init__(self, directory: Path, end: datetime, gross_usd: D | None = None):
+    def __init__(self, directory: Path, end: datetime, gross_usd: D | None = None,
+                 ignore_admission: bool = False):
         self.dir, self.end = directory, end
+        # Behaviour-only mode: skip the 50% LOST/admission gates to observe
+        # fills, repositions and anchors; its uptime numbers are not meaningful.
+        self.ignore_admission = ignore_admission
         self.strategy, self.risk = load_policy()
         if gross_usd is not None:
             # Paper-only capital override; the live policy is untouched.
@@ -135,6 +139,9 @@ class Shadow:
                             for k, v in self.uptime.items()},
                  "totals": {k: str(v) if isinstance(v, D) else v for k, v in self.totals.items()}}
         (self.dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    def action(self, now: datetime, symbol: str, kind: str, **fields) -> None:
+        self.write("actions.jsonl", {"at": now, "symbol": symbol, "action": kind, **fields})
 
     def write(self, name: str, row: dict) -> None:
         with (self.dir / name).open("a", encoding="utf-8") as f:
@@ -285,7 +292,7 @@ class Shadow:
             state = classify(progress.get(uptime_progress_key(contract.event_ticker, contract.pool.pool_id)),
                              self.ledger)
             incumbent = cand.symbol in self.markets
-            if state.status is UptimeStatus.LOST:
+            if state.status is UptimeStatus.LOST and not self.ignore_admission:
                 why[cand.symbol] = "lost"
                 continue
             if now < self.blocked.get(cand.symbol, now):
@@ -294,7 +301,7 @@ class Shadow:
             if not self.entry_time_valid(contract, now):
                 why[cand.symbol] = "entry_time"
                 continue
-            if not incumbent and not admission_allowed(state, self.ledger):
+            if not incumbent and not self.ignore_admission and not admission_allowed(state, self.ledger):
                 why[cand.symbol] = "admission"
                 continue
             tolerated = {UPTIME_PROXY} | ({ECONOMICS} if incumbent else set())
@@ -329,6 +336,8 @@ class Shadow:
                 self.write("drops.jsonl", {"at": now, "symbol": symbol, "reason": reason,
                                            "failing_minutes": int((now - first).total_seconds() // 60)})
             else:
+                if first == now:
+                    self.action(now, symbol, "grace_start", reason=reason)
                 grace.add(symbol)  # Existing virtual orders keep resting, as in the bot.
         pairs = {c.symbol: c for c in eligible_pairs}
         # Incumbents first, then new markets by priority, within the caps.
@@ -360,6 +369,7 @@ class Shadow:
         if pair is not None:
             if any(o.anchor for o in market.orders.values()):
                 market.orders.clear()
+                self.action(now, market.symbol, "anchor_to_pair")
             targets = {Outcome.YES: pair.quote.yes.price, Outcome.NO: pair.quote.no.price}
             for outcome in Outcome:
                 order = market.orders.get(outcome)
@@ -373,6 +383,10 @@ class Shadow:
                         move, market.last_upgrade = True, now
                     if move:
                         self.totals["repositions"] += 1
+                        reason = ("shield_thin" if protection < shield.entry_contracts * shield.keep_fraction
+                                  else "outside_distance" if mids[outcome] - order.price > D(".10") else "upgrade")
+                        self.action(now, market.symbol, "reposition", outcome=outcome.value, reason=reason,
+                                    old_price=order.price, protection=protection)
                 if order is None or move:
                     price = shielded_price(outcome_levels(book, outcome), midpoint=mids[outcome],
                                            tick=contract.rules.tick_size, required=shield.entry_contracts,
@@ -382,6 +396,9 @@ class Shadow:
                         continue
                     market.orders[outcome] = VOrder(outcome, price, self.strategy.quote_quantity,
                                                     volume_at_or_better(book, outcome, price), now)
+                    self.action(now, market.symbol, "place" if order is None else "replaced", outcome=outcome.value,
+                                price=price, quantity=self.strategy.quote_quantity,
+                                ahead=market.orders[outcome].ahead)
                     if order is None:
                         self.totals["pairs_placed"] += 1
         elif anchor is not None:
@@ -393,6 +410,9 @@ class Shadow:
                     return
                 self.totals["repositions"] += 1
             outcome, price = anchor
+            self.action(now, market.symbol, "anchor" if existing is None else "anchor_reposition",
+                        outcome=outcome.value, price=price, quantity=self.strategy.anchor.quantity,
+                        reason="pair_unsafe_reduced_to_anchor")
             market.orders = {outcome: VOrder(outcome, price, self.strategy.anchor.quantity,
                                              volume_at_or_better(book, outcome, price), now, anchor=True)}
             self.totals["anchors_placed"] += 1
@@ -404,6 +424,7 @@ class Shadow:
             windows.setdefault(start, {})[event] = entry["counted"]
         return {"updated_at": now, "ends_at": self.end, "window_start": window_start,
                 "virtual_capital_usd": self.risk.max_gross_reservation_usd,
+                "behaviour_only_ignores_50_percent_gate": self.ignore_admission,
                 "watched": len(self.universe), **info, "held_markets": len(self.markets),
                 "anchors_now": sum(1 for m in self.markets.values() if any(o.anchor for o in m.orders.values())),
                 "reserved_usd": self.reserved(), **self.totals,
@@ -465,9 +486,12 @@ def main() -> None:
     parser.add_argument("--days", type=float, default=7)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--gross-usd", type=D, default=None, help="virtual capital (paper only)")
+    parser.add_argument("--until", type=datetime.fromisoformat, default=None, help="end time (ISO, overrides --days)")
+    parser.add_argument("--ignore-admission", action="store_true", help="behaviour-only: skip 50%% gates")
     args = parser.parse_args()
     directory = args.directory if args.directory.is_absolute() else ROOT / args.directory
-    asyncio.run(Shadow(directory, datetime.now(timezone.utc) + timedelta(days=args.days), args.gross_usd).run())
+    end = args.until or datetime.now(timezone.utc) + timedelta(days=args.days)
+    asyncio.run(Shadow(directory, end, args.gross_usd, args.ignore_admission).run())
 
 
 if __name__ == "__main__":
