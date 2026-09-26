@@ -223,7 +223,8 @@ class V9DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         loader.prefer_uncontested = True
         await loader.load(maximum_pools=8, now=NOW)
         self.assertNotIn("BTC1", read)
-        self.assertEqual(read, ["CF-B", "CF-C", "CF-A"])
+        # Near-term and season-long events interleave; fewest makers first within each.
+        self.assertEqual(read, ["CF-C", "CF-B", "CF-A"])
 
 
 class V9DiscoveryWindowTests(unittest.IsolatedAsyncioTestCase):

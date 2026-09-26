@@ -197,14 +197,34 @@ class RewardUniverseLoader:
                 # events before season-long ones: a Sept 25 census found half of
                 # College Football game books deep enough for the shield, but
                 # only 4 of 62 futures books.
+                # Interleave near-term and season-long events so reads are not
+                # all spent on games that are not tradable yet.
                 horizon = (now or datetime.now().astimezone()).timestamp() + 7 * 86400
                 rows.sort(key=lambda r: (
                     not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
                     max(0, int(r.get("qualifying_maker_count") or 0)),
-                    _ends_at_seconds(r) > horizon,
                     _ends_at_seconds(r),
                     str(r.get("event_ticker", "")),
                 ))
+                pinned_rows = [r for r in rows if any(
+                    str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs)]
+                # Within the week, later-ending games first: they have the most
+                # quotable time left before their pre-start cutoff.
+                near = sorted((r for r in rows if r not in pinned_rows and _ends_at_seconds(r) <= horizon),
+                              key=lambda r: (max(0, int(r.get("qualifying_maker_count") or 0)),
+                                             -_ends_at_seconds(r), str(r.get("event_ticker", ""))))
+                far = [r for r in rows if r not in pinned_rows and _ends_at_seconds(r) > horizon]
+                # Three near-term reads per season-long read: game books were
+                # far more often deep enough for the shield.
+                mixed: list[dict[str, Any]] = []
+                near_iter, far_iter = iter(near), iter(far)
+                while len(mixed) < len(near) + len(far):
+                    for source, count in ((near_iter, 3), (far_iter, 1)):
+                        for _ in range(count):
+                            item = next(source, None)
+                            if item is not None:
+                                mixed.append(item)
+                rows = pinned_rows + mixed
             else:
                 rows.sort(key=lambda r: (
                     not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
