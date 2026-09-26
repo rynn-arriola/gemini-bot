@@ -112,8 +112,29 @@ class Shadow:
         self.universe = []
         self.universe_at: datetime | None = None
         self.shares: dict[str, tuple[D, D]] = {}
+        # Like the bot's sticky owners: a held market survives 10 minutes of
+        # continuous trouble before release (LOST/timing release at once).
+        self.fail_since: dict[str, datetime] = {}
+        self.load_state()
         self.totals = {"fills": 0, "trading_pnl": D(0), "repositions": 0, "anchors_placed": 0,
                        "pairs_placed": 0, "minutes": 0, "errors": 0}
+
+    def load_state(self) -> None:
+        path = self.dir / "state.json"
+        if not path.exists():
+            return
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        self.uptime = {tuple(k.split("|", 1)): {"counted": v["counted"], "pool": D(v["pool"])}
+                       for k, v in raw.get("uptime", {}).items()}
+        for key in ("fills", "repositions", "anchors_placed", "pairs_placed", "minutes", "errors"):
+            self.totals[key] = raw.get("totals", {}).get(key, 0)
+        self.totals["trading_pnl"] = D(raw.get("totals", {}).get("trading_pnl", "0"))
+
+    def save_state(self) -> None:
+        state = {"uptime": {f"{k[0]}|{k[1]}": {"counted": v["counted"], "pool": str(v["pool"])}
+                            for k, v in self.uptime.items()},
+                 "totals": {k: str(v) if isinstance(v, D) else v for k, v in self.totals.items()}}
+        (self.dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
     def write(self, name: str, row: dict) -> None:
         with (self.dir / name).open("a", encoding="utf-8") as f:
@@ -129,9 +150,14 @@ class Shadow:
         loader.max_contracts_per_event = 2
         loader.worst_case_denominator = True
         preferred = {f"{m.pool}\x1e{s}": (m.event, s) for s, m in self.markets.items()}
+        held = {s for s in self.markets}
         self.universe = await loader.load(maximum_pools=self.risk.max_tracked_markets, preferred=preferred,
                                           now=now, quantity=self.strategy.quote_quantity, offset_ticks=0)
         self.universe_at = now
+        missing = held - {c.rules.symbol for c in self.universe}
+        if missing:
+            self.write("drops.jsonl", {"at": now, "note": "held markets missing from refreshed universe",
+                                       "symbols": sorted(missing)})
 
     def books(self, now: datetime) -> dict[str, LocalBook]:
         books = {}
@@ -253,15 +279,23 @@ class Shadow:
                                     allow_uptime_override=True)
         by_symbol = {c.rules.symbol: c for c in self.universe}
         eligible_pairs, anchors_possible = [], {}
+        why: dict[str, str] = {}
         for cand in ranked:
             contract = by_symbol[cand.symbol]
             state = classify(progress.get(uptime_progress_key(contract.event_ticker, contract.pool.pool_id)),
                              self.ledger)
             incumbent = cand.symbol in self.markets
-            if (state.status is UptimeStatus.LOST or now < self.blocked.get(cand.symbol, now)
-                    or not self.entry_time_valid(contract, now)):
+            if state.status is UptimeStatus.LOST:
+                why[cand.symbol] = "lost"
+                continue
+            if now < self.blocked.get(cand.symbol, now):
+                why[cand.symbol] = "fill_block"
+                continue
+            if not self.entry_time_valid(contract, now):
+                why[cand.symbol] = "entry_time"
                 continue
             if not incumbent and not admission_allowed(state, self.ledger):
+                why[cand.symbol] = "admission"
                 continue
             tolerated = {UPTIME_PROXY} | ({ECONOMICS} if incumbent else set())
             if cand.quote is not None and set(cand.reasons) <= tolerated:
@@ -270,6 +304,9 @@ class Shadow:
                     eligible_pairs.append(cand)
                     self.shares[cand.symbol] = (cand.estimated_score_share, cand.daily_pool_usd)
                     continue
+                why[cand.symbol] = "entry_quality:" + q.reason
+            else:
+                why[cand.symbol] = "; ".join(r for r in cand.reasons if r != UPTIME_PROXY)[:80] or "no_quote"
             book = books.get(cand.symbol)
             if (incumbent and cand.quote is None and set(cand.reasons) <= tolerated | {"insufficient_shield"}
                     and book is not None and book.top() is not None):
@@ -278,16 +315,30 @@ class Shadow:
                 if target is not None:
                     anchors_possible[cand.symbol] = target
         keep = {c.symbol for c in eligible_pairs} | set(anchors_possible)
+        grace = set()
         for symbol in list(self.markets):
-            if symbol not in keep:
+            if symbol in keep:
+                self.fail_since.pop(symbol, None)
+                continue
+            reason = why.get(symbol, "not_in_universe_or_book")
+            first = self.fail_since.setdefault(symbol, now)
+            immediate = reason in {"lost", "entry_time", "fill_block"}
+            if immediate or now - first >= timedelta(minutes=10):
                 self.markets.pop(symbol)
+                self.fail_since.pop(symbol, None)
+                self.write("drops.jsonl", {"at": now, "symbol": symbol, "reason": reason,
+                                           "failing_minutes": int((now - first).total_seconds() // 60)})
+            else:
+                grace.add(symbol)  # Existing virtual orders keep resting, as in the bot.
         pairs = {c.symbol: c for c in eligible_pairs}
         # Incumbents first, then new markets by priority, within the caps.
-        order = [s for s in self.markets] + [c.symbol for c in sorted(eligible_pairs, key=lambda c: -c.priority_score)
-                                             if c.symbol not in self.markets]
+        order = [s for s in self.markets if s not in grace] + [
+            c.symbol for c in sorted(eligible_pairs, key=lambda c: -c.priority_score) if c.symbol not in self.markets]
         for symbol in order:
-            book = books[symbol]
-            contract = by_symbol[symbol]
+            book = books.get(symbol)
+            contract = by_symbol.get(symbol)
+            if book is None or contract is None or book.top() is None:
+                continue
             market = self.markets.get(symbol)
             if market is None:
                 if len(self.markets) >= self.risk.max_two_sided_quotes:
@@ -300,7 +351,8 @@ class Shadow:
                     continue
                 market = self.markets[symbol] = Market(symbol, contract.event_ticker, contract.pool.pool_id)
             self.maintain(market, book, pairs.get(symbol), anchors_possible.get(symbol), now, contract)
-        return {"eligible_pairs": len(eligible_pairs), "anchor_capable": len(anchors_possible)}
+        return {"eligible_pairs": len(eligible_pairs), "anchor_capable": len(anchors_possible),
+                "in_grace": len(grace)}
 
     def maintain(self, market, book, pair, anchor, now, contract) -> None:
         mids = {Outcome.YES: book.top().midpoint, Outcome.NO: 1 - book.top().midpoint}
@@ -396,6 +448,7 @@ class Shadow:
                 info = self.manage(now, books)
                 self.count_uptime(now, books)
                 self.totals["minutes"] += 1
+                self.save_state()
                 summary = self.summary(now, info)
                 (self.dir / "summary.json").write_text(json.dumps(summary, default=str, indent=1), encoding="utf-8")
                 self.write("minutes.jsonl", {k: summary[k] for k in (
