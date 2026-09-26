@@ -2,6 +2,8 @@
 
 These are current account-owner decisions. Changing one requires a new explicit owner decision and a dated update.
 
+- September 25 capital for launch (v9): the owner will deposit $300 for now and asked to use the full $300 as exposure. v9 gross exposure is set to **$300** (from the planned $400); per-market $90, $40 stressed-exit, $30 six-hour HARD, 25 per leg and the 60/30 caps are unchanged. The cash baseline was re-adopted from a verified flat, order-free account the same night (after the owner's Sept 23 $280 withdrawal), without resetting the risk window.
+
 - September 25 full uptime plan (v9): the owner chose the recommended full plan.
   - **Worst-case day count:** the ledger assumes Gemini counts the whole 5 pm → 5 pm day, even before a contract's effectiveDate, because game books trade the evening before. Quoting still starts at effectiveDate, so early-kickoff games that cannot reach 50% are not admitted.
   - **Uptime anchor:** when a held event's 25+25 scoring pair cannot rest behind its 500-contract shield, the bot keeps one 10-contract order on one side, at least 1,000 external contracts deep and within 8¢ of the midpoint. It repositions the anchor below 600 contracts of protection and retires it when the pair can rest again. Anchors are never used to admit a new event. At-risk events no longer lower the pair's shield; the anchor covers them. The bot's checks assume one order per side per market, so the anchor is the event's fallback order rather than a third order beside the pair.

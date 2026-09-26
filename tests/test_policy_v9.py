@@ -57,7 +57,7 @@ class V9ConfigTests(unittest.TestCase):
         strategy, risk = load_policy(LIVE)
         self.assertTrue(strategy.shielded)
         self.assertEqual(strategy.quote_quantity, D(25))
-        self.assertEqual(risk.max_gross_reservation_usd, D(400))
+        self.assertEqual(risk.max_gross_reservation_usd, D(300))
         self.assertEqual(risk.max_market_exposure_usd, D(90))
         self.assertEqual(risk.risk_window_loss_usd, D(30))
         self.assertEqual(risk.max_pending_orders, 60)

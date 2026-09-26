@@ -7,7 +7,7 @@
   "max_pending_orders": 60,
   "max_two_sided_quotes": 30,
   "max_tracked_markets": 32,
-  "max_gross_reservation_usd": "400",
+  "max_gross_reservation_usd": "300",
   "max_market_exposure_usd": "90",
   "max_stressed_exit_loss_usd": "40",
   "risk_window_stop_loss_usd": "30",
