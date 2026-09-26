@@ -97,9 +97,13 @@ def volume_at_or_better(book: LocalBook, outcome: Outcome, price: D) -> D:
 
 
 class Shadow:
-    def __init__(self, directory: Path, end: datetime):
+    def __init__(self, directory: Path, end: datetime, gross_usd: D | None = None):
         self.dir, self.end = directory, end
         self.strategy, self.risk = load_policy()
+        if gross_usd is not None:
+            # Paper-only capital override; the live policy is untouched.
+            from dataclasses import replace
+            self.risk = replace(self.risk, max_gross_reservation_usd=gross_usd)
         self.ledger = self.strategy.uptime_ledger
         self.markets: dict[str, Market] = {}
         self.blocked: dict[str, datetime] = {}
@@ -347,6 +351,7 @@ class Shadow:
         for (event, start), entry in self.uptime.items():
             windows.setdefault(start, {})[event] = entry["counted"]
         return {"updated_at": now, "ends_at": self.end, "window_start": window_start,
+                "virtual_capital_usd": self.risk.max_gross_reservation_usd,
                 "watched": len(self.universe), **info, "held_markets": len(self.markets),
                 "anchors_now": sum(1 for m in self.markets.values() if any(o.anchor for o in m.orders.values())),
                 "reserved_usd": self.reserved(), **self.totals,
@@ -406,9 +411,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=float, default=7)
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--gross-usd", type=D, default=None, help="virtual capital (paper only)")
     args = parser.parse_args()
     directory = args.directory if args.directory.is_absolute() else ROOT / args.directory
-    asyncio.run(Shadow(directory, datetime.now(timezone.utc) + timedelta(days=args.days)).run())
+    asyncio.run(Shadow(directory, datetime.now(timezone.utc) + timedelta(days=args.days), args.gross_usd).run())
 
 
 if __name__ == "__main__":
