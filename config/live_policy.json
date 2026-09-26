@@ -39,8 +39,8 @@
       "depth_multiplier": "1.5",
       "minimum_requeue_gain": "250",
       "refresh_cooldown_seconds": "10",
-      "expires_at": "2026-09-19T05:45:00-04:00",
-      "evidence_reference": "Owner-approved September 18 shared settings; all_selected scope; no claim of guaranteed queue position, fill protection or profitability"
+      "expires_at": "2026-10-25T05:45:00-04:00",
+      "evidence_reference": "Owner-approved September 18 shared settings, renewed unchanged by owner on September 25 to re-enable near-fill same-price refresh; all_selected scope; no claim of guaranteed queue position, fill protection or profitability"
     }
   }
 }
