@@ -52,7 +52,7 @@ class StrategyConfig:
             raise ConfigurationError('stay_best/shielded placement requires zero-tick offset')
         if isinstance(self.queue_pilot, AdaptivePolicy) and not pilot_at_zero and self.quote_offset_ticks != 1:
             raise ConfigurationError("adaptive pilot requires one-tick fallback")
-        approved_sizes = {Decimal("50")} if self.shielded else {Decimal("15"), Decimal("30")}
+        approved_sizes = {Decimal("25")} if self.shielded else {Decimal("15"), Decimal("30")}
         if self.queue_pilot is not None and (
             self.quote_quantity not in approved_sizes
             or (not pilot_at_zero and self.quote_offset_ticks not in {1, 2})

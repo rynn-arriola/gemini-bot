@@ -56,7 +56,7 @@ class V9ConfigTests(unittest.TestCase):
     def test_live_policy_is_v9_with_owner_values(self):
         strategy, risk = load_policy(LIVE)
         self.assertTrue(strategy.shielded)
-        self.assertEqual(strategy.quote_quantity, D(50))
+        self.assertEqual(strategy.quote_quantity, D(25))
         self.assertEqual(risk.max_gross_reservation_usd, D(400))
         self.assertEqual(risk.max_market_exposure_usd, D(90))
         self.assertEqual(risk.risk_window_loss_usd, D(30))
@@ -334,7 +334,8 @@ class ShieldedExecutionTests(unittest.IsolatedAsyncioTestCase):
         # Reuse the pilot harness wiring (real guards, synthetic transport).
         await fx.PilotIntegrationTests.asyncSetUp(self)
         strategy, risk = load_policy(LIVE)
-        self.r.config = replace(self.r.config, strategy=replace(strategy, entry_quality=None), risk=risk)
+        # Execution fixtures use 50-contract wire frames; size is not what they test.
+        self.r.config = replace(self.r.config, strategy=replace(strategy, entry_quality=None, quote_quantity=D(50)), risk=risk)
         self.r.queue_pilot = AdaptiveQueuePilot(strategy.queue_pilot, quote_quantity=D(50))
         self.r.queue_pilot.sync_selected({'X'})
         self.r.queue_pilot.proof_required.clear()

@@ -47,7 +47,7 @@ Each resting order's protection is the external volume at strictly better prices
 
 ## Unchanged limits
 
-The owner changed only two limits: $400 gross (from $300) and 50 contracts per leg (from 30). Everything else is unchanged:
+The owner changed only two limits: $400 gross (from $300) and 25 contracts per leg (from 30; briefly 50, then halved to cover twice as many markets). Everything else is unchanged:
 - $90 per market; at 50 per leg this blocks legs priced above $0.80.
 - $40 stressed exit.
 - The $30 six-hour HARD stop.
