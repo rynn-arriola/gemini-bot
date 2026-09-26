@@ -39,6 +39,17 @@ Each resting order's protection is the external volume at strictly better prices
 - **New events** are admitted only with at least 60 spare minutes in the current window.
 - **Held events are not paused** mid-window for profit estimates. Only safety, shield, entry-quality and lifecycle reasons pause them. Economics still decide admission and the 5 pm rotation.
 
+## Uptime anchor and worst-case day count (owner-approved later on Sept 25)
+
+- **Worst-case denominator.** Game books trade the evening before a contract's effectiveDate, so the ledger counts the whole 5 pm day. Quoting still starts at effectiveDate. A noon game (640 quotable of 1,440 minutes) is therefore not admitted; later games are.
+- **Anchor.** A held event whose 25+25 pair cannot rest keeps one 10-contract order on one side:
+  - at least 1,000 external contracts ahead, within 8¢ of the midpoint;
+  - repositioned below 600 contracts of protection;
+  - retired when the pair can rest again.
+
+  It keeps the event counted for the 50% rule at a small fraction of the pair's score. Anchors never admit new events, and at-risk events no longer relax the pair's shield.
+- **Caps.** 60 orders and 30 owners (the bot's own limits; Gemini reports far higher ones).
+
 ## Selection
 
 - Crypto categories are excluded, for both reward-row and event categories.

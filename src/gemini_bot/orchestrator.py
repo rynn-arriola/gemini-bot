@@ -37,8 +37,8 @@ from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_s
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose, validate_exact_exit
 from .exit_pricing import exact_crossing_exit
-from .entry_quality import evaluate_entry_quality, external_book
-from .shield import ShieldContext, entry_required, outcome_levels, shielded_price
+from .entry_quality import evaluate_entry_quality, evaluate_leg_quality, external_book
+from .shield import ShieldContext, anchor_target, entry_required, outcome_levels, shielded_price
 from .uptime_ledger import UptimeLedgerState, UptimeStatus, admission_allowed, classify
 from .exit_recovery import ExitDeferred, ExitWait
 from .live_ws import (
@@ -322,9 +322,9 @@ class ProductionOrchestrator:
     def _shield_required(self, symbol: str, event_ticker: str, pool_id: str,
                          now: datetime) -> dict[Outcome, Decimal]:
         policy = self.config.strategy.shield
-        state = self._ledger_state(event_ticker, pool_id)
         flows = self._shield_flows(symbol, now)
-        return {o: entry_required(policy, flows[o], uptime_first=state.uptime_first) for o in Outcome}
+        # At-risk events keep full protection; the uptime anchor covers them.
+        return {o: entry_required(policy, flows[o]) for o in Outcome}
 
     def _shield_requirements(self, contracts) -> dict[str, dict[Outcome, Decimal]]:
         now = _utc_now()
@@ -348,7 +348,23 @@ class ProductionOrchestrator:
             required=required[o], max_distance=policy.max_midpoint_distance,
         ) for o in Outcome}
         state = self._ledger_state(item.event_ticker, item.pool.pool_id)
-        return ShieldContext(policy, own_adjusted, midpoints, targets, state.uptime_first)
+        anchor = self.config.strategy.anchor
+        return ShieldContext(policy, own_adjusted, midpoints, targets, state.uptime_first,
+                             anchor.quantity if anchor is not None else None,
+                             anchor.keep_contracts if anchor is not None else None)
+
+    def _anchor_target(self, symbol: str) -> tuple[Outcome, Decimal] | None:
+        """One deep, heavily shielded side for the policy v9 uptime anchor."""
+        anchor = self.config.strategy.anchor
+        context = self._shield_context(symbol)
+        item = next((c for c in self.universe if c.rules.symbol == symbol), None)
+        if anchor is None or context is None or item is None:
+            return None
+        return anchor_target(context.book, item.rules.tick_size, context.midpoints, anchor)
+
+    def _is_anchor_order(self, order: Any) -> bool:
+        anchor = self.config.strategy.anchor
+        return anchor is not None and order.original_quantity == anchor.quantity
 
     def _working_entry(self, symbol: str, outcome: Outcome) -> Any | None:
         return next((o for o in self.account.reducer.orders.values()
@@ -535,7 +551,7 @@ class ProductionOrchestrator:
 
     def _pilot_entry_ready(self, symbol):
         pilot = self.queue_pilot
-        if (isinstance(pilot, AdaptiveQueuePilot) and pilot.policy.placement_mode == 'stay_best'
+        if (isinstance(pilot, AdaptiveQueuePilot) and pilot.policy.placement_mode in {'stay_best', 'shielded'}
                 and symbol not in pilot.symbols):
             return False  # A watched reserve cannot skip the selected-owner proof path.
         if pilot is None or symbol not in pilot.symbols:
@@ -2869,18 +2885,31 @@ class ProductionOrchestrator:
                         or Decimal(str(params["quantity"])) != pair.second_leg.quantity
                     ):
                         raise EntryStateChangedBeforeSend("maker pair first leg changed before second send")
-                if self._shielded():
+                anchor_send = bool(self._shielded() and self.config.strategy.anchor is not None
+                                   and Decimal(str(params["quantity"])) == self.config.strategy.anchor.quantity)
+                if anchor_send:
+                    anchor_target_now = self._anchor_target(symbol)
+                    target = None
+                    leg = (None if anchor_target_now is None
+                           or anchor_target_now[0].value != params["eventOutcome"] else QuoteLeg(
+                               symbol, anchor_target_now[0], Side.BUY, anchor_target_now[1],
+                               self.config.strategy.anchor.quantity))
+                elif self._shielded():
                     target = self._shield_send_target(symbol, Outcome(params["eventOutcome"]))
                 else:
                     target = self._current_quote_target(symbol)
-                leg = None if target is None else (
-                    target.yes if params["eventOutcome"] == "YES" else target.no
-                )
+                if not anchor_send:
+                    leg = None if target is None else (
+                        target.yes if params["eventOutcome"] == "YES" else target.no
+                    )
                 if (leg is None or Decimal(str(params["price"])) != leg.price
                         or Decimal(str(params["quantity"])) != leg.quantity
                         or symbol in self._entry_cancel_symbols):
                     raise QuoteChangedBeforeSend("maker quote changed before send")
-                quality_reason = self._entry_quality_reason(symbol, target)
+                if anchor_send:
+                    quality_reason = self._anchor_quality_reason(symbol, leg)
+                else:
+                    quality_reason = self._entry_quality_reason(symbol, target)
                 if quality_reason is not None:
                     raise QuoteChangedBeforeSend(quality_reason)
             if self._permit_policy_digest is not None and policy_digest(DEFAULT_POLICY_PATH) != self._permit_policy_digest:
@@ -3010,6 +3039,10 @@ class ProductionOrchestrator:
                 # Held events are not paused mid-window for profit estimates;
                 # only safety, shield, quality and lifecycle reasons remain.
                 tolerated.add("non-positive conservative net-profit estimate")
+                if (candidate.quote is None
+                        and set(candidate.reasons) <= tolerated | {"insufficient_shield"}
+                        and self._anchor_target(candidate.symbol) is not None):
+                    return True  # Uptime anchor; its single leg is checked at send.
             reward_or_proxy_ok = bool(candidate.quote is not None and set(candidate.reasons) <= tolerated)
         else:
             reward_or_proxy_ok = candidate.eligible_now or bool(
@@ -3035,6 +3068,16 @@ class ProductionOrchestrator:
                 )
             )
         )
+
+    def _anchor_quality_reason(self, symbol: str, leg: QuoteLeg) -> str | None:
+        policy = self.config.strategy.entry_quality
+        if policy is None:
+            return None
+        book = self.public.books.get(symbol)
+        if book is None or not self._book_fresh(symbol):
+            return "entry_quality:exit_book_unavailable"
+        result = evaluate_leg_quality(book, leg, policy, account=self.account.reducer)
+        return None if result.allowed else "entry_quality:" + result.reason
 
     def _entry_quality_reason(self, symbol: str, quote: QuotePair) -> str | None:
         policy = self.config.strategy.entry_quality
@@ -3321,6 +3364,68 @@ class ProductionOrchestrator:
             await self._cancel_symbol_entries(symbol)
             raise RuntimeError("replacement maker leg lacked positive working acknowledgment")
 
+    async def _maintain_anchor(self, candidate: Any, working: list[Any]) -> None:
+        """Keep one small, deep order resting while the scoring pair cannot.
+
+        A leftover pair leg still counts for the snapshot and stays under shield
+        advice; the anchor is placed only when nothing of ours rests there.
+        """
+        symbol = candidate.symbol
+        if working:
+            if not all(self._is_anchor_order(o) for o in working):
+                if self._pilot_at_touch(symbol) and self._pilot_advice(symbol) != "keep":
+                    await self._cancel_symbol_entries(symbol)
+                return
+            if self._pilot_advice(symbol) != "keep":
+                self._record_quote_cancel(symbol, "anchor:" + self.queue_pilot.reasons.get(symbol, "evidence"))
+                await self._cancel_symbol_entries(symbol)
+            return
+        target = self._anchor_target(symbol)
+        if (target is None or self._stream_holds or self._read_recovery_attempts
+                or self._reward_program_paused or not self.gate.may_submit
+                or not self.account.equity_classification_complete or not self.account.snapshots_fresh
+                or self.journal.pending_exit(symbol) or not self._book_fresh(symbol)
+                or not self._pilot_entry_ready(symbol)):
+            return
+        outcome, price = target
+        leg = QuoteLeg(symbol, outcome, Side.BUY, price, self.config.strategy.anchor.quantity)
+        exposure = self._websocket_exposure()
+        reservation = leg.price * leg.quantity
+        available = self.account.available_usd
+        if (exposure.pending_orders + 1 > self._dynamic_pending_cap
+                or exposure.gross_reservation_usd + reservation > self.config.risk.max_gross_reservation_usd
+                or exposure.market_exposure_usd.get(symbol, Decimal("0")) + reservation
+                > self.config.risk.max_market_exposure_usd
+                or available is None or reservation > available):
+            return
+        try:
+            client_id = await self.private.place_maker(leg)
+        except (TransportChangedBeforeSend, AdmissionTimeoutBeforeSend) as exc:
+            if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
+                raise
+            if "private" not in self._stream_holds:
+                await self._recover_stream("private", exc, generation=self._stream_generation["private"])
+            return
+        except (QuoteChangedBeforeSend, EntryStateChangedBeforeSend) as exc:
+            self.journal.audit("uptime_anchor_presend_state_change", {"symbol": symbol, "reason": str(exc)})
+            return
+        self.journal.audit("uptime_anchor_placed", {
+            "symbol": symbol, "outcome": outcome.value, "price": str(price), "quantity": str(leg.quantity),
+        })
+        await self.account.wait_for_order_event(client_id)
+        intent = self.ledger.get(client_id)
+        order = (None if intent is None or intent.server_order_id is None
+                 else self.account.reducer.orders.get(intent.server_order_id))
+        if order is not None and order.cumulative_filled > 0:
+            await self._cancel_symbol_entries(symbol)
+            return
+        if intent is None or intent.state is not IntentState.ACKNOWLEDGED:
+            if intent is not None and await self._clean_zero_fill_moc_terminal(intent, symbol):
+                self._quote_cooldown_until[symbol] = asyncio.get_running_loop().time() + 5
+                return
+            await self._cancel_symbol_entries(symbol)
+            raise RuntimeError("uptime anchor lacked positive working acknowledgment")
+
     async def _maintain_candidate(self, candidate: Any) -> None:
         async with self._lifecycle_lock:
             await self._maintain_candidate_locked(candidate)
@@ -3468,6 +3573,18 @@ class ProductionOrchestrator:
             # the process, abandon positions, or reset the 50% uptime history.
             if working:
                 await self._cancel_symbol_entries(candidate.symbol)
+            return
+        if (self._shielded() and candidate.quote is None and self._candidate_actionable(candidate)
+                and self._entry_time_valid(candidate.symbol)
+                and candidate.symbol not in self.account.blocked_entries
+                and not self.account.reducer.positions.get(candidate.symbol)):
+            await self._maintain_anchor(candidate, working)
+            return
+        if (self._shielded() and candidate.quote is not None and working
+                and all(self._is_anchor_order(o) for o in working)):
+            # The scoring pair can rest again: retire the anchor first.
+            self._record_quote_cancel(candidate.symbol, "anchor_replaced_by_pair")
+            await self._cancel_symbol_entries(candidate.symbol)
             return
         if (not self._candidate_actionable(candidate) or candidate.quote is None or not self._entry_time_valid(candidate.symbol)
                 or candidate.symbol in self.account.blocked_entries):

@@ -394,11 +394,15 @@ class AdaptiveQueuePilot(QueuePilot):
             self.reasons[symbol] = 'canonical_book_or_account_unavailable'
             return 'withdraw'
         working = [o for o in orders if o.symbol == symbol and o.working]
+        anchor_size = shield.anchor_quantity
+        sizes = {self.quote_quantity} | ({anchor_size} if anchor_size is not None else set())
+        anchors = [o for o in working if anchor_size is not None and o.original_quantity == anchor_size]
         if ((working and symbol in self.proof_required)
                 or len(working) > 2 or len({o.outcome for o in working}) != len(working)
+                or (anchors and len(working) != 1)
                 or any(o.side is not Side.BUY or o.cumulative_filled
-                    or o.remaining_quantity != self.quote_quantity
-                    or o.original_quantity != self.quote_quantity for o in working)):
+                    or o.remaining_quantity != o.original_quantity
+                    or o.original_quantity not in sizes for o in working)):
             self.reasons[symbol] = 'fill_or_invalid_pair'
             return 'withdraw'
         since = (D(str((now-self.cooldown_at[symbol]).total_seconds()))
@@ -422,15 +426,19 @@ class AdaptiveQueuePilot(QueuePilot):
             a = m.anchors.get(order.outcome)
             ahead = a.scenario.ahead_scenario if a is not None and a.client_id == order.client_order_id else None
             protection = resting_shield(shield.book, order.outcome, order.price, ahead)
-            if protection < keep_required(policy, flow[order.outcome]):
-                self.reasons[symbol] = 'near_fill_reposition'
-                return 'withdraw:' + order.outcome.value
+            is_anchor = order in anchors
+            keep = keep_required(policy, flow[order.outcome])
+            if is_anchor:
+                keep = max(keep, shield.anchor_keep or keep)
+            if protection < keep:
+                self.reasons[symbol] = 'anchor_near_fill' if is_anchor else 'near_fill_reposition'
+                return 'withdraw' if is_anchor else 'withdraw:' + order.outcome.value
             midpoint = shield.midpoints[order.outcome]
             if midpoint - order.price > policy.max_midpoint_distance or order.price > midpoint:
                 self.reasons[symbol] = 'outside_reward_distance'
                 return 'withdraw:' + order.outcome.value
             target = shield.targets.get(order.outcome)
-            if upgrade_ready and target is not None and target > order.price:
+            if not is_anchor and upgrade_ready and target is not None and target > order.price:
                 self.last_optional_refresh_at[symbol] = now
                 self.reasons[symbol] = 'shield_upgrade'
                 return 'withdraw:' + order.outcome.value

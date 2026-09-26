@@ -49,6 +49,12 @@
     "upgrade_minimum_seconds": "300"
   },
   "excluded_categories": ["crypto", "bitcoin", "ether", "solana", "xrp", "zcash"],
+  "anchor": {
+    "quantity": "10",
+    "entry_contracts": "1000",
+    "keep_contracts": "600",
+    "max_midpoint_distance": "0.08"
+  },
   "uptime_ledger": {
     "scoring_day_boundary_et": "17:00",
     "margin_minutes": 30,

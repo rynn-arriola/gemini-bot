@@ -9,7 +9,7 @@ from .capacity import LEGACY_PENDING_ORDERS, MAX_PENDING_ORDERS
 from .queue_pilot import PilotPolicy, parse_pilot_policy
 from .adaptive_queue import AdaptivePolicy, parse_adaptive_policy
 from .entry_quality import EntryQualityPolicy
-from .shield import ShieldPolicy
+from .shield import AnchorPolicy, ShieldPolicy
 from .uptime_ledger import UptimeLedgerPolicy
 
 
@@ -33,6 +33,7 @@ class StrategyConfig:
     shield: ShieldPolicy | None = None
     excluded_categories: frozenset[str] = frozenset()
     uptime_ledger: UptimeLedgerPolicy | None = None
+    anchor: AnchorPolicy | None = None
 
     @property
     def shielded(self) -> bool:
@@ -60,13 +61,16 @@ class StrategyConfig:
             raise ConfigurationError(
                 "queue policy requires an approved quote size and placement offset"
             )
-        if self.shielded and (self.shield is None or self.uptime_ledger is None):
-            raise ConfigurationError("shielded placement requires shield and uptime-ledger policies")
+        if self.shielded and (self.shield is None or self.uptime_ledger is None or self.anchor is None):
+            raise ConfigurationError("shielded placement requires shield, uptime-ledger and anchor policies")
         # Shield, ledger and category settings take effect only in shielded mode.
         if self.shielded:
             try:
                 self.shield.validate()
                 self.uptime_ledger.validate()
+                self.anchor.validate()
+                if self.anchor.quantity >= self.quote_quantity:
+                    raise ValueError("anchor must be smaller than the scoring quote")
             except ValueError as exc:
                 raise ConfigurationError("invalid shield/uptime-ledger policy") from exc
         if self.quote_quantity < Decimal("10"):
@@ -190,7 +194,7 @@ def load_policy(path: Path | None = None) -> tuple[StrategyConfig, RiskConfig]:
     if version in {8, 9}:
         required.add("entry_quality")
     if version == 9:
-        required.update({"shield", "excluded_categories", "uptime_ledger"})
+        required.update({"shield", "excluded_categories", "uptime_ledger", "anchor"})
     if set(raw) != required or version not in {2, 3, 4, 5, 6, 7, 8, 9} or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
@@ -239,10 +243,11 @@ def load_policy(path: Path | None = None) -> tuple[StrategyConfig, RiskConfig]:
             quality.validate()
         except (TypeError, ValueError, ArithmeticError) as exc:
             raise ConfigurationError("invalid entry-quality policy") from exc
-    shield = ledger = None
+    shield = ledger = anchor = None
     excluded: frozenset[str] = frozenset()
     if version == 9:
         shield, ledger, excluded = _parse_v9_extensions(raw)
+        anchor = _parse_anchor(raw["anchor"])
     strategy = StrategyConfig(
         quote_quantity=Decimal(raw["quote_quantity"]),
         quote_offset_ticks=int(raw["quote_offset_ticks"]),
@@ -252,6 +257,7 @@ def load_policy(path: Path | None = None) -> tuple[StrategyConfig, RiskConfig]:
         shield=shield,
         excluded_categories=excluded,
         uptime_ledger=ledger,
+        anchor=anchor,
     )
     risk = RiskConfig(
         max_gross_reservation_usd=Decimal(raw["max_gross_reservation_usd"]),
@@ -297,6 +303,19 @@ def _parse_v9_extensions(raw: dict) -> tuple[ShieldPolicy, UptimeLedgerPolicy, f
     except (TypeError, ValueError, ArithmeticError) as exc:
         raise ConfigurationError("invalid v9 shield/uptime policy") from exc
     return shield, ledger, frozenset(v.strip().casefold() for v in excluded_raw)
+
+
+def _parse_anchor(raw: object) -> AnchorPolicy:
+    keys = {"quantity", "entry_contracts", "keep_contracts", "max_midpoint_distance"}
+    if (not isinstance(raw, dict) or set(raw) != keys
+            or any(isinstance(v, bool) or not isinstance(v, str) for v in raw.values())):
+        raise ConfigurationError("invalid v9 anchor policy schema")
+    try:
+        anchor = AnchorPolicy(**{k: Decimal(v) for k, v in raw.items()})
+        anchor.validate()
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise ConfigurationError("invalid v9 anchor policy") from exc
+    return anchor
 
 
 def load_live_config(dotenv_path: Path | None = None) -> LiveConfig:

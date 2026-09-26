@@ -127,3 +127,24 @@ def evaluate_entry_quality(
     else:
         reason = "passed"
     return EntryQuality(reason == "passed", reason, yes, no)
+
+
+def evaluate_leg_quality(
+    book: LocalBook, leg, policy: EntryQualityPolicy, *, account: AccountReducer | None = None,
+) -> EntryQuality:
+    """Entry gate for a single BUY leg (policy v9 uptime anchor)."""
+    policy.validate()
+    zero = ExitSideQuality(Decimal("0"), Decimal("0"), Decimal("0"))
+    if not book.synchronized or book.top() is None:
+        return EntryQuality(False, "exit_book_unavailable", zero, zero)
+    adjusted = external_book(book, account)
+    yes = leg.outcome is Outcome.YES
+    side = _side_quality(adjusted.bids if yes else adjusted.asks, yes=yes, quantity=leg.quantity,
+                         entry_price=leg.price, haircut=policy.depth_haircut)
+    if side.depth_fraction < policy.minimum_exit_depth_fraction:
+        reason = "exit_depth_below_minimum"
+    elif side.retained_value_fraction < policy.minimum_retained_value_fraction:
+        reason = "exit_value_below_minimum"
+    else:
+        reason = "passed"
+    return EntryQuality(reason == "passed", reason, side if yes else zero, zero if yes else side)

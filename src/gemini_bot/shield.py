@@ -50,6 +50,28 @@ class ShieldPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class AnchorPolicy:
+    """Uptime anchor: one small, deeply shielded order that keeps a held event
+    counted toward Gemini's 50% rule while its scoring pair cannot rest safely."""
+
+    quantity: Decimal
+    entry_contracts: Decimal
+    keep_contracts: Decimal
+    max_midpoint_distance: Decimal
+
+    def validate(self) -> None:
+        values = (self.quantity, self.entry_contracts, self.keep_contracts, self.max_midpoint_distance)
+        if not all(isinstance(v, Decimal) and v.is_finite() for v in values):
+            raise ValueError("anchor policy values must be finite decimals")
+        if self.quantity < 10:
+            raise ValueError("anchor quantity must meet Gemini's 10-contract reward minimum")
+        if not ZERO < self.keep_contracts < self.entry_contracts:
+            raise ValueError("anchor keep level must be positive and below its entry level")
+        if not ZERO < self.max_midpoint_distance <= MAX_REWARD_DISTANCE:
+            raise ValueError("anchor distance must be within Gemini's 10-cent reward bound")
+
+
+@dataclass(frozen=True, slots=True)
 class ShieldContext:
     """Fresh own-adjusted book facts for one symbol's resting-order advice."""
 
@@ -58,6 +80,25 @@ class ShieldContext:
     midpoints: dict[Outcome, Decimal]
     targets: dict[Outcome, Decimal | None]
     uptime_first: bool = False
+    anchor_quantity: Decimal | None = None
+    anchor_keep: Decimal | None = None
+
+
+def anchor_target(
+    book: LocalBook, tick: Decimal, midpoints: dict[Outcome, Decimal], anchor: AnchorPolicy,
+) -> tuple[Outcome, Decimal] | None:
+    """One side only: the outcome whose anchor-shielded price sits closest to
+    its midpoint (most robust to small moves), cheaper price on a tie."""
+    choices = []
+    for outcome in (Outcome.YES, Outcome.NO):
+        price = shielded_price(outcome_levels(book, outcome), midpoint=midpoints[outcome], tick=tick,
+                               required=anchor.entry_contracts, max_distance=anchor.max_midpoint_distance)
+        if price is not None:
+            choices.append((midpoints[outcome] - price, price, outcome))
+    if not choices:
+        return None
+    _, price, outcome = min(choices, key=lambda c: (c[0], c[1], c[2].value))
+    return outcome, price
 
 
 def entry_required(

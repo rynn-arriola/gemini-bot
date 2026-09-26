@@ -196,6 +196,52 @@ class ShieldedAdviceTests(unittest.TestCase):
         self.assertEqual(self.advice(None), 'withdraw')
 
 
+class AnchorTests(unittest.TestCase):
+    ANCHOR = None
+
+    def setUp(self):
+        from gemini_bot.shield import AnchorPolicy
+        self.anchor = AnchorPolicy(D(10), D(1000), D(600), D(".08"))
+
+    def test_anchor_picks_the_side_closest_to_mid_with_the_deep_shield(self):
+        from gemini_bot.shield import anchor_target
+        b = depth_book([(".50", "100"), (".49", "100")], [(".52", "600"), (".53", "600")])
+        mids = {Outcome.YES: D(".51"), Outcome.NO: D(".49")}
+        self.assertEqual(anchor_target(b, D(".01"), mids, self.anchor), (Outcome.NO, D(".47")))
+        thin = depth_book([(".50", "100")], [(".52", "100")])
+        self.assertIsNone(anchor_target(thin, D(".01"), mids, self.anchor))
+
+    def test_anchor_advice_uses_its_own_keep_level_and_never_upgrades(self):
+        p = AdaptiveQueuePilot(shielded_policy(), quote_quantity=D(25))
+        p.sync_selected({'X'})
+        p.observe_book(depth_book([(".50", "100")], [(".52", "600"), (".53", "600")]),
+                       generation=(0, 0), at=NOW, orders=())
+        p.proof_required.clear()
+        p.anchor_send_at('X', Outcome.NO, 'cA', D('.47'), D(600), NOW)
+        anchor = fx.order(Outcome.NO, 'cA', D('.47'), D(10))
+
+        def advice(asks):
+            ext = depth_book([(".50", "100")], asks)
+            ctx = ShieldContext(SHIELD, ext, {Outcome.YES: D(".51"), Outcome.NO: D(".49")},
+                                {Outcome.YES: None, Outcome.NO: D(".48")}, False, D(10), D(600))
+            return p.advice('X', now=NOW, generation=(0, 0), orders=(anchor,), safe=True, shield=ctx)
+
+        self.assertEqual(advice([(".52", "600"), (".53", "600")]), 'keep')  # 600 + 600 ahead
+        p.markets['X'].anchors[Outcome.NO].scenario.trade(D(550))
+        self.assertEqual(advice([(".52", "500"), (".53", "600")]), 'withdraw')
+        self.assertEqual(p.reasons['X'], 'anchor_near_fill')
+
+    def test_anchor_plus_pair_leg_is_invalid(self):
+        p = AdaptiveQueuePilot(shielded_policy(), quote_quantity=D(25))
+        p.sync_selected({'X'})
+        p.observe_book(depth_book([(".50", "900")], [(".52", "900")]), generation=(0, 0), at=NOW, orders=())
+        p.proof_required.clear()
+        orders = (fx.order(Outcome.NO, 'cA', D('.47'), D(10)), fx.order(Outcome.YES, 'cY', D('.50'), D(25)))
+        ctx = ShieldContext(SHIELD, depth_book([(".50", "900")], [(".52", "900")]),
+                            {Outcome.YES: D(".51"), Outcome.NO: D(".49")}, {}, False, D(10), D(600))
+        self.assertEqual(p.advice('X', now=NOW, generation=(0, 0), orders=orders, safe=True, shield=ctx), 'withdraw')
+
+
 class V9DiscoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_excludes_crypto_and_prefers_uncontested_long_lived_events(self):
         rows = [
@@ -479,6 +525,36 @@ class ShieldedExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.r._candidate_actionable(candidate))  # new event, spare < 60
         self.r._sticky_markets = {candidate.owner_key: ("E", "X")}
         self.assertTrue(self.r._candidate_actionable(candidate))  # incumbent keeps quoting
+
+    def thin_yes_book(self, seq):
+        # YES bids are thin (no 500 shield); NO bids (YES asks) are deep.
+        self.set_book([(".50", "100"), (".49", "100")],
+                      [(".52", "600"), (".53", "600"), (".54", "600")], seq=seq)
+
+    async def test_held_market_without_pair_shield_gets_one_deep_anchor(self):
+        self.thin_yes_book(seq=3)
+        candidate = replace(self.candidate(), quote=None, reasons=("insufficient_shield",))
+        self.r._sticky_markets = {candidate.owner_key: ("E", "X")}
+        self.r.ranked = [candidate]
+        self.assertTrue(self.r._candidate_actionable(candidate))
+        await self.r._maintain_candidate_locked(candidate)
+        self.assertEqual([(p['params']['eventOutcome'], p['params']['price'], p['params']['quantity'])
+                          for p in self.sent], [('NO', '0.47', '10')])
+        rows = self.r.journal.connection.execute(
+            "SELECT COUNT(*) FROM audit_event WHERE kind='uptime_anchor_placed'").fetchone()[0]
+        self.assertEqual(rows, 1)
+        self.assertEqual(self.r._pilot_advice('X'), 'keep')
+
+    async def test_anchor_retires_when_the_pair_can_rest_again(self):
+        await self.test_held_market_without_pair_shield_gets_one_deep_anchor()
+        self.r._cancel_symbol_entries = AsyncMock()
+        await self.r._maintain_candidate_locked(self.candidate())
+        self.r._cancel_symbol_entries.assert_awaited_once_with('X')
+
+    async def test_new_market_is_never_admitted_as_an_anchor(self):
+        self.thin_yes_book(seq=3)
+        candidate = replace(self.candidate(), quote=None, reasons=("insufficient_shield",))
+        self.assertFalse(self.r._candidate_actionable(candidate))
 
     async def test_rank_report_exposes_ledger_status(self):
         row = self.r._uptime_ledger_row("E", "pool", None, NOW)
