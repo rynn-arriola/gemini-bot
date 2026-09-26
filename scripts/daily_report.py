@@ -148,6 +148,28 @@ def main() -> int:
         previous_path.write_text(json.dumps(pools), encoding="utf-8")
     except Exception as exc:  # Reporting only; never fatal.
         lines.append(f"- Catalog unavailable: {type(exc).__name__}")
+    shadows = sorted((ROOT / "data").glob("shadow-2*"), key=lambda p: p.stat().st_mtime)
+    if shadows:
+        shadow = shadows[-1]
+        summary = read_json(shadow / "summary.json")
+        lines += ["", "## Paper run (virtual orders, no money)",
+                  f"- Run: `{shadow.name}`, last update {summary.get('updated_at')}, ends {summary.get('ends_at')}",
+                  f"- Now: {summary.get('eligible_pairs')} eligible, {summary.get('held_markets')} held "
+                  f"({summary.get('anchors_now')} anchors), ${summary.get('reserved_usd')} virtually reserved",
+                  f"- Totals: {summary.get('fills')} virtual fills, virtual trading P&L {summary.get('trading_pnl')}, "
+                  f"{summary.get('repositions')} repositions, {summary.get('minutes')} minutes measured"]
+        windows_path = shadow / "windows.jsonl"
+        if windows_path.exists():
+            for raw in windows_path.read_text(encoding="utf-8").splitlines()[-3:]:
+                row = json.loads(raw)
+                lines.append(f"- Window from {row['window_start']}: {row['qualified_events']} events would have "
+                             f"reached 50%; rough reward estimate ${row['rough_reward_estimate_usd']}")
+        try:
+            age = now - datetime.fromisoformat(str(summary.get("updated_at")))
+            if age > timedelta(minutes=15) and now < datetime.fromisoformat(str(summary.get("ends_at"))):
+                alerts.append("Paper run has not updated for over 15 minutes")
+        except (TypeError, ValueError):
+            pass
     lines += ["", "## Alerts"] + ([f"- ⚠️ {a}" for a in alerts] or ["- None"])
 
     text = "\n".join(lines) + "\n"
