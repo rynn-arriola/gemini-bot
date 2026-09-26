@@ -863,6 +863,7 @@ class ProductionOrchestrator:
             loader.excluded_categories = self.config.strategy.excluded_categories
             loader.per_pool_reads = 24
             loader.prefer_uncontested = True
+            loader.day_boundary_hour = self._scoring_boundary_hour()
         return loader
 
     def _crypto_entry_cutoff_seconds(self) -> int:

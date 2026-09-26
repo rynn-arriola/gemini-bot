@@ -142,6 +142,7 @@ class RewardUniverseLoader:
     excluded_categories: frozenset[str] = frozenset()
     per_pool_reads: int = 3
     prefer_uncontested: bool = False
+    day_boundary_hour: int = 0
     missing_events: set[str] = field(default_factory=set, init=False)
 
     def _excluded(self, *categories: object) -> bool:
@@ -299,7 +300,7 @@ class RewardUniverseLoader:
             if not item.pool.active or item.rules.post_only_mode:
                 continue
             if now is not None:
-                start, end, _ = estimated_reward_window(item, now)
+                start, end, _ = estimated_reward_window(item, now, day_boundary_hour=self.day_boundary_hour)
                 if end <= start or now < start or now >= quote_cutoff(
                     item, end, crypto_entry_before_expiry_seconds=self.crypto_entry_before_expiry_seconds,
                 ):

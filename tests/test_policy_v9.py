@@ -226,6 +226,44 @@ class V9DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read, ["CF-C", "CF-B", "CF-A"])
 
 
+class V9DiscoveryWindowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_loader_uses_scoring_day_boundary(self):
+        from unittest.mock import patch
+        import gemini_bot.discovery as discovery
+        seen = []
+
+        def window(item, now, **kwargs):
+            seen.append(kwargs.get("day_boundary_hour"))
+            return NOW, NOW, "test"
+
+        reward = {"event_ticker": "G", "category": "College Football", "daily_pool_usd": "5000",
+                  "pool_id": 68, "qualifying_maker_count": 0, "ends_at": "2026-09-28T00:00:00Z"}
+        event = {"event": {"ticker": "G", "category": "Sports", "status": "active", "contracts": [{
+            "instrumentSymbol": "GEMI-G-A", "status": "active", "marketState": "open",
+            "prices": {"bestBid": "0.40", "bestAsk": "0.41"}}]}}
+
+        class Rest:
+            async def reward_events(self):
+                return [reward]
+
+            async def event(self, ticker):
+                return event
+
+        loader = RewardUniverseLoader(Rest())
+        loader.day_boundary_hour = 17
+        with patch.object(discovery, "estimated_reward_window", side_effect=window), \
+                patch.object(discovery, "join_reward_contracts", return_value=[
+                    replace(repair_contract(), event_ticker="G")]):
+            await loader.load(maximum_pools=4, now=NOW)
+        self.assertEqual(seen, [17])
+
+
+def repair_contract():
+    from gemini_bot.catalog import RewardedContract
+    return RewardedContract("E", repair.candidate_pool(), repair.candidate_rules(),
+                            (NOW + timedelta(hours=2)).isoformat())
+
+
 class V9RankingTests(unittest.TestCase):
     def item(self, makers, depth):
         return RankInput(
