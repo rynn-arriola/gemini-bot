@@ -2,6 +2,7 @@
 
 All wire/account adapters are synthetic. No live orders or calibration.
 """
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import json
 import tempfile
 import time

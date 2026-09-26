@@ -13,7 +13,7 @@ from copy import deepcopy
 from collections.abc import Callable
 
 from .account_state import AccountReducer, OrderTransition, OwnedOrder
-from .cash_accounting import fill_cash_delta
+from .cash_accounting import fill_cash_delta, netted_quantity
 from .domain import Outcome, Side, canonical_symbol
 from .execution import IntentLedger, IntentState, OrderPurpose
 from .storage import AuthenticatedCashAdjustment, AuthenticatedSettlement, SQLiteJournal
@@ -582,9 +582,22 @@ class AccountRuntime:
         precision = self.quote_asset_precision.get(order.symbol)
         if precision is None:
             raise RuntimeError("fill quote-asset precision is not classified")
+        prior_position = (
+            None if self.expected_positions is None
+            else self.expected_positions.get(order.symbol, Decimal("0"))
+        )
         cash_delta = fill_cash_delta(
             side=Side(order.side.value), outcome=Outcome(order.outcome.value), purpose=purpose,
             quantity=quantity, price=price, fee=fee, quote_asset_precision=precision,
+            prior_signed_position=prior_position,
+        )
+        # Only contracts that open new exposure start an inventory deadline; a
+        # fill that nets against held opposite inventory reduces risk.
+        opened_quantity = quantity - (
+            Decimal("0") if prior_position is None else netted_quantity(
+                side=order.side, outcome=order.outcome, quantity=quantity,
+                prior_signed_position=prior_position,
+            )
         )
         expected_cash = self.expected_confirmed_usd
         if expected_cash is not None:
@@ -611,7 +624,8 @@ class AccountRuntime:
                 self.journal.set_runtime_state(
                     "expected_positions", json.dumps({k: str(v) for k, v in expected_positions.items()}), updated_at=now,
                 )
-            if transition.cancel_other_entry_orders and purpose is OrderPurpose.ENTRY:
+            if (transition.cancel_other_entry_orders and purpose is OrderPurpose.ENTRY
+                    and opened_quantity > 0):
                 opened = min(_event_time(frame), now)
                 deadline = opened + timedelta(seconds=self.inventory_age_seconds)
                 if order.symbol in self.expiry:

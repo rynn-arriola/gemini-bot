@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import asyncio

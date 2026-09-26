@@ -14,8 +14,10 @@ import json
 from .domain import Outcome, Side
 from .guarded_bid import QueueCalibration
 from .queue_pilot import QueuePilot
-from .queue_shadow import aware, nonnegative
+from .queue_shadow import QueueScenario, aware, nonnegative
 from .capacity import MAX_ACTIVE_MARKETS
+from .queue_pilot import Anchor
+from .shield import ShieldPolicy, keep_required, resting_shield
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,7 @@ class AdaptivePolicy:
 
     def __post_init__(self):
         if (not isinstance(self.market_symbols, tuple)
-                or self.placement_mode not in {'adaptive', 'stay_best'}
+                or self.placement_mode not in {'adaptive', 'stay_best', 'shielded'}
                 or not isinstance(self.same_price_refresh_minimum_seconds, D)
                 or not self.same_price_refresh_minimum_seconds.is_finite()
                 or self.same_price_refresh_minimum_seconds < 0
@@ -74,7 +76,7 @@ class AdaptivePolicy:
                 or (self.placement_mode != 'stay_best'
                     and (self.same_price_refresh_minimum_seconds != 0
                          or self.same_price_refresh_minimum_gain != 0))
-                or (self.placement_mode == 'stay_best' and self.scope != 'all_selected')
+                or (self.placement_mode in {'stay_best', 'shielded'} and self.scope != 'all_selected')
                 or self.scope not in {'research', 'all_selected'}
                 or (self.scope == 'research' and (len(self.market_symbols) != 2
                     or len(set(self.market_symbols)) != 2))
@@ -89,8 +91,8 @@ class AdaptivePolicy:
         return frozenset(self.market_symbols)
 
     def expired(self, now):
-        # In stay_best, only optional queue optimization expires.
-        return self.placement_mode != 'stay_best' and now >= self.limits.expires_at
+        # In stay_best/shielded, only optional queue optimization expires.
+        return self.placement_mode not in {'stay_best', 'shielded'} and now >= self.limits.expires_at
 
     @property
     def breach_key(self):
@@ -111,7 +113,7 @@ def parse_adaptive_policy(raw):
                                                    {'scope', 'adaptive', 'placement_mode',
                                                     'same_price_refresh_minimum_seconds',
                                                     'same_price_refresh_minimum_gain'})
-            or ('placement_mode' in raw and raw['placement_mode'] != 'stay_best')
+            or ('placement_mode' in raw and raw['placement_mode'] not in {'stay_best', 'shielded'})
             or ('same_price_refresh_minimum_seconds' in raw
                 and (isinstance(raw['same_price_refresh_minimum_seconds'], bool)
                      or not isinstance(raw['same_price_refresh_minimum_seconds'], (str, int))))
@@ -169,7 +171,7 @@ class AdaptiveQueuePilot(QueuePilot):
 
     @property
     def initial_mode(self):
-        return 'best' if self.policy.placement_mode == 'stay_best' else 'fallback'
+        return 'best' if self.policy.placement_mode in {'stay_best', 'shielded'} else 'fallback'
 
     def sync_selected(self, symbols):
         """Caller must prove retiring names terminal/flat before removing them.
@@ -190,7 +192,7 @@ class AdaptiveQueuePilot(QueuePilot):
             self.settling.discard(s)
         for s in names - self.symbols:
             self.modes[s] = self.initial_mode
-            if self.policy.placement_mode == 'stay_best':
+            if self.policy.placement_mode in {'stay_best', 'shielded'}:
                 self.proof_required.add(s)
         self._symbols = names
 
@@ -255,10 +257,10 @@ class AdaptiveQueuePilot(QueuePilot):
         aware(now)
         if symbol not in self.symbols:
             return 'fallback'
-        if self.policy.placement_mode == 'stay_best':
+        if self.policy.placement_mode in {'stay_best', 'shielded'}:
             # Placement is an owner policy, never inferred from depth or flow.
             # Advice and the orchestrator independently enforce safety/proof.
-            self.reasons[symbol] = 'stay_best_owner_policy'
+            self.reasons[symbol] = self.policy.placement_mode + '_owner_policy'
             return 'best'
         m, e, p = self.markets.get(symbol), self.evidence.get(symbol), self.policy.limits
         reason = None
@@ -295,7 +297,13 @@ class AdaptiveQueuePilot(QueuePilot):
         self.reasons[symbol] = 'adaptive_scenario_pass_not_queue_proof'
         return 'best'
 
-    def advice(self, symbol, *, now, generation, orders, safe, allow_entry=False):
+    def advice(self, symbol, *, now, generation, orders, safe, allow_entry=False, shield=None):
+        if self.policy.placement_mode == 'shielded':
+            if shield is None:
+                self.reasons[symbol] = 'shield_context_unavailable'
+                return 'withdraw'
+            return self._shielded_advice(symbol, now=now, generation=generation,
+                orders=orders, safe=safe, allow_entry=allow_entry, shield=shield)
         if self.policy.placement_mode == 'stay_best':
             return self._stay_best_advice(symbol, now=now, generation=generation,
                 orders=orders, safe=safe, allow_entry=allow_entry)
@@ -362,6 +370,73 @@ class AdaptiveQueuePilot(QueuePilot):
         self.reasons[symbol] = 'stay_best_accept_fill_risk'
         return 'allow' if allow_entry else 'keep'
 
+    def anchor_send_at(self, symbol, outcome, client_id, price, level_depth, now):
+        """Shielded sends may rest behind the touch; anchor at the actual level."""
+        m = self.markets[symbol]
+        nonnegative(level_depth)
+        if not client_id or price <= 0:
+            raise ValueError("shielded final-send anchor is invalid")
+        m.anchors[outcome] = Anchor(client_id, QueueScenario(price, now, now, level_depth, level_depth))
+
+    def _shielded_advice(self, symbol, *, now, generation, orders, safe, allow_entry, shield):
+        """Keep orders behind their external shield; move one leg when it thins.
+
+        ``withdraw:<OUTCOME>`` asks the caller to reposition only that leg;
+        ``withdraw`` cancels the pair. Near-fill repositioning is a safety
+        action and never depends on optional-refresh expiry or breach state.
+        """
+        aware(now)
+        if symbol not in self.symbols:
+            return 'outside_pilot'
+        m = self.markets.get(symbol)
+        if (not safe or m is None or m.generation != generation
+                or symbol in self.disabled or now < m.observed_at):
+            self.reasons[symbol] = 'canonical_book_or_account_unavailable'
+            return 'withdraw'
+        working = [o for o in orders if o.symbol == symbol and o.working]
+        if ((working and symbol in self.proof_required)
+                or len(working) > 2 or len({o.outcome for o in working}) != len(working)
+                or any(o.side is not Side.BUY or o.cumulative_filled
+                    or o.remaining_quantity != self.quote_quantity
+                    or o.original_quantity != self.quote_quantity for o in working)):
+            self.reasons[symbol] = 'fill_or_invalid_pair'
+            return 'withdraw'
+        since = (D(str((now-self.cooldown_at[symbol]).total_seconds()))
+                 if symbol in self.cooldown_at else self.policy.limits.refresh_cooldown_seconds)
+        if not working:
+            if (symbol in self.proof_required
+                    or m.sequence <= self.cancel_sequence.get(symbol, -1)
+                    or since < self.policy.limits.refresh_cooldown_seconds):
+                self.reasons[symbol] = 'terminal_flat_depth_or_cooldown_required'
+                return 'wait'
+            self.reasons[symbol] = 'shield_entry_allowed'
+            return 'allow' if allow_entry else 'keep'
+        flow = m.sell_flow(now)
+        policy: ShieldPolicy = shield.policy
+        upgrade_ready = (
+            not shield.uptime_first and not self.cancel_envelope_breached
+            and (symbol not in self.last_optional_refresh_at
+                 or D(str((now-self.last_optional_refresh_at[symbol]).total_seconds()))
+                    >= policy.upgrade_minimum_seconds))
+        for order in sorted(working, key=lambda o: o.outcome.value):
+            a = m.anchors.get(order.outcome)
+            ahead = a.scenario.ahead_scenario if a is not None and a.client_id == order.client_order_id else None
+            protection = resting_shield(shield.book, order.outcome, order.price, ahead)
+            if protection < keep_required(policy, flow[order.outcome]):
+                self.reasons[symbol] = 'near_fill_reposition'
+                return 'withdraw:' + order.outcome.value
+            midpoint = shield.midpoints[order.outcome]
+            if midpoint - order.price > policy.max_midpoint_distance or order.price > midpoint:
+                self.reasons[symbol] = 'outside_reward_distance'
+                return 'withdraw:' + order.outcome.value
+            target = shield.targets.get(order.outcome)
+            if upgrade_ready and target is not None and target > order.price:
+                self.last_optional_refresh_at[symbol] = now
+                self.reasons[symbol] = 'shield_upgrade'
+                return 'withdraw:' + order.outcome.value
+        self.reasons[symbol] = 'shield_intact'
+        return 'allow' if allow_entry else 'keep'
+
     def report(self):
         return {**super().report(), 'adaptive': True, 'scope': self.policy.scope, 'modes': dict(self.modes),
             'placement_mode': self.policy.placement_mode,
@@ -369,7 +444,7 @@ class AdaptiveQueuePilot(QueuePilot):
             'same_price_refresh_minimum_gain': str(self.policy.same_price_refresh_minimum_gain),
             'last_optional_refresh_at': {s: v.isoformat()
                                          for s, v in self.last_optional_refresh_at.items()},
-            'queue_settings_expiry_affects_placement': self.policy.placement_mode != 'stay_best',
+            'queue_settings_expiry_affects_placement': self.policy.placement_mode not in {'stay_best', 'shielded'},
             'cancel_maximum_seconds': str(self.cancel_maximum),
             'cancel_envelope_breached': self.cancel_envelope_breached,
             'thresholds_are_scenarios': True,

@@ -2,6 +2,17 @@
 
 ## Current release
 
+- **Policy v9 (shielded reward quoting) is source-complete, not deployed.**
+  - **Before any run:** fresh read-only `prepare-live` to preview the selected markets and shield targets; a new v9 permit bound to this build; launch just after 17:00 ET. The Sept 25 note below (v8 near-fill refresh) is superseded by v9.
+  - **First days live — measure:**
+    - the nightly local-vs-venue count check (confirms or corrects the 5 pm boundary);
+    - whether the College Football $5,000 pool is per event or shared (normalized score on a zero-maker event);
+    - reposition frequency and gaps;
+    - fills per market;
+    - LOST/AT_RISK transitions.
+  - **Validate against venue cash:** BUY NO netting rounding on the first real pair netting.
+  - **Owner decisions still open:** whether to raise the 10-second cancel budget that switches off upgrades, and the per-market cap if larger size is wanted later.
+
 - **September 25 near-fill refresh re-enabled in policy only (not deployed).** `config/live_policy.json` renews the shared queue settings to 2026-10-25 05:45 ET with unchanged thresholds, clearing the September 19 breach by new envelope identity. 1,093 production and 28 script tests plus offline release validation pass. On the next owner-approved run, measure optional refresh decisions, their cancel/rejoin gaps and whether any fill was preceded by a refresh-eligible queue estimate; watch for a >10-second cancel re-latching the envelope. [Decision](DECISIONS.md).
 
 - **V41 DNS/cancellation-clock recovery passed initial acceptance and is now stopped flat by owner request.** The exact release `b7b9406` matched GitHub main after 1,093 production and 28 script tests plus release checks. The 20:20 ET graceful drain exited both processes, and post-stop authenticated REST proved zero active/unknown orders and zero positions. A future run requires fresh preparation and exact authority. During any future natural private/DNS rotation overlapping an adverse cancel, the same runner should wait with entries paused, reconcile exact terminal/active order state and resume; never induce the fault or replay an attempted/ambiguous send. Stopped/recovery gaps earn no reward snapshots.

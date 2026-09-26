@@ -1,5 +1,16 @@
 # Bug fixes
 
+## September 25 — both legs of a pair filling was booked as two purchases
+
+Symbol positions are signed and net. Buying the opposite outcome against held inventory returns the paired $1 collateral, but `fill_cash_delta` credited that only for an EXIT BUY YES. An ENTRY fill on the second leg of a pair was booked as a full purchase debit. Expected cash would then sit about $1 per contract below the venue balance, which halts the bot within 10 seconds. Any later adoption would book about −$29.40 of realized loss for a 30-lot pair that actually earned its spread, putting the $30 HARD stop within cents. The fill also wrote a stale inventory deadline under the new outcome.
+
+The fix passes the prior signed position:
+- netted contracts earn qty × (1 − price), rounded up;
+- only the opening remainder is debited and gets a deadline;
+- the realized-P&L replay closes the old lifecycle at a sign flip.
+
+This never occurred in the recorded data. BUY NO rounding against real venue cash is unverified and still fails closed. Covered by `tests/test_pair_netting.py`.
+
 ## September 22 — pre-outage cancellation clock halted global recovery
 
 At 01:17 ET the private account stream and all five public shards lost DNS connectivity while eight adverse-quote cancellations were already in flight. Each cancel was subsequently proven unsent across the private socket rotation, but its original 45-second confirmation clock continued while the replacement socket retried. At 45 seconds an adverse-cancel worker timed out and halted the global gate, which then caused the otherwise continuous stream-recovery coordinator to stop. Emergency drain and the supervisor's read-only check also lacked DNS; a later independent authenticated REST check proved zero active orders and zero positions before the attention-only supervisor was dismissed.

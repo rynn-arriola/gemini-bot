@@ -799,7 +799,21 @@ class SQLiteJournal:
             if prior_qty == 0 and str(side).upper() != "BUY":
                 complete = False
             if prior_qty != 0 and new_qty != 0 and (prior_qty > 0) != (new_qty > 0):
-                complete = False
+                if str(side).upper() != "BUY":
+                    complete = False
+                else:
+                    # A BUY of the opposite outcome nets the held position to
+                    # flat, then opens the remainder. Close the old lifecycle
+                    # with the netted collateral credit and carry the rest.
+                    netted = abs(prior_qty)
+                    closing_cash = (
+                        netted * (Decimal("1") - execution_price)
+                        - execution_fee * netted / qty
+                    )
+                    if window_start <= occurred < window_end:
+                        realized += prior_cash + closing_cash
+                    positions[str(symbol)] = (new_qty, cash_delta - closing_cash)
+                    continue
             if new_qty == 0:
                 if prior_qty != 0 and window_start <= occurred < window_end:
                     realized += new_cash

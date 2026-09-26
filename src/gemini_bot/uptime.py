@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from math import ceil
 from typing import Protocol
@@ -15,18 +15,23 @@ from .market_state import LocalBook
 EASTERN = ZoneInfo("America/New_York")
 
 
-def eastern_day_window(now: datetime) -> tuple[datetime, datetime]:
-    """Return the Eastern calendar day containing ``now``, expressed in UTC.
+def eastern_day_window(now: datetime, boundary_hour: int = 0) -> tuple[datetime, datetime]:
+    """Return the Eastern reward day containing ``now``, expressed in UTC.
 
     Gemini's authenticated daily reward summaries are keyed by Eastern dates.
-    Zone-aware local midnights preserve 23/25-hour DST transition days.
+    ``boundary_hour`` 0 is the calendar day; policy v9 uses 17, because every
+    complete 1440-minute venue report was published the same evening, which
+    places the scoring-day close at 5 pm ET. Zone-aware local boundaries
+    preserve 23/25-hour DST transition days.
     """
     if now.tzinfo is None:
         raise ValueError("reward day requires a timezone-aware timestamp")
+    if not 0 <= boundary_hour <= 23:
+        raise ValueError("reward-day boundary hour must be 0-23")
     local = now.astimezone(EASTERN)
-    local_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    next_date = local_start.date() + timedelta(days=1)
-    local_end = datetime.combine(next_date, datetime.min.time(), tzinfo=EASTERN)
+    start_date = local.date() if local.hour >= boundary_hour else local.date() - timedelta(days=1)
+    local_start = datetime.combine(start_date, time(boundary_hour), tzinfo=EASTERN)
+    local_end = datetime.combine(start_date + timedelta(days=1), time(boundary_hour), tzinfo=EASTERN)
     return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
@@ -61,6 +66,7 @@ def estimated_reward_window(
     now: datetime,
     *,
     exit_before_expiry_seconds: int = 300,
+    day_boundary_hour: int = 0,
 ) -> tuple[datetime, datetime, str]:
     """Estimated venue denominator, never shortened by a local exit policy.
 
@@ -71,7 +77,7 @@ def estimated_reward_window(
     """
     if exit_before_expiry_seconds < 0:
         raise ValueError("pre-expiry offset cannot be negative")
-    day_start, day_end = eastern_day_window(now)
+    day_start, day_end = eastern_day_window(now, day_boundary_hour)
     reward_start = _parse_optional_timestamp(contract.reward_starts_at)
     reward_end = _parse_optional_timestamp(contract.reward_ends_at)
     if reward_start is not None and reward_end is not None and reward_end <= reward_start:
@@ -155,6 +161,7 @@ def sample_and_load_progress(
     exit_before_expiry_seconds: int = 300,
     sports_exit_before_start_seconds: int = 1200,
     crypto_entry_before_expiry_seconds: int = 300,
+    day_boundary_hour: int = 0,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -169,7 +176,8 @@ def sample_and_load_progress(
             continue
         seen.add(key)
         peers = grouped[key]
-        windows = [(c, estimated_reward_window(c, now, exit_before_expiry_seconds=exit_before_expiry_seconds))
+        windows = [(c, estimated_reward_window(c, now, exit_before_expiry_seconds=exit_before_expiry_seconds,
+                                               day_boundary_hour=day_boundary_hour))
                    for c in peers]
         valid = [(c, w) for c, w in windows if w[1] > w[0]]
         if valid:

@@ -1,13 +1,13 @@
 {
-  "policy_version": 8,
+  "policy_version": 9,
   "platform": "windows",
-  "quote_quantity": "30",
+  "quote_quantity": "50",
   "quote_offset_ticks": 0,
   "target_uptime": "0.75",
   "max_pending_orders": 40,
   "max_two_sided_quotes": 20,
   "max_tracked_markets": 32,
-  "max_gross_reservation_usd": "300",
+  "max_gross_reservation_usd": "400",
   "max_market_exposure_usd": "90",
   "max_stressed_exit_loss_usd": "40",
   "risk_window_stop_loss_usd": "30",
@@ -26,9 +26,7 @@
   },
   "queue_pilot": {
     "scope": "all_selected",
-    "placement_mode": "stay_best",
-    "same_price_refresh_minimum_seconds": "300",
-    "same_price_refresh_minimum_gain": "500",
+    "placement_mode": "shielded",
     "adaptive": {
       "warmup_seconds": "600",
       "promotion_seconds": "60",
@@ -40,7 +38,21 @@
       "minimum_requeue_gain": "250",
       "refresh_cooldown_seconds": "10",
       "expires_at": "2026-10-25T05:45:00-04:00",
-      "evidence_reference": "Owner-approved September 18 shared settings, renewed unchanged by owner on September 25 to re-enable near-fill same-price refresh; all_selected scope; no claim of guaranteed queue position, fill protection or profitability"
+      "evidence_reference": "Owner-approved September 25 shielded placement; shield upgrades stop after a cancel over 10 seconds; no claim of guaranteed queue position, fill protection or profitability"
     }
+  },
+  "shield": {
+    "entry_contracts": "500",
+    "keep_fraction": "0.60",
+    "flow_multiplier": "3",
+    "max_midpoint_distance": "0.10",
+    "upgrade_minimum_seconds": "300"
+  },
+  "excluded_categories": ["crypto", "bitcoin", "ether", "solana", "xrp", "zcash"],
+  "uptime_ledger": {
+    "scoring_day_boundary_et": "17:00",
+    "margin_minutes": 30,
+    "at_risk_spare_minutes": 120,
+    "admission_spare_minutes": 60
   }
 }

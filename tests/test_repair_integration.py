@@ -1,6 +1,7 @@
 """Offline failure-boundary tests; no credentials or exchange connections."""
 from __future__ import annotations
 
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import asyncio
 from dataclasses import replace
 from datetime import timedelta

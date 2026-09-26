@@ -1,4 +1,5 @@
 """Owner-approved one-tick policy through real guards and fake transport."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 from dataclasses import replace
 from decimal import Decimal as D
 import unittest

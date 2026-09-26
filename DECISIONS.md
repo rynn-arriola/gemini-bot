@@ -2,6 +2,27 @@
 
 These are current account-owner decisions. Changing one requires a new explicit owner decision and a dated update.
 
+- September 25 policy v9 (shielded reward quoting): the owner approved a plan and set:
+  - gross capital **$400** (from $300);
+  - **50 contracts per leg** (from 30);
+  - quote the **best-rewarding markets, excluding crypto**;
+  - **avoid fills**: a fill is a losing trade, so an order close to being filled must be repositioned.
+
+  The owner delegated the shield thresholds to AI. Chosen:
+  - rest only where at least 500 external contracts (or 3× the last 60 seconds of same-side selling) sit at the same or better prices, within 10¢ of the midpoint, never improving the best bid;
+  - reposition a leg when its protection falls below 60% of that;
+  - move a leg closer at most once per 300 seconds, and never after a cancel over 10 seconds.
+
+  The owner made the 50% rule the main issue, and approved:
+  - the per-event uptime ledger on a **5 pm → 5 pm ET scoring window**. This is inferred from the same-evening publication of complete venue reports; a nightly comparison with venue counts checks it. It supersedes the earlier "no inferred 5 pm reset" stance only for v9;
+  - LOCKED / ON_TRACK / AT_RISK / LOST handling, including **stopping an event that can no longer reach 50%** until the next window;
+  - admitting a new event only with at least 60 spare minutes;
+  - **no mid-window economics pauses for held events**; economics decide admission and 5 pm rotation;
+  - single-leg repositioning, so the sibling keeps qualifying;
+  - restarts just after 5 pm ET, or when every held event is LOCKED.
+
+  The $90 per-market, $40 stressed-exit and $30 six-hour HARD limits, and the 40-order / 20-owner limits, are unchanged. The pair-netting accounting fix (collateral-return credit for a BUY against opposite inventory) is included; its BUY NO rounding is unverified against venue data and still fails closed. This is a source change only: no restart, permit or activation is implied. [Design](docs/SHIELDED_PLACEMENT_2026-09-25.md).
+
 - September 25 near-fill refresh re-enable: the owner asked that an order close to being filled be canceled and repositioned, and chose re-enabling the existing stay-best optional same-price refresh over building a new mechanism. Renew the shared adaptive settings with only `expires_at` moved to 2026-10-25 05:45 ET; every numeric threshold is unchanged (250-contract buffer, 1.5 depth multiplier, 10-second cancel budget, 10-second cooldown, 300 seconds and 500 contracts between optional refreshes). The new expiry creates a new envelope identity, so the September 19 13.8-second cancellation breach no longer disables refresh; any later cancellation over 10 seconds latches this envelope off again. Refresh uses aggregate-L2 queue scenarios, not exact queue position, and only rejoins when at least 500 contracts of new depth would sit ahead; a thin book where the order is already at the back cannot refresh. Measured evidence: the three September 22 ZEC losing fills showed steady queue-ahead estimates (100–208 contracts, zero trade depletion) in every minute sample before a single sweep, so this does not claim fill protection for sudden sweeps. 50% impact: each refresh is a cancel/rejoin gap with no snapshot credit, bounded by the unchanged 300-second spacing. No restart, permit or activation is implied; a future run still needs fresh preparation and a new policy-bound permit.
 
 - September 21 realized-score calibration and restart: after reviewing the September 21 paid report, the owner directed using the evidence directly rather than running a shadow-only release, then restarting after verification. For safe vacant/released slots, use a confidence-adjusted 50% live marginal-profitability / 50% authenticated event-history preference. Historical yield is the precise `normalized_score` per qualifying snapshot multiplied by qualification reliability, not rounded event dollars; current pool economics and capital remain in the live half. A reported unqualified day is bounded negative ranking evidence, never a ban or zero-dollar accounting fact. A local best-possible uptime below 50% applies a 0.5 ranking haircut only; it remains unaligned reporting evidence and cannot deny an entry. Preserve healthy sticky incumbents, avoid repeated positive uplift across sibling contracts, and keep all current best-bid, size-30, entry-quality, exposure, order/owner, exit, accounting, recovery and HARD boundaries. Deploy only after terminal-flat drain, verified/pushed source, fresh read-only preparation and exact build/policy/account authority with no uptime override; the restart gap earns no snapshots.

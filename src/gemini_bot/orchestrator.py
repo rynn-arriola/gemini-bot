@@ -37,7 +37,9 @@ from .domain import EngineState, Outcome, QuoteLeg, QuotePair, Side, canonical_s
 from .engine import LiveEngineGate
 from .execution import IntentLedger, IntentState, OrderPurpose, validate_exact_exit
 from .exit_pricing import exact_crossing_exit
-from .entry_quality import evaluate_entry_quality
+from .entry_quality import evaluate_entry_quality, external_book
+from .shield import ShieldContext, entry_required, outcome_levels, shielded_price
+from .uptime_ledger import UptimeLedgerState, UptimeStatus, admission_allowed, classify
 from .exit_recovery import ExitDeferred, ExitWait
 from .live_ws import (
     EntryStateChangedBeforeSend,
@@ -270,6 +272,10 @@ class ProductionOrchestrator:
         self._pilot_proof_tasks: dict[str, asyncio.Task] = {}
         self._pilot_next_proof: dict[str, float] = {}
         self._pilot_proved: dict[str, tuple] = {}
+        # Policy v9 single-leg repositioning: our own zero-fill leg cancels
+        # (order ID -> symbol) and the public sequence at their terminal event.
+        self._leg_replacements: dict[str, str] = {}
+        self._leg_cancel_sequence: dict[str, int] = {}
         self._adaptive_breach_saved = False
         self._adaptive_storage_failure = None
         self.log.event(logging.INFO, "runner_created", read_only=read_only)
@@ -277,7 +283,94 @@ class ProductionOrchestrator:
     def _rank_live_universe(self, *args, **kwargs):
         if self.queue_pilot is not None:
             kwargs["symbol_offsets"] = {s: 0 for s in self.queue_pilot.symbols if self._pilot_at_touch(s)}
+        if self._shielded():
+            contracts = args[0] if args else kwargs["contracts"]
+            kwargs["shield_requirements"] = self._shield_requirements(contracts)
+            kwargs["shield_distance"] = self.config.strategy.shield.max_midpoint_distance
         return rank_live_universe(*args, **kwargs)
+
+    # Policy v9: depth-shielded placement and the per-event 50% uptime ledger.
+    def _shielded(self) -> bool:
+        return bool(getattr(self.config.strategy, "shielded", False))
+
+    def _scoring_boundary_hour(self) -> int:
+        return int(getattr(self.config.strategy, "scoring_day_boundary_hour", 0))
+
+    def _ledger_state(self, event_ticker: str, pool_id: str) -> UptimeLedgerState:
+        policy = self.config.strategy.uptime_ledger
+        progress = self._uptime.get(uptime_progress_key(event_ticker, pool_id)) if event_ticker else None
+        return classify(progress, policy)
+
+    def _symbol_ledger_state(self, symbol: str) -> UptimeLedgerState | None:
+        item = next((c for c in self.universe if c.rules.symbol == symbol), None)
+        if item is None or self.config.strategy.uptime_ledger is None:
+            return None
+        return self._ledger_state(item.event_ticker, item.pool.pool_id)
+
+    def _shield_flows(self, symbol: str, now: datetime) -> dict[Outcome, Decimal]:
+        pilot = self.queue_pilot
+        market = pilot.markets.get(symbol) if pilot is not None else None
+        if market is None:
+            return {Outcome.YES: Decimal("0"), Outcome.NO: Decimal("0")}
+        try:
+            flow = market.sell_flow(now)
+        except ValueError:
+            # A reversed flow clock is not evidence of quiet trading.
+            return {o: self.config.strategy.shield.entry_contracts for o in Outcome}
+        return {o: flow[o] for o in Outcome}
+
+    def _shield_required(self, symbol: str, event_ticker: str, pool_id: str,
+                         now: datetime) -> dict[Outcome, Decimal]:
+        policy = self.config.strategy.shield
+        state = self._ledger_state(event_ticker, pool_id)
+        flows = self._shield_flows(symbol, now)
+        return {o: entry_required(policy, flows[o], uptime_first=state.uptime_first) for o in Outcome}
+
+    def _shield_requirements(self, contracts) -> dict[str, dict[Outcome, Decimal]]:
+        now = _utc_now()
+        return {c.rules.symbol: self._shield_required(c.rules.symbol, c.event_ticker, c.pool.pool_id, now)
+                for c in contracts}
+
+    def _shield_context(self, symbol: str) -> ShieldContext | None:
+        item = next((c for c in self.universe if c.rules.symbol == symbol), None)
+        book = self.public.books.get(symbol)
+        if item is None or book is None or not self._book_fresh(symbol):
+            return None
+        own_adjusted = external_book(book, self.account.reducer)
+        top = own_adjusted.top()
+        if top is None:
+            return None
+        policy = self.config.strategy.shield
+        required = self._shield_required(symbol, item.event_ticker, item.pool.pool_id, _utc_now())
+        midpoints = {Outcome.YES: top.midpoint, Outcome.NO: Decimal("1") - top.midpoint}
+        targets = {o: shielded_price(
+            outcome_levels(own_adjusted, o), midpoint=midpoints[o], tick=item.rules.tick_size,
+            required=required[o], max_distance=policy.max_midpoint_distance,
+        ) for o in Outcome}
+        state = self._ledger_state(item.event_ticker, item.pool.pool_id)
+        return ShieldContext(policy, own_adjusted, midpoints, targets, state.uptime_first)
+
+    def _working_entry(self, symbol: str, outcome: Outcome) -> Any | None:
+        return next((o for o in self.account.reducer.orders.values()
+                     if o.symbol == symbol and o.working and o.side is Side.BUY
+                     and o.outcome is outcome), None)
+
+    def _shield_send_target(self, symbol: str, outcome: Outcome) -> QuotePair | None:
+        """Fresh shield price for ``outcome``; the other leg is its working order."""
+        context = self._shield_context(symbol)
+        if context is None or context.targets[outcome] is None:
+            return None
+        other = Outcome.NO if outcome is Outcome.YES else Outcome.YES
+        resting = self._working_entry(symbol, other)
+        other_price = resting.price if resting is not None else context.targets[other]
+        if other_price is None:
+            return None
+        quantity = self.config.strategy.quote_quantity
+        legs = {outcome: context.targets[outcome], other: other_price}
+        return QuotePair(
+            QuoteLeg(symbol, Outcome.YES, Side.BUY, legs[Outcome.YES], quantity),
+            QuoteLeg(symbol, Outcome.NO, Side.BUY, legs[Outcome.NO], quantity),
+        )
 
     def _sync_adaptive_scope(self):
         """Bind all-selected policy to durable owners, never to all watched books.
@@ -373,6 +466,13 @@ class ProductionOrchestrator:
             if isinstance(pilot, AdaptiveQueuePilot) and not self._pilot_safe(symbol):
                 self._adaptive_desired(symbol)
                 return "withdraw"
+            if self._shielded():
+                return pilot.advice(
+                    symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
+                    orders=tuple(o for o in self.account.reducer.orders.values() if o.working),
+                    safe=self._pilot_safe(symbol), allow_entry=allow_entry,
+                    shield=self._shield_context(symbol),
+                )
             return pilot.advice(symbol, now=_utc_now(), generation=self._pilot_generation(symbol),
                                 orders=tuple(self._queue_live_orders.values()), safe=self._pilot_safe(symbol),
                                 allow_entry=allow_entry)
@@ -396,6 +496,11 @@ class ProductionOrchestrator:
             elif frame is not None:
                 pilot.observe_trade(frame, generation=self._pilot_generation(symbol), at=_utc_now())
             else:
+                if self._shielded():
+                    # Own-order removal must match the current reducer, not
+                    # the once-a-minute shadow snapshot.
+                    self._queue_live_orders = {o.order_id: o for o in self.account.reducer.orders.values()
+                                               if o.working}
                 pilot.observe_book(self.public.books[symbol], generation=self._pilot_generation(symbol),
                                    at=_utc_now(), orders=tuple(self._queue_live_orders.values()))
         except Exception as exc:
@@ -655,6 +760,22 @@ class ProductionOrchestrator:
                 if len(self._queue_live_orders) > 40:
                     raise RuntimeError("working-order cache exceeds approved capacity")
                 if (self.queue_pilot is not None and symbol in self.queue_pilot.symbols
+                        and self._leg_replacements.get(order.order_id) == symbol
+                        and not order.working and order.cumulative_filled == 0):
+                    # Our own zero-fill single-leg reposition: only that leg's
+                    # queue anchor is void. The resting sibling keeps its
+                    # anchor; a replacement still needs fresh REST proof and
+                    # a later public depth sequence.
+                    market = self.queue_pilot.markets.get(symbol)
+                    if market is not None:
+                        market.anchors.pop(order.outcome, None)
+                    self._leg_cancel_sequence[symbol] = (
+                        market.sequence if market is not None else
+                        getattr(self.public.books.get(symbol), "last_update_id", None) or 0)
+                    self._pilot_proved.pop(symbol, None)
+                    self.public.adverse_dirty.mark(symbol)
+                    self.public.depth_changed.set()
+                elif (self.queue_pilot is not None and symbol in self.queue_pilot.symbols
                         and (not order.working or order.cumulative_filled)):
                     # Spontaneous MOC cancellation or fill is just as binding
                     # as an operator/guard cancellation; never reuse old proof.
@@ -732,7 +853,17 @@ class ProductionOrchestrator:
         )
 
     def _current_reward_epoch(self, now: datetime) -> tuple[str, bool]:
-        return eastern_day_window(now)[0].isoformat(), self._override_active(now)
+        return eastern_day_window(now, self._scoring_boundary_hour())[0].isoformat(), self._override_active(now)
+
+    def _universe_loader(self) -> RewardUniverseLoader:
+        loader = RewardUniverseLoader(
+            self.rest, self._record_missing_reward_event, self._crypto_entry_cutoff_seconds(),
+        )
+        if self._shielded():
+            loader.excluded_categories = self.config.strategy.excluded_categories
+            loader.per_pool_reads = 24
+            loader.prefer_uncontested = True
+        return loader
 
     def _crypto_entry_cutoff_seconds(self) -> int:
         policy = self.config.strategy.entry_quality
@@ -750,6 +881,7 @@ class ProductionOrchestrator:
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
+            day_boundary_hour=self._scoring_boundary_hour(),
         )
         self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=now,
@@ -838,6 +970,7 @@ class ProductionOrchestrator:
             permitted_symbols=self._permitted_symbols, maximum_active_pools=maximum,
             actionable=self._candidate_actionable, entry_time_valid=self._entry_time_valid,
             reward_focus=self._reward_focus if self._continuous_service else None,
+            retain_incumbents=self._shielded(),
         )
 
     def _owner_failure_reason(self, symbol: str) -> str:
@@ -1420,6 +1553,39 @@ class ProductionOrchestrator:
             self.log.event(logging.INFO, "read_recovery_completed", component=component,
                            remaining_entry_holds=sorted(self._read_recovery_attempts))
 
+    def _uptime_ledger_row(self, ticker: str, pool_id: str, identity: str | None,
+                           now: datetime) -> dict[str, object]:
+        """Current-window status plus a check of the last closed window.
+
+        The venue publishes counts only after its scoring day closes. Comparing
+        our count for the just-closed 5 pm window with the venue's count is how
+        the inferred boundary is confirmed; >3% disagreement is flagged.
+        """
+        state = self._ledger_state(ticker, pool_id)
+        start, _ = eastern_day_window(now, self._scoring_boundary_hour())
+        previous_start, previous_end = eastern_day_window(start - timedelta(minutes=1),
+                                                          self._scoring_boundary_hour())
+        _, local_count, _ = self.journal.load_reward_uptime(ticker, pool_id, previous_start, previous_end)
+        scoring_date = previous_end.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        venue = None
+        for day in self.exchange_reward_uptime.reward_results:
+            if str(day.get("payout_date")) != scoring_date:
+                continue
+            for event in day.get("events", []):
+                if identity is not None and event_identity(event.get("event_id")) == identity:
+                    venue = event
+        check = None
+        if venue is not None:
+            total = max(1, int(venue.get("total_snapshots") or 0))
+            difference = abs(local_count - int(venue.get("snapshot_count") or 0))
+            check = {"scoring_date": scoring_date, "local_count": local_count,
+                     "venue_count": int(venue.get("snapshot_count") or 0), "venue_total": total,
+                     "flag_over_3_percent": difference * 100 > 3 * total}
+        return {"status": state.status.value, "counted": state.counted, "target": state.target,
+                "needed": state.needed, "remaining_quotable": state.remaining, "spare": state.spare,
+                "window_start": start.isoformat(), "boundary_is_inferred_not_documented": True,
+                "previous_window_check": check}
+
     def _write_rank_report(self, now: datetime) -> None:
         rows = public_rank_rows(self.ranked)
         quality_policy = self.config.strategy.entry_quality
@@ -1476,6 +1642,8 @@ class ProductionOrchestrator:
                 self.exchange_reward_uptime.reward_results, now=now,
             )
             row["qualification_estimate"]["local_minutes_used_for_selected_funding_priority"] = self._continuous_service
+            if self._shielded() and isinstance(ticker, str) and ticker and isinstance(pool_id, str):
+                row["uptime_ledger"] = self._uptime_ledger_row(ticker, pool_id, identity, now)
         atomic_write_json(self.directory / "rank-report.json", {
             "generated_at": now.isoformat(), "candidates": rows,
             "entry_quality_summary": ({
@@ -2151,9 +2319,7 @@ class ProductionOrchestrator:
                 1,
                 self.config.risk.max_tracked_markets - len(before.positions),
             )
-            self.universe = await RewardUniverseLoader(
-                self.rest, self._record_missing_reward_event, self._crypto_entry_cutoff_seconds(),
-            ).load(
+            self.universe = await self._universe_loader().load(
                 maximum_pools=discovery_capacity,
                 preferred=self._sticky_markets, now=_utc_now(),
                 quantity=self.config.strategy.quote_quantity,
@@ -2298,6 +2464,7 @@ class ProductionOrchestrator:
                 exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
                 sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
                 crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
+                day_boundary_hour=self._scoring_boundary_hour(),
             )
             self.ranked = self._rank_live_universe(
                 self.universe, self.public.books, now=now,
@@ -2693,7 +2860,10 @@ class ProductionOrchestrator:
                         or Decimal(str(params["quantity"])) != pair.second_leg.quantity
                     ):
                         raise EntryStateChangedBeforeSend("maker pair first leg changed before second send")
-                target = self._current_quote_target(symbol)
+                if self._shielded():
+                    target = self._shield_send_target(symbol, Outcome(params["eventOutcome"]))
+                else:
+                    target = self._current_quote_target(symbol)
                 leg = None if target is None else (
                     target.yes if params["eventOutcome"] == "YES" else target.no
                 )
@@ -2746,8 +2916,18 @@ class ProductionOrchestrator:
                 if (params.get("timeInForce") != "MOC" or not self._pilot_proof_current(symbol)
                         or self._pilot_advice(symbol, allow_entry=True) != "allow"):
                     raise QuoteChangedBeforeSend("queue pilot evidence changed before send")
-                self.queue_pilot.anchor_send(symbol, Outcome(params["eventOutcome"]),
-                    params["clientOrderId"], Decimal(str(params["price"])), _utc_now())
+                if self._shielded():
+                    outcome = Outcome(params["eventOutcome"])
+                    price = Decimal(str(params["price"]))
+                    context = self._shield_context(symbol)
+                    if context is None:
+                        raise QuoteChangedBeforeSend("shield evidence changed before send")
+                    level = dict(outcome_levels(context.book, outcome)).get(price, Decimal("0"))
+                    self.queue_pilot.anchor_send_at(symbol, outcome, params["clientOrderId"],
+                                                    price, level, _utc_now())
+                else:
+                    self.queue_pilot.anchor_send(symbol, Outcome(params["eventOutcome"]),
+                        params["clientOrderId"], Decimal(str(params["price"])), _utc_now())
         else:
             round_deadline = self._exit_round_deadlines.get(symbol)
             if round_deadline is not None and time.monotonic() >= round_deadline:
@@ -2809,10 +2989,24 @@ class ProductionOrchestrator:
         rejection still blocks. Only the single local reachability proxy can be
         ignored because Gemini's exact snapshot phase/denominator is unknown.
         """
-        reward_or_proxy_ok = candidate.eligible_now or bool(
-            candidate.quote is not None
-            and tuple(candidate.reasons) == (_UPTIME_PROXY_REJECTION,)
-        )
+        if self._shielded():
+            incumbent = candidate.owner_key in self._sticky_markets
+            state = self._ledger_state(candidate.event_ticker, candidate.pool_id)
+            if state.status is UptimeStatus.LOST:
+                return False  # Cannot reach 50% this window: $0 reward, only fill risk.
+            if not incumbent and not admission_allowed(state, self.config.strategy.uptime_ledger):
+                return False
+            tolerated = {_UPTIME_PROXY_REJECTION}
+            if incumbent:
+                # Held events are not paused mid-window for profit estimates;
+                # only safety, shield, quality and lifecycle reasons remain.
+                tolerated.add("non-positive conservative net-profit estimate")
+            reward_or_proxy_ok = bool(candidate.quote is not None and set(candidate.reasons) <= tolerated)
+        else:
+            reward_or_proxy_ok = candidate.eligible_now or bool(
+                candidate.quote is not None
+                and tuple(candidate.reasons) == (_UPTIME_PROXY_REJECTION,)
+            )
         return bool(
             reward_or_proxy_ok
             and candidate.quote is not None
@@ -3009,6 +3203,115 @@ class ProductionOrchestrator:
             and self.account.reducer.positions.get(symbol, Decimal("0")) == 0
         )
 
+    async def _replace_entry_leg(self, symbol: str, outcome: Outcome, reason: str) -> bool:
+        """Cancel one near-fill leg; the other leg keeps the snapshot qualifying.
+
+        Returns True only when the leg is proven terminal with zero fills, so a
+        replacement may be considered. A fill hands control to fill safety.
+        """
+        order = self._working_entry(symbol, outcome)
+        if order is None:
+            return True
+        self._record_quote_cancel(symbol, reason)
+        self.journal.audit("shield_leg_reposition", {
+            "symbol": symbol, "outcome": outcome.value, "reason": reason, "price": str(order.price),
+        })
+        market = self.queue_pilot.markets.get(symbol) if self.queue_pilot is not None else None
+        if market is not None:
+            market.anchors.pop(outcome, None)
+        self._leg_replacements[order.order_id] = symbol
+        try:
+            await self._cancel_order_and_confirm(order.order_id)
+        finally:
+            self._leg_replacements.pop(order.order_id, None)
+        current = self.account.reducer.orders.get(order.order_id)
+        return current is not None and not current.working and current.cumulative_filled == 0
+
+    async def _leg_replacement_proof(self, symbol: str) -> bool:
+        """Fresh REST/WS agreement: flat symbol, only our resting sibling active."""
+        version, generation = self.account.fill_version, self._pilot_generation(symbol)
+        try:
+            snapshot = build_account_snapshot(await self.rest.positions(), await self.rest.active_orders())
+        except ApiError as exc:
+            if transient_failure(exc):
+                return False
+            raise
+        for order in snapshot.active_orders:
+            if not order.client_order_id or not self.journal.knows_client_order_id(order.client_order_id):
+                raise RuntimeError("leg replacement proof found an unowned active order")
+        working = {o.order_id for o in self.account.reducer.orders.values() if o.symbol == symbol and o.working}
+        nonterminal = {client for client, sym in self.journal.nonterminal_sent_intents() if sym == symbol}
+        working_clients = {o.client_order_id for o in self.account.reducer.orders.values()
+                           if o.symbol == symbol and o.working}
+        if (snapshot.signed_positions.get(symbol) or self.account.reducer.positions.get(symbol)
+                or {o.order_id for o in snapshot.active_orders if o.symbol == symbol} != working
+                or nonterminal != working_clients
+                or version != self.account.fill_version or generation != self._pilot_generation(symbol)):
+            return False
+        self._pilot_proved[symbol] = (time.monotonic(), generation, version)
+        return True
+
+    async def _place_single_leg(self, symbol: str, outcome: Outcome) -> None:
+        """Complete a resting pair with one fresh shielded leg (lifecycle lock held)."""
+        if (self._stream_holds or self._read_recovery_attempts or self._reward_program_paused
+                or not self.gate.may_submit or not self.account.equity_classification_complete
+                or not self.account.snapshots_fresh or symbol in self.account.blocked_entries
+                or self.journal.pending_exit(symbol) or symbol in self._entry_cancel_symbols
+                or self.account.reducer.positions.get(symbol, Decimal("0")) != 0
+                or not self._entry_time_valid(symbol) or not self._book_fresh(symbol)):
+            return
+        working = [o for o in self.account.reducer.orders.values()
+                   if o.symbol == symbol and o.working and o.side is Side.BUY]
+        book = self.public.books.get(symbol)
+        if (len(working) != 1 or working[0].outcome is outcome or working[0].cumulative_filled
+                or self.queue_pilot is None or symbol in self.queue_pilot.proof_required
+                or book is None or book.last_update_id is None
+                or book.last_update_id <= self._leg_cancel_sequence.get(symbol, -1)):
+            return  # Retried next cycle, after depth reflects the cancellation.
+        candidate = next((c for c in self.ranked if c.symbol == symbol), None)
+        if candidate is None or not self._candidate_actionable(candidate):
+            return
+        target = self._shield_send_target(symbol, outcome)
+        if target is None:
+            return
+        leg = target.yes if outcome is Outcome.YES else target.no
+        exposure = self._websocket_exposure()
+        reservation = leg.price * leg.quantity
+        available = self.account.available_usd
+        if (exposure.pending_orders + 1 > self._dynamic_pending_cap
+                or exposure.gross_reservation_usd + reservation > self.config.risk.max_gross_reservation_usd
+                or exposure.market_exposure_usd.get(symbol, Decimal("0")) + reservation
+                > self.config.risk.max_market_exposure_usd
+                or available is None or reservation > available):
+            return
+        if not await self._leg_replacement_proof(symbol):
+            return
+        try:
+            client_id = await self.private.place_maker(leg)
+        except (TransportChangedBeforeSend, AdmissionTimeoutBeforeSend) as exc:
+            if not self._continuous_service or self.gate.state is not EngineState.QUOTING:
+                raise
+            if "private" not in self._stream_holds:
+                await self._recover_stream("private", exc, generation=self._stream_generation["private"])
+            return
+        except (QuoteChangedBeforeSend, EntryStateChangedBeforeSend) as exc:
+            # Definitely unsent; the resting sibling keeps qualifying.
+            self.journal.audit("shield_leg_presend_state_change", {"symbol": symbol, "reason": str(exc)})
+            return
+        await self.account.wait_for_order_event(client_id)
+        intent = self.ledger.get(client_id)
+        order = (None if intent is None or intent.server_order_id is None
+                 else self.account.reducer.orders.get(intent.server_order_id))
+        if order is not None and order.cumulative_filled > 0:
+            await self._cancel_symbol_entries(symbol)
+            return
+        if intent is None or intent.state is not IntentState.ACKNOWLEDGED:
+            if intent is not None and await self._clean_zero_fill_moc_terminal(intent, symbol):
+                self._quote_cooldown_until[symbol] = asyncio.get_running_loop().time() + 5
+                return
+            await self._cancel_symbol_entries(symbol)
+            raise RuntimeError("replacement maker leg lacked positive working acknowledgment")
+
     async def _maintain_candidate(self, candidate: Any) -> None:
         async with self._lifecycle_lock:
             await self._maintain_candidate_locked(candidate)
@@ -3081,7 +3384,15 @@ class ProductionOrchestrator:
             await self._cancel_symbol_entries(symbol)
             return True
         if self._pilot_at_touch(symbol):
-            if self._pilot_advice(symbol) != "keep":
+            advice = self._pilot_advice(symbol)
+            if self._shielded() and advice.startswith("withdraw:"):
+                outcome = Outcome(advice.split(":", 1)[1])
+                reason = "shield:" + self.queue_pilot.reasons.get(symbol, "evidence")
+                if await self._replace_entry_leg(symbol, outcome, reason):
+                    async with self._lifecycle_lock:
+                        await self._place_single_leg(symbol, outcome)
+                return True
+            if advice != "keep":
                 self._record_quote_cancel(symbol, "queue_pilot:" + self.queue_pilot.reasons.get(symbol, "evidence"))
                 await self._cancel_symbol_entries(symbol)
                 return True
@@ -3158,6 +3469,21 @@ class ProductionOrchestrator:
             if working:
                 await self._cancel_symbol_entries(candidate.symbol)
             return
+        if self._shielded() and working and self._pilot_at_touch(candidate.symbol):
+            advice = self._pilot_advice(candidate.symbol)
+            if advice.startswith("withdraw:"):
+                outcome = Outcome(advice.split(":", 1)[1])
+                reason = "shield:" + self.queue_pilot.reasons.get(candidate.symbol, "evidence")
+                if await self._replace_entry_leg(candidate.symbol, outcome, reason):
+                    await self._place_single_leg(candidate.symbol, outcome)
+                return
+            if advice != "keep":
+                await self._cancel_symbol_entries(candidate.symbol)
+                return
+            if len(working) == 1:
+                missing = Outcome.NO if working[0].outcome is Outcome.YES else Outcome.YES
+                await self._place_single_leg(candidate.symbol, missing)
+            return  # Economics never cancel a held shielded pair mid-window.
         if (working and (self._adaptive_transition(candidate.symbol)
                 or (self._pilot_at_touch(candidate.symbol) and self._pilot_advice(candidate.symbol) != "keep"))):
             await self._cancel_symbol_entries(candidate.symbol)
@@ -3971,6 +4297,7 @@ class ProductionOrchestrator:
             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
+            day_boundary_hour=self._scoring_boundary_hour(),
         )
         self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
                        usable_permitted_symbol=usable_permitted_symbol)
@@ -4033,9 +4360,7 @@ class ProductionOrchestrator:
             if pair[1] in self._inventory_catalog_holds
             or pair[1] not in {c.rules.symbol for c in self.universe}
         })
-        proposed = await RewardUniverseLoader(
-            self.rest, self._record_missing_reward_event, self._crypto_entry_cutoff_seconds(),
-        ).load(
+        proposed = await self._universe_loader().load(
             maximum_pools=self.config.risk.max_tracked_markets, preferred=preferred,
             now=_utc_now(), rewards=rewards,
             quantity=self.config.strategy.quote_quantity,
@@ -4350,6 +4675,7 @@ class ProductionOrchestrator:
                             exit_before_expiry_seconds=self.config.risk.force_exit_before_expiry_seconds,
                             sports_exit_before_start_seconds=self.config.risk.sports_exit_before_start_seconds,
                             crypto_entry_before_expiry_seconds=self._crypto_entry_cutoff_seconds(),
+                            day_boundary_hour=self._scoring_boundary_hour(),
                         )
                         self.journal.set_runtime_state(
                             "profitability_telemetry_v1",

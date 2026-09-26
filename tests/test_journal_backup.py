@@ -1,4 +1,5 @@
 """Offline backup failures/races; all file mutation is confined to temporary dirs."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import asyncio
 from contextlib import closing
 import hashlib

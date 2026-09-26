@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from .account_state import OwnedOrder
-from .cash_accounting import fill_cash_delta
+from .cash_accounting import fill_cash_delta, netted_quantity
 from .domain import Side, Outcome
 from .execution import OrderPurpose
 
@@ -116,6 +116,8 @@ def import_terminal_trades(account, rows, trades, *, now, allow_external_reducti
         )
         cash -= old_cash_delta
         if not positions[symbol]: positions.pop(symbol)
+    cash_deltas: dict[str, Decimal] = {}
+    opened_quantities: dict[str, Decimal] = {}
     for t in sorted(plans,key=lambda t:(t[9],t[0])):
         tid,oid,client,symbol,side,outcome,quantity,price,fee,event_at,external,purpose_value = t
         prior = positions.get(symbol,Decimal(0))
@@ -129,10 +131,16 @@ def import_terminal_trades(account, rows, trades, *, now, allow_external_reducti
         precision = account.quote_asset_precision.get(symbol)
         if precision is None:
             raise RuntimeError('execution recovery lacks quote-asset precision')
-        cash += fill_cash_delta(
+        cash_deltas[tid] = fill_cash_delta(
             side=Side(side), outcome=Outcome(outcome), purpose=OrderPurpose(purpose_value),
             quantity=quantity, price=price, fee=fee, quote_asset_precision=precision,
+            prior_signed_position=prior,
         )
+        opened_quantities[tid] = quantity - netted_quantity(
+            side=Side(side), outcome=Outcome(outcome), quantity=quantity,
+            prior_signed_position=prior,
+        )
+        cash += cash_deltas[tid]
     if plans or aggregates:
         with journal.transaction():
             for oid, old in aggregates:
@@ -141,16 +149,10 @@ def import_terminal_trades(account, rows, trades, *, now, allow_external_reducti
                 journal.audit('provisional_maker_aggregate_replaced_by_exact_trades',{'order_id':oid})
             for t in sorted(plans,key=lambda t:(t[9],t[0])):
                 tid,oid,client,symbol,side,outcome,quantity,price,fee,event_at,external,purpose_value = t
-                cash_delta = fill_cash_delta(
-                    side=Side(side), outcome=Outcome(outcome),
-                    purpose=OrderPurpose(purpose_value), quantity=quantity,
-                    price=price, fee=fee,
-                    quote_asset_precision=account.quote_asset_precision[symbol],
-                )
                 journal.record_fill(trade_id=tid,order_id=oid,client_order_id=client,symbol=symbol,
                     side=side,outcome=outcome,quantity=quantity,price=price,fee=fee,
-                    cash_delta=cash_delta,event_at=event_at)
-                if purpose_value == OrderPurpose.ENTRY.value:
+                    cash_delta=cash_deltas[tid],event_at=event_at)
+                if purpose_value == OrderPurpose.ENTRY.value and opened_quantities[tid] > 0:
                     deadline=event_at+timedelta(seconds=account.inventory_age_seconds)
                     if symbol in account.expiry:
                         deadline=min(deadline,account.expiry[symbol]-timedelta(seconds=account.exit_before_expiry_seconds))

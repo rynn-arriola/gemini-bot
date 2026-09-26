@@ -4,6 +4,21 @@ Violation of an invariant blocks new risk and requires reconciliation or a termi
 
 ## Availability follow-up (v7)
 
+79. Owner-approved policy v9 shielded placement:
+    - **Where orders rest.** A new maker leg rests only where the external, own-adjusted volume at the same or better prices meets the entry requirement. It never improves the external best bid and never sits more than 10¢ from the midpoint.
+    - **Moving one leg.** A leg is canceled when its estimated protection falls below the keep level. The replacement needs:
+      - exact terminal zero-fill proof;
+      - a later public depth sequence;
+      - fresh REST/WS agreement: a flat symbol, only the owned sibling active, and matching nonterminal intents;
+      - unchanged fill and stream generations;
+      - every existing final-send, exposure and HARD check.
+
+      Only our own zero-fill leg cancel skips the pair-wide proof reset. Spontaneous cancellations and any fill keep the full barrier.
+    - **Held events.** Within a scoring window they are paused only for safety, shield, entry-quality or lifecycle reasons, never for profit estimates.
+    - **LOST events.** An event that cannot reach 50% stops quoting until the next window.
+    - **Estimates, not proof.** Uptime-ledger status and the 5 pm window are local estimates: never proof of qualification, never snapshot credit for paused time, and never grounds to bypass a limit.
+    - **Pair netting.** A BUY netting against opposite inventory is booked as a collateral-return credit; any cash mismatch still fails closed.
+
 78. Realized-score calibration v2 affects only the ordering of otherwise safe vacant/released owners. Its historical signal is authenticated event `normalized_score` per qualifying snapshot times qualification reliability, recency-weighted and confidence-shrunk into a 50/50 blend with current marginal live economics. One event's positive evidence is not repeated across sibling contracts. An event seen only below 50% may receive a bounded ranking penalty but is never banned; missing history is neutral. A local best-possible ratio below 50% applies only a 0.5 soft ranking haircut and remains unaligned, non-authoritative evidence. Neither signal changes current quote eligibility, incumbent retention, working-order cancellation, dollar accounting, pool-budget deduplication, exact exits, ownership, exposure, recovery or HARD. Historical evidence cannot rotate a healthy incumbent or claim future reward, and stopped/paused time receives no credit.
 
 77. A public-shard fault that overlaps a private order awaiting acknowledgement immediately invalidates and holds only that shard, while a separate account-wide entry hold prohibits every new order until the existing private account stream supplies exact acknowledgement or terminal evidence. The mutation is never replayed, inferred or canceled by absence. Once resolved, normal affected-shard cancellation/reconnect/proof may proceed and unrelated resting orders remain in place. If exact evidence does not arrive within the existing private-send timeout plus five seconds, or private/account evidence becomes unsafe, halt and drain globally. A late protocol pong is not a shard fault when a fresh data/control frame proves that same socket remained readable during the probe. No held or stopped interval earns reward uptime.

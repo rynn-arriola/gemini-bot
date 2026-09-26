@@ -9,6 +9,8 @@ from .capacity import MAX_PENDING_ORDERS
 from .queue_pilot import PilotPolicy, parse_pilot_policy
 from .adaptive_queue import AdaptivePolicy, parse_adaptive_policy
 from .entry_quality import EntryQualityPolicy
+from .shield import ShieldPolicy
+from .uptime_ledger import UptimeLedgerPolicy
 
 
 class ConfigurationError(ValueError):
@@ -26,20 +28,47 @@ class StrategyConfig:
     stale_book_seconds: Decimal = Decimal("3")
     queue_pilot: PilotPolicy | AdaptivePolicy | None = None
     entry_quality: EntryQualityPolicy | None = None
+    # Policy v9 only: depth-shielded placement, category exclusion and the
+    # per-event 50% uptime ledger on Gemini's inferred 5 pm ET scoring day.
+    shield: ShieldPolicy | None = None
+    excluded_categories: frozenset[str] = frozenset()
+    uptime_ledger: UptimeLedgerPolicy | None = None
+
+    @property
+    def shielded(self) -> bool:
+        return (isinstance(self.queue_pilot, AdaptivePolicy)
+                and self.queue_pilot.placement_mode == 'shielded')
+
+    @property
+    def scoring_day_boundary_hour(self) -> int:
+        if not self.shielded or self.uptime_ledger is None:
+            return 0
+        return self.uptime_ledger.scoring_day_boundary_hour
 
     def validate(self) -> None:
-        stay_best = isinstance(self.queue_pilot, AdaptivePolicy) and self.queue_pilot.placement_mode == 'stay_best'
-        if stay_best and self.quote_offset_ticks != 0:
-            raise ConfigurationError('stay_best requires zero-tick placement')
-        if isinstance(self.queue_pilot, AdaptivePolicy) and not stay_best and self.quote_offset_ticks != 1:
+        pilot_at_zero = (isinstance(self.queue_pilot, AdaptivePolicy)
+                         and self.queue_pilot.placement_mode in {'stay_best', 'shielded'})
+        if pilot_at_zero and self.quote_offset_ticks != 0:
+            raise ConfigurationError('stay_best/shielded placement requires zero-tick offset')
+        if isinstance(self.queue_pilot, AdaptivePolicy) and not pilot_at_zero and self.quote_offset_ticks != 1:
             raise ConfigurationError("adaptive pilot requires one-tick fallback")
+        approved_sizes = {Decimal("50")} if self.shielded else {Decimal("15"), Decimal("30")}
         if self.queue_pilot is not None and (
-            self.quote_quantity not in {Decimal("15"), Decimal("30")}
-            or (not stay_best and self.quote_offset_ticks not in {1, 2})
+            self.quote_quantity not in approved_sizes
+            or (not pilot_at_zero and self.quote_offset_ticks not in {1, 2})
         ):
             raise ConfigurationError(
                 "queue policy requires an approved quote size and placement offset"
             )
+        if self.shielded and (self.shield is None or self.uptime_ledger is None):
+            raise ConfigurationError("shielded placement requires shield and uptime-ledger policies")
+        # Shield, ledger and category settings take effect only in shielded mode.
+        if self.shielded:
+            try:
+                self.shield.validate()
+                self.uptime_ledger.validate()
+            except ValueError as exc:
+                raise ConfigurationError("invalid shield/uptime-ledger policy") from exc
         if self.quote_quantity < Decimal("10"):
             raise ConfigurationError("quote_quantity must meet Gemini's 10-contract reward minimum")
         if self.quote_offset_ticks < 0:
@@ -140,7 +169,8 @@ def load_dotenv(path: Path) -> dict[str, str]:
 DEFAULT_POLICY_PATH = Path(__file__).resolve().parents[2] / "config" / "live_policy.json"
 
 
-def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskConfig]:
+def load_policy(path: Path | None = None) -> tuple[StrategyConfig, RiskConfig]:
+    path = DEFAULT_POLICY_PATH if path is None else path
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -155,11 +185,13 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
         "max_inventory_age_seconds", "force_exit_before_expiry_seconds", "monetary_stop_authorities",
     }
     version = raw.get("policy_version")
-    if version in {3, 4, 5, 6, 7, 8}:
+    if version in {3, 4, 5, 6, 7, 8, 9}:
         required.add("queue_pilot")
-    if version == 8:
+    if version in {8, 9}:
         required.add("entry_quality")
-    if set(raw) != required or version not in {2, 3, 4, 5, 6, 7, 8} or raw["platform"] != "windows":
+    if version == 9:
+        required.update({"shield", "excluded_categories", "uptime_ledger"})
+    if set(raw) != required or version not in {2, 3, 4, 5, 6, 7, 8, 9} or raw["platform"] != "windows":
         raise ConfigurationError("approved live policy schema/version/platform mismatch")
     if raw["risk_window_timezone"] != "America/New_York" or raw["risk_window_start_hours"] != [0, 6, 12, 18]:
         raise ConfigurationError("risk-window clock does not match approved Eastern windows")
@@ -172,20 +204,22 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
     if raw["max_pending_orders"] != MAX_PENDING_ORDERS:
         raise ConfigurationError("fixed pending-order policy requires exactly 40 orders")
     try:
-        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version in {4, 5, 6, 7, 8}
+        adaptive_versions = {4, 5, 6, 7, 8, 9}
+        pilot = (parse_adaptive_policy(raw.get("queue_pilot")) if version in adaptive_versions
                  else parse_pilot_policy(raw.get("queue_pilot")))
-        if version in {4, 5, 6, 7, 8} and pilot.scope != ('all_selected' if version in {5, 6, 7, 8} else 'research'):
+        if version in adaptive_versions and pilot.scope != ('all_selected' if version in {5, 6, 7, 8, 9} else 'research'):
             raise ValueError('adaptive scope requires its exact policy version')
-        if version in {4, 5, 6, 7, 8} and pilot.placement_mode != ('stay_best' if version in {6, 7, 8} else 'adaptive'):
+        expected_mode = ('shielded' if version == 9 else 'stay_best' if version in {6, 7, 8} else 'adaptive')
+        if version in adaptive_versions and pilot.placement_mode != expected_mode:
             raise ValueError('placement mode requires its exact policy version')
-        if version in {4, 5, 6, 7, 8} and pilot.same_price_refresh_minimum_seconds != (Decimal('300') if version in {7, 8} else 0):
+        if version in adaptive_versions and pilot.same_price_refresh_minimum_seconds != (Decimal('300') if version in {7, 8} else 0):
             raise ValueError('same-price refresh interval requires its exact policy version')
-        if version in {4, 5, 6, 7, 8} and pilot.same_price_refresh_minimum_gain != (Decimal('500') if version in {7, 8} else 0):
+        if version in adaptive_versions and pilot.same_price_refresh_minimum_gain != (Decimal('500') if version in {7, 8} else 0):
             raise ValueError('same-price refresh gain requires its exact policy version')
     except (ValueError, TypeError, ArithmeticError, AttributeError) as exc:
         raise ConfigurationError("invalid queue pilot calibration") from exc
     quality = None
-    if version == 8:
+    if version in {8, 9}:
         value = raw["entry_quality"]
         if not isinstance(value, dict) or set(value) != {
             "minimum_exit_depth_fraction", "minimum_retained_value_fraction",
@@ -204,12 +238,19 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
             quality.validate()
         except (TypeError, ValueError, ArithmeticError) as exc:
             raise ConfigurationError("invalid entry-quality policy") from exc
+    shield = ledger = None
+    excluded: frozenset[str] = frozenset()
+    if version == 9:
+        shield, ledger, excluded = _parse_v9_extensions(raw)
     strategy = StrategyConfig(
         quote_quantity=Decimal(raw["quote_quantity"]),
         quote_offset_ticks=int(raw["quote_offset_ticks"]),
         target_uptime=Decimal(raw["target_uptime"]),
         queue_pilot=pilot,
         entry_quality=quality,
+        shield=shield,
+        excluded_categories=excluded,
+        uptime_ledger=ledger,
     )
     risk = RiskConfig(
         max_gross_reservation_usd=Decimal(raw["max_gross_reservation_usd"]),
@@ -226,6 +267,35 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> tuple[StrategyConfig, RiskC
     strategy.validate()
     risk.validate()
     return strategy, risk
+
+
+def _parse_v9_extensions(raw: dict) -> tuple[ShieldPolicy, UptimeLedgerPolicy, frozenset[str]]:
+    shield_raw, ledger_raw, excluded_raw = raw["shield"], raw["uptime_ledger"], raw["excluded_categories"]
+    shield_keys = {"entry_contracts", "keep_fraction", "flow_multiplier",
+                   "max_midpoint_distance", "upgrade_minimum_seconds"}
+    ledger_keys = {"scoring_day_boundary_et", "margin_minutes",
+                   "at_risk_spare_minutes", "admission_spare_minutes"}
+    if (not isinstance(shield_raw, dict) or set(shield_raw) != shield_keys
+            or not isinstance(ledger_raw, dict) or set(ledger_raw) != ledger_keys
+            or not isinstance(excluded_raw, list)
+            or any(not isinstance(v, str) or not v.strip() for v in excluded_raw)):
+        raise ConfigurationError("invalid v9 shield/uptime/category policy schema")
+    try:
+        if any(isinstance(v, bool) or not isinstance(v, str) for v in shield_raw.values()):
+            raise ValueError("shield values must be exact decimal text")
+        shield = ShieldPolicy(**{k: Decimal(v) for k, v in shield_raw.items()})
+        boundary = ledger_raw["scoring_day_boundary_et"]
+        if not isinstance(boundary, str) or len(boundary) != 5 or boundary[2:] != ":00":
+            raise ValueError("scoring-day boundary must be a whole ET hour like 17:00")
+        minutes = [ledger_raw[k] for k in ("margin_minutes", "at_risk_spare_minutes", "admission_spare_minutes")]
+        if any(type(v) is not int for v in minutes):
+            raise ValueError("uptime-ledger minutes must be integers")
+        ledger = UptimeLedgerPolicy(int(boundary[:2]), Decimal("0.50"), *minutes)
+        shield.validate()
+        ledger.validate()
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise ConfigurationError("invalid v9 shield/uptime policy") from exc
+    return shield, ledger, frozenset(v.strip().casefold() for v in excluded_raw)
 
 
 def load_live_config(dotenv_path: Path | None = None) -> LiveConfig:

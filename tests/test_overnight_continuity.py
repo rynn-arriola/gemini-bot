@@ -1,4 +1,5 @@
 """Offline midnight, persistence and ownership tests; no venue connections."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone

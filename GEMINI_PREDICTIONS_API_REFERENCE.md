@@ -6,9 +6,23 @@ Working reference for the Gemini liquidity-rewards bot. This document summarizes
 
 September 16 strategy-v3 recheck: [event reward metadata](https://developer.gemini.com/rest-api/prediction-markets/rewards/list-liquidity-rewards-events) defines qualifying-maker count for the event's recent snapshot window, not the shared pool or day. [Reward rules](https://developer.gemini.com/prediction-markets/liquidity-rewards-program) apply the $1 floor to daily account totals and sum scores across event contracts. Exact quadratic coefficients, shared-category cross-event normalization and score-window boundaries remain unspecified. Public L2 has aggregate price/quantity, not maker identities; v3's weighted pressure and fixed unseen-contract reserve remain proxies. [Fee promotion](https://developer.gemini.com/prediction-markets/maker-fee-free-trading-promo) waives qualifying maker fees September 2–December 31, 2026, subject to amendment. Estimates use only its unambiguous interior dates and preserve standard fees on boundary days; authenticated fees are never rewritten. [Daily summaries](https://developer.gemini.com/rest-api/prediction-markets/rewards/get-liquidity-rewards-daily-summary) report account totals and event attribution, not per-contract earnings or exact scored-through timestamps. The observed BELOW_THRESHOLD status is retained explicitly rather than mapped to UNKNOWN.
 
-Last verified: **2026-09-19 (America/New_York)** for quote precision, collateral return and the active maker-fee promotion; earlier full reference scan September 15.
+Last verified: **2026-09-25 (America/New_York)** for liquidity-reward rules, the reward catalog and fees; **2026-09-19** for quote precision, collateral return and the active maker-fee promotion; earlier full reference scan September 15.
 
 September 19 fill-accounting recheck: the official market schema exposes contract-level `quoteAssetPrecision`; the affected live contract reported `2`. The authenticated 5.93-at-0.68 BUY moved USD by 4.04 rather than raw notional 4.0324, establishing debit rounding at the published precision for this observed execution. Code now preserves that exact rounded cash delta per fill and never infers a tolerance. The official schema supplies the precision; the direction of rounding is dated authenticated venue evidence, not a universal undocumented promise.
+
+September 25 rewards recheck:
+- The [Liquidity Rewards Program](https://developer.gemini.com/prediction-markets/liquidity-rewards-program) is unchanged:
+  - quadratic spread weight around the midpoint (about 50× more for 1.5¢ than for 10¢), with the best same-side price used when the book is one-sided;
+  - size counted from 10 to 250 contracts;
+  - a 1.5× multiplier for a qualifying bid *and* ask on the same contract;
+  - 50% of eligible snapshots required;
+  - a $1 minimum daily payout, paid at 5:30 pm ET;
+  - daily score summed across an event's contracts.
+- The public catalog (`/liquidity-rewards/events`, 346 events) now lists only six `category_default` pools: College Football $5,000/day (251 events, 249 with zero qualifying makers), Bitcoin $150, Zcash $150, Ether $100, XRP $50 and Solana $50. The event-override pools of September 14–22 are absent.
+- Every paid row reconciles as event pool × `normalized_score`.
+- **Daily-summary timing:** complete 1440-snapshot reports appeared the same ET evening (18:20–20:18) on all 7 recorded days, which implies a 5 pm ET scoring-day close. This is inferred, not documented.
+- The [fee schedule](https://www.gemini.com/fees/predictions) is taker 0.07 × C × P × (1−P) and maker 0.0175 × C × P × (1−P), rounded up to the cent. The [maker fee-free promo](https://developer.gemini.com/prediction-markets/maker-fee-free-trading-promo) (Sept 2 – Dec 31, 2026) makes maker fills free.
+- [Collateral return](https://developer.gemini.com/prediction-markets/collateral-return) is by account and event-group onboarding; resting orders still hold full collateral.
 
 September 19 collateral-return recheck: [Collateral Return](https://developer.gemini.com/prediction-markets/collateral-return) documents that accounts using collateral return reduce NO exposure by buying the complementary YES outcome; direct SELL NO is unsupported in that mode. Exact exits therefore SELL YES for positive inventory and BUY YES for negative inventory, always for the full authenticated residual. [Maker fee-free trading](https://developer.gemini.com/prediction-markets/maker-fee-free-trading-promo) covers September 2 through December 31, 2026; the affected maker fill's authenticated fee was zero, so no fee was inferred or rewritten.
 

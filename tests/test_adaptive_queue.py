@@ -1,4 +1,5 @@
 """Synthetic envelopes only. No test value is a live calibrated recommendation."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import asyncio
 import json
 import tempfile
@@ -203,7 +204,7 @@ class AdaptiveConfigTests(unittest.TestCase):
                 load_policy(path)
 
     def test_template_remains_invalid_and_disabled_policy_unchanged(self):
-        template = json.loads((DEFAULT_POLICY_PATH.parent/'adaptive_queue_review.template.json').read_text())
+        template = json.loads((policy_v8.LIVE_POLICY.parent/'adaptive_queue_review.template.json').read_text())
         base = json.loads(DEFAULT_POLICY_PATH.read_text())
         base.pop('queue_pilot', None)
         base.pop('entry_quality', None)

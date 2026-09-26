@@ -1,4 +1,5 @@
 """No network, active policy, permit, real account or trading process touched."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 from contextlib import redirect_stdout
 from copy import deepcopy
 from dataclasses import asdict, replace

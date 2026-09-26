@@ -38,6 +38,13 @@ async def read_reward_event(
         return None
 
 
+def _ends_at_seconds(row: dict[str, Any]) -> float:
+    try:
+        return datetime.fromisoformat(str(row.get("ends_at") or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def _maker_tiebreak(row: dict[str, Any]) -> tuple[bool, int]:
     count = row.get("qualifying_maker_count")
     # Missing/zero historical qualification is not proof of an empty pool.
@@ -130,7 +137,15 @@ class RewardUniverseLoader:
     rest: DiscoveryRest
     on_event_missing: Callable[[str], None] | None = None
     crypto_entry_before_expiry_seconds: int = 300
+    # Policy v9: skip excluded reward/event categories, read deeper into large
+    # shared pools, and prefer events with the fewest qualifying makers.
+    excluded_categories: frozenset[str] = frozenset()
+    per_pool_reads: int = 3
+    prefer_uncontested: bool = False
     missing_events: set[str] = field(default_factory=set, init=False)
+
+    def _excluded(self, *categories: object) -> bool:
+        return any(str(value or "").casefold() in self.excluded_categories for value in categories)
 
     def _event_missing(self, ticker: str) -> None:
         self.missing_events.add(ticker)
@@ -149,6 +164,11 @@ class RewardUniverseLoader:
         self.missing_events.clear()
         rewards = await self.rest.reward_events() if rewards is None else rewards
         preferred = preferred or {}
+        if self.excluded_categories:
+            preferred_events = {pair[0] for pair in preferred.values()}
+            rewards = [r for r in rewards
+                       if str(r.get("event_ticker", "")).upper() in preferred_events
+                       or not self._excluded(r.get("category"), r.get("pool_category_name"))]
         selected = select_pool_representatives(rewards, maximum_pools=maximum_pools)
         # Restore incumbent pools even when another pool's score has risen.
         pinned = [r for r in rewards if any(
@@ -167,15 +187,25 @@ class RewardUniverseLoader:
         for pool_id in pool_order:
             rows = [r for r in rewards if reward_pool_key(r) == pool_id
                     and Decimal(str(r.get("daily_pool_usd", "0"))) > 0]
-            rows.sort(key=lambda r: (
-                not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
-                _maker_tiebreak(r),
-                str(r.get("event_ticker", "")),
-            ))
+            if self.prefer_uncontested:
+                # Fewest qualifying makers first (zero included), then the
+                # longest remaining reward life for a full scoring window.
+                rows.sort(key=lambda r: (
+                    not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
+                    max(0, int(r.get("qualifying_maker_count") or 0)),
+                    -_ends_at_seconds(r),
+                    str(r.get("event_ticker", "")),
+                ))
+            else:
+                rows.sort(key=lambda r: (
+                    not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
+                    _maker_tiebreak(r),
+                    str(r.get("event_ticker", "")),
+                ))
             # Read all pinned events first, then a bounded alternative frontier.
             pinned_count = sum(any(str(r.get("event_ticker", "")).upper() == p[0]
                                    for p in preferred_pairs) for r in rows)
-            for reward in rows[:max(3, pinned_count)]:
+            for reward in rows[:max(self.per_pool_reads, pinned_count)]:
                 if reads >= 64:
                     break
                 reads += 1
@@ -244,6 +274,9 @@ class RewardUniverseLoader:
         if not isinstance(event, dict):
             return []
         if str(event.get("category", reward.get("category", ""))).casefold() == "sports" and bool(event.get("isLive")):
+            return []
+        if (self.excluded_categories and self._excluded(event.get("category"))
+                and not any(pair[0] == ticker for pair in preferred)):
             return []
         contracts = [
             contract for contract in event.get("contracts", [])

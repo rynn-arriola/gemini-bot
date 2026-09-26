@@ -44,6 +44,10 @@ class RankInput:
     unobserved_competition_units: int = 1
     quote_offset_ticks: int | None = None
     event_id: str = ""
+    # Policy v9: a depth-shielded target built from full own-adjusted depth
+    # replaces the offset target; ``quote_error`` records why none exists.
+    explicit_quote: QuotePair | None = None
+    quote_error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +172,10 @@ def rank_candidate(
         if age < 0 or age > stale_after_seconds:
             reasons.append("stale market data")
     try:
-        quote = build_two_sided_quote(item.book, item.rules, quantity, offset_ticks)
+        if item.quote_error:
+            raise ValueError(item.quote_error)
+        quote = (item.explicit_quote if item.explicit_quote is not None
+                 else build_two_sided_quote(item.book, item.rules, quantity, offset_ticks))
         if item.resting_quote is not None:
             target = quote
             quote = item.resting_quote
@@ -294,11 +301,16 @@ def _maker_tiebreak(candidate: RankedCandidate) -> tuple[bool, int]:
     return count is None, count if count is not None else 0
 
 
-def rank_market_candidates(items: list[RankInput], **kwargs: object) -> list[RankedCandidate]:
+def rank_market_candidates(
+    items: list[RankInput], *, zero_maker_depth_is_house: bool = False, **kwargs: object,
+) -> list[RankedCandidate]:
     """Keep market owners separate and share one competition model per pool.
 
 Unwatched contracts/events receive an explicit fixed prior, not zero competition
 or an invented sum of account counts. The estimate is not a payout lower bound.
+With ``zero_maker_depth_is_house`` (policy v9), visible depth on an event whose
+latest snapshot had zero qualifying makers is treated as non-qualifying house
+liquidity; the fixed unseen prior still applies.
 """
     groups: dict[str, list[RankInput]] = {}
     symbols: set[str] = set()
@@ -323,7 +335,8 @@ or an invented sum of account counts. The estimate is not a payout lower bound.
         # aggregate L2 cannot establish historical participation/qualification.
         unseen += 1
         pressure = sum(
-            (i.competition.weighted_depth for i in group if i.competition is not None),
+            (i.competition.weighted_depth for i in group if i.competition is not None
+             and not (zero_maker_depth_is_house and i.pool.qualifying_maker_count == 0)),
             Decimal("0"),
         ) + UNSEEN_CONTRACT_SCORE_PRIOR * unseen
         ranked.extend(rank_candidate(replace(
@@ -352,7 +365,7 @@ def select_sticky_markets(
     candidates: list[RankedCandidate], *, sticky_pool_ids: set[str],
     locked_pool_ids: set[str], permitted_symbols: set[str], maximum_active_pools: int,
     actionable: Callable[[RankedCandidate], bool], entry_time_valid: Callable[[str], bool],
-    reward_focus=None,
+    reward_focus=None, retain_incumbents: bool = False,
 ) -> tuple[list[RankedCandidate], set[str]]:
     """Legacy argument names, but all owner sets contain pool+symbol keys.
 
@@ -383,7 +396,9 @@ No independence/hedging discount is applied to correlated execution costs.
         return result
 
     # Remove only failed marginal economics, not a challenger with a better rank.
-    while selected:
+    # Policy v9 keeps actionable incumbents through the scoring window: a
+    # mid-window economics pause forfeits the 50% snapshot rule for that day.
+    while selected and not retain_incumbents:
         totals = scores()
         failing = [c for c in selected if marginal_reward_proxy(
             c, totals[c.pool_id] - c.own_daily_score_proxy,

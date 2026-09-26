@@ -1,4 +1,5 @@
 """Real pair/transport/guard/reducer flow with fake socket admission only."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import json
 from dataclasses import replace
 from decimal import Decimal as D

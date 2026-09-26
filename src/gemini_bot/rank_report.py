@@ -12,6 +12,7 @@ from .domain import Outcome, QuotePair, QuoteLeg, Side
 from .profitability import ProfitabilityEvidence, ProfitabilityTracker
 from .entry_quality import external_book
 from .competition import measure_competition
+from .shield import shielded_quote
 from .reward_ranking import (
     RANKING_VERSION,
     RankInput,
@@ -41,7 +42,12 @@ def rank_live_universe(
     pool_competition_scores: dict[str, Decimal] | None = None,
     evaluate_working_quotes: bool = False,
     symbol_offsets: dict[str, int] | None = None,
+    shield_requirements: dict[str, dict[Outcome, Decimal]] | None = None,
+    shield_distance: Decimal | None = None,
 ) -> list[RankedCandidate]:
+    """``shield_requirements`` (policy v9) builds depth-shielded targets from the
+    full own-adjusted book; resting orders are then governed by shield advice,
+    not by the offset-target retention boundary."""
     inputs: list[RankInput] = []
     progress = uptime or {}
     pool_events: dict[str, set[str]] = {}
@@ -66,8 +72,18 @@ def rank_live_universe(
                 top.symbol, top.bid, top.bid_size, top.ask, top.ask_size,
                 top.update_id, verified_at,
             )
+        explicit_quote = None
+        quote_error = ""
+        if shield_requirements is not None:
+            try:
+                explicit_quote = shielded_quote(
+                    book, contract.rules, quantity,
+                    shield_requirements[contract.rules.symbol], shield_distance,
+                )
+            except (KeyError, ValueError):
+                quote_error = "insufficient_shield"
         resting = (resting_quotes or {}).get(contract.rules.symbol)
-        if resting is None and evaluate_working_quotes and account is not None:
+        if resting is None and evaluate_working_quotes and account is not None and shield_requirements is None:
             working = [o for o in account.orders.values() if o.symbol == contract.rules.symbol
                        and o.working and o.side is Side.BUY]
             if (len(working) == 2 and {o.outcome for o in working} == {Outcome.YES, Outcome.NO}
@@ -85,7 +101,9 @@ def rank_live_universe(
         evidence = ProfitabilityEvidence()
         if profitability is not None:
             try:
-                quote = resting or build_two_sided_quote(top, contract.rules, quantity, contract_offset)
+                quote = resting or explicit_quote or (
+                    None if quote_error else
+                    build_two_sided_quote(top, contract.rules, quantity, contract_offset))
             except ValueError:
                 quote = None
             if quote is not None:
@@ -131,9 +149,12 @@ def rank_live_universe(
             ),
             event_contract_count=contract.event_contract_count,
             quote_offset_ticks=contract_offset,
+            explicit_quote=explicit_quote,
+            quote_error=quote_error,
         ))
     candidates = rank_market_candidates(
         inputs,
+        zero_maker_depth_is_house=shield_requirements is not None,
         quantity=quantity,
         offset_ticks=offset_ticks,
         now=now,

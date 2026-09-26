@@ -1,4 +1,5 @@
 """Live-path regressions. All account/transport I/O is synthetic and offline."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import asyncio
 import json
 import time

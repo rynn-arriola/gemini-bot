@@ -1,4 +1,5 @@
 """All-selected lifecycle/full-width execution; synthetic I/O, no live defaults."""
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import asyncio
 import json
 import tempfile

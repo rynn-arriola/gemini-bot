@@ -1,5 +1,6 @@
 """Entry-quality safety is offline-tested; no venue mutations are made."""
 
+import policy_v8  # noqa: F401  (pins the v8-era default policy)
 import json
 import tempfile
 import unittest
