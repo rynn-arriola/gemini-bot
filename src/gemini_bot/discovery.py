@@ -144,6 +144,9 @@ class RewardUniverseLoader:
     prefer_uncontested: bool = False
     day_boundary_hour: int = 0
     allow_sports_futures: bool = False
+    # Keep one many-outcome event (e.g. a 50-player award) from filling every
+    # watched slot; incumbents are always kept.
+    max_contracts_per_event: int | None = None
     missing_events: set[str] = field(default_factory=set, init=False)
 
     def _excluded(self, *categories: object) -> bool:
@@ -190,12 +193,16 @@ class RewardUniverseLoader:
             rows = [r for r in rewards if reward_pool_key(r) == pool_id
                     and Decimal(str(r.get("daily_pool_usd", "0"))) > 0]
             if self.prefer_uncontested:
-                # Fewest qualifying makers first (zero included), then the
-                # longest remaining reward life for a full scoring window.
+                # Fewest qualifying makers first (zero included). Then near-term
+                # events before season-long ones: a Sept 25 census found half of
+                # College Football game books deep enough for the shield, but
+                # only 4 of 62 futures books.
+                horizon = (now or datetime.now().astimezone()).timestamp() + 7 * 86400
                 rows.sort(key=lambda r: (
                     not any(str(r.get("event_ticker", "")).upper() == p[0] for p in preferred_pairs),
                     max(0, int(r.get("qualifying_maker_count") or 0)),
-                    -_ends_at_seconds(r),
+                    _ends_at_seconds(r) > horizon,
+                    _ends_at_seconds(r),
                     str(r.get("event_ticker", "")),
                 ))
             else:
@@ -324,5 +331,9 @@ class RewardUniverseLoader:
                         continue
             # Headlines screen new candidates only; live sequenced books and
             # normal safety gates still decide admission/retention.
+            if (not is_incumbent and self.max_contracts_per_event is not None
+                    and sum(1 for r in result if (ticker, r.rules.symbol) not in preferred)
+                    >= self.max_contracts_per_event):
+                continue
             result.append(item)
         return result

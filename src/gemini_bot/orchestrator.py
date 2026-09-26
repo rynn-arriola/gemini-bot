@@ -861,10 +861,11 @@ class ProductionOrchestrator:
         )
         if self._shielded():
             loader.excluded_categories = self.config.strategy.excluded_categories
-            loader.per_pool_reads = 24
+            loader.per_pool_reads = 48
             loader.prefer_uncontested = True
             loader.day_boundary_hour = self._scoring_boundary_hour()
             loader.allow_sports_futures = True
+            loader.max_contracts_per_event = 2
         return loader
 
     def _crypto_entry_cutoff_seconds(self) -> int:
