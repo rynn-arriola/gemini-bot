@@ -883,6 +883,7 @@ class ProductionOrchestrator:
             loader.allow_sports_futures = True
             loader.max_contracts_per_event = 2
             loader.worst_case_denominator = True
+            loader.trust_start_time = True
         return loader
 
     def _crypto_entry_cutoff_seconds(self) -> int:
@@ -904,6 +905,7 @@ class ProductionOrchestrator:
             day_boundary_hour=self._scoring_boundary_hour(),
             allow_sports_futures=self._shielded(),
             worst_case_denominator=self._shielded(),
+            trust_start_time=self._shielded(),
         )
         self.ranked = self._rank_live_universe(
             self.universe, self.public.books, now=now,
@@ -2489,6 +2491,7 @@ class ProductionOrchestrator:
                 day_boundary_hour=self._scoring_boundary_hour(),
                 allow_sports_futures=self._shielded(),
                 worst_case_denominator=self._shielded(),
+                trust_start_time=self._shielded(),
             )
             self.ranked = self._rank_live_universe(
                 self.universe, self.public.books, now=now,
@@ -2816,7 +2819,7 @@ class ProductionOrchestrator:
         metadata = next((item for item in self.universe if item.rules.symbol == symbol), None)
         if metadata is not None and metadata.event_category.casefold() == "sports":
             if not (self._shielded() and sports_future(metadata, _utc_now())) and (
-                    metadata.event_is_live or not metadata.event_starts_at):
+                    (metadata.event_is_live and not self._shielded()) or not metadata.event_starts_at):
                 return False
         expiry = self._expiry.get(symbol)
         if expiry is None:
@@ -4380,7 +4383,7 @@ class ProductionOrchestrator:
                         chosen.event_category.casefold() == "sports"
                         and not (self._shielded() and sports_future(chosen, now))
                         and (
-                            chosen.event_is_live
+                            (chosen.event_is_live and not self._shielded())
                             or not chosen.event_starts_at
                             or (
                                 chosen.event_starts_at
@@ -4427,6 +4430,7 @@ class ProductionOrchestrator:
             day_boundary_hour=self._scoring_boundary_hour(),
             allow_sports_futures=self._shielded(),
             worst_case_denominator=self._shielded(),
+            trust_start_time=self._shielded(),
         )
         self.log.event(logging.INFO, "reward_metadata_refreshed", tracked_symbols=len(self.universe),
                        usable_permitted_symbol=usable_permitted_symbol)
@@ -4807,6 +4811,7 @@ class ProductionOrchestrator:
                             day_boundary_hour=self._scoring_boundary_hour(),
                             allow_sports_futures=self._shielded(),
                             worst_case_denominator=self._shielded(),
+                            trust_start_time=self._shielded(),
                         )
                         self.journal.set_runtime_state(
                             "profitability_telemetry_v1",

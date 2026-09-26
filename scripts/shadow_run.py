@@ -156,6 +156,7 @@ class Shadow:
         loader.allow_sports_futures = True
         loader.max_contracts_per_event = 2
         loader.worst_case_denominator = True
+        loader.trust_start_time = True
         preferred = {f"{m.pool}\x1e{s}": (m.event, s) for s, m in self.markets.items()}
         held = {s for s in self.markets}
         self.universe = await loader.load(maximum_pools=self.risk.max_tracked_markets, preferred=preferred,
@@ -188,7 +189,8 @@ class Shadow:
                                                     ignore_trade_start=True)
             if end <= start:
                 continue
-            cut = quote_cutoff(c, end, crypto_entry_before_expiry_seconds=900, allow_sports_futures=True)
+            cut = quote_cutoff(c, end, crypto_entry_before_expiry_seconds=900, allow_sports_futures=True,
+                            trust_start_time=True)
             trade = (datetime.fromisoformat(c.trade_starts_at.replace("Z", "+00:00"))
                      if c.trade_starts_at else start)
             total = max(1, int((end - start).total_seconds() // 60))
@@ -206,7 +208,8 @@ class Shadow:
             return False
         _, end, _ = estimated_reward_window(contract, now, day_boundary_hour=self.ledger.scoring_day_boundary_hour,
                                             ignore_trade_start=True)
-        return now < quote_cutoff(contract, end, crypto_entry_before_expiry_seconds=900, allow_sports_futures=True)
+        return now < quote_cutoff(contract, end, crypto_entry_before_expiry_seconds=900, allow_sports_futures=True,
+                            trust_start_time=True)
 
     def detect_fills(self, now: datetime, books: dict) -> None:
         for symbol, market in list(self.markets.items()):

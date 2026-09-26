@@ -123,6 +123,7 @@ def quote_cutoff(
     contract: RewardedContract, venue_end: datetime, *,
     exit_before_expiry_seconds: int = 300, sports_exit_before_start_seconds: int = 1200,
     crypto_entry_before_expiry_seconds: int = 300, allow_sports_futures: bool = False,
+    trust_start_time: bool = False,
 ) -> datetime:
     """Last local quote opportunity; not evidence that venue scoring ends."""
     ends = [venue_end]
@@ -136,7 +137,9 @@ def quote_cutoff(
         return min(ends)
     if contract.event_category.casefold() == "sports":
         start = _parse_optional_timestamp(contract.event_starts_at)
-        if start is None or contract.event_is_live:
+        # Gemini sets isLive on game day hours before kickoff, so policy v9
+        # trusts the published startTime; an unknown start stays unquotable.
+        if start is None or (contract.event_is_live and not trust_start_time):
             # No safe sports admission when the start deadline is unknown.
             return datetime.min.replace(tzinfo=timezone.utc)
         ends.append(start - timedelta(seconds=sports_exit_before_start_seconds))
@@ -186,6 +189,7 @@ def sample_and_load_progress(
     day_boundary_hour: int = 0,
     allow_sports_futures: bool = False,
     worst_case_denominator: bool = False,
+    trust_start_time: bool = False,
 ) -> dict[str, UptimeProgress]:
     if now.tzinfo is None:
         raise ValueError("uptime sample time must be timezone-aware")
@@ -221,6 +225,7 @@ def sample_and_load_progress(
             sports_exit_before_start_seconds=sports_exit_before_start_seconds,
             crypto_entry_before_expiry_seconds=crypto_entry_before_expiry_seconds,
             allow_sports_futures=allow_sports_futures,
+            trust_start_time=trust_start_time,
         ) for c, w in valid}
         cutoff = max(cutoffs.values())
         if start <= now < end:

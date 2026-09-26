@@ -1,5 +1,11 @@
 # Bug fixes
 
+## September 26 — game-day `isLive` blocked every College Football game market
+
+The v9 paper run found that Gemini sets the undocumented event field `isLive` to true on game day, hours before kickoff. For example, a noon game and an 11 pm game both showed `isLive: true` at 9 am. Discovery, `quote_cutoff`, `_entry_time_valid` and the reward-metadata refresh treated `isLive` as "in play", so every game market was dropped on game day. That explains the paper run's 22 → 2 market drop at about 3 am.
+
+Under policy v9 the bot now trusts the published `startTime`: entries stop 20 minutes before kickoff, and a game with no start time stays blocked. Legacy policies keep the old rule. Covered by `tests/test_policy_v9.py`.
+
 ## September 25 — both legs of a pair filling was booked as two purchases
 
 Symbol positions are signed and net. Buying the opposite outcome against held inventory returns the paired $1 collateral, but `fill_cash_delta` credited that only for an EXIT BUY YES. An ENTRY fill on the second leg of a pair was booked as a full purchase debit. Expected cash would then sit about $1 per contract below the venue balance, which halts the bot within 10 seconds. Any later adoption would book about −$29.40 of realized loss for a 30-lot pair that actually earned its spread, putting the $30 HARD stop within cents. The fill also wrote a stale inventory deadline under the new outcome.

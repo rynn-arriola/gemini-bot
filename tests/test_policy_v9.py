@@ -374,6 +374,21 @@ class SportsFutureTests(unittest.TestCase):
                          NOW + timedelta(hours=5) - timedelta(seconds=1200))
 
 
+class GameDayIsLiveTests(unittest.TestCase):
+    """Gemini sets isLive on game day hours before kickoff."""
+
+    def test_v9_trusts_start_time_while_legacy_blocks(self):
+        from gemini_bot.uptime import quote_cutoff
+        kickoff = NOW + timedelta(hours=10)
+        game = replace(repair_contract(), event_category="Sports", event_is_live=True,
+                       event_starts_at=kickoff.isoformat(), expiry=(kickoff + timedelta(days=1)).isoformat())
+        end = NOW + timedelta(hours=20)
+        self.assertEqual(quote_cutoff(game, end).year, 1)
+        self.assertEqual(quote_cutoff(game, end, trust_start_time=True), kickoff - timedelta(seconds=1200))
+        unknown = replace(game, event_starts_at="")
+        self.assertEqual(quote_cutoff(unknown, end, trust_start_time=True).year, 1)
+
+
 class V9RankingTests(unittest.TestCase):
     def item(self, makers, depth):
         return RankInput(
@@ -555,6 +570,15 @@ class ShieldedExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.thin_yes_book(seq=3)
         candidate = replace(self.candidate(), quote=None, reasons=("insufficient_shield",))
         self.assertFalse(self.r._candidate_actionable(candidate))
+
+    async def test_game_day_islive_market_is_quotable_until_kickoff_cutoff(self):
+        kickoff = NOW + timedelta(hours=6)
+        self.r.universe = [replace(self.r.universe[0], event_category="Sports", event_is_live=True,
+                                   event_starts_at=kickoff.isoformat())]
+        self.r._sports_start["X"] = kickoff
+        self.assertTrue(self.r._entry_time_valid("X"))
+        self.r._sports_start["X"] = NOW + timedelta(minutes=10)
+        self.assertFalse(self.r._entry_time_valid("X"))
 
     async def test_rank_report_exposes_ledger_status(self):
         row = self.r._uptime_ledger_row("E", "pool", None, NOW)

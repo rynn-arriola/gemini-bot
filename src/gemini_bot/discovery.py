@@ -148,6 +148,7 @@ class RewardUniverseLoader:
     # watched slot; incumbents are always kept.
     max_contracts_per_event: int | None = None
     worst_case_denominator: bool = False
+    trust_start_time: bool = False
     missing_events: set[str] = field(default_factory=set, init=False)
 
     def _excluded(self, *categories: object) -> bool:
@@ -303,7 +304,8 @@ class RewardUniverseLoader:
         event = event_response.get("event", event_response)
         if not isinstance(event, dict):
             return []
-        if str(event.get("category", reward.get("category", ""))).casefold() == "sports" and bool(event.get("isLive")):
+        if (str(event.get("category", reward.get("category", ""))).casefold() == "sports" and bool(event.get("isLive"))
+                and not (self.trust_start_time and event.get("startTime"))):
             return []
         if (self.excluded_categories and self._excluded(event.get("category"))
                 and not any(pair[0] == ticker for pair in preferred)):
@@ -334,6 +336,7 @@ class RewardUniverseLoader:
                 if end <= start or now < start or now >= quote_cutoff(
                     item, end, crypto_entry_before_expiry_seconds=self.crypto_entry_before_expiry_seconds,
                     allow_sports_futures=self.allow_sports_futures,
+                    trust_start_time=self.trust_start_time,
                 ):
                     continue
             is_incumbent = (ticker, item.rules.symbol) in preferred
