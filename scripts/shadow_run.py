@@ -119,9 +119,9 @@ class Shadow:
         # Like the bot's sticky owners: a held market survives 10 minutes of
         # continuous trouble before release (LOST/timing release at once).
         self.fail_since: dict[str, datetime] = {}
-        self.load_state()
         self.totals = {"fills": 0, "trading_pnl": D(0), "repositions": 0, "anchors_placed": 0,
                        "pairs_placed": 0, "minutes": 0, "errors": 0}
+        self.load_state()
 
     def load_state(self) -> None:
         path = self.dir / "state.json"
