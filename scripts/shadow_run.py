@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -22,11 +23,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D, ROUND_CEILING
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from gemini_bot.account_state import AccountReducer  # noqa: E402
+from gemini_bot.competition import distance_weight  # noqa: E402
 from gemini_bot.config import load_policy  # noqa: E402
 from gemini_bot.discovery import RewardUniverseLoader  # noqa: E402
 from gemini_bot.domain import Outcome, UptimeProgress, uptime_progress_key  # noqa: E402
@@ -38,6 +41,7 @@ from gemini_bot.uptime import eastern_day_window, estimated_reward_window, quote
 from gemini_bot.uptime_ledger import UptimeStatus, admission_allowed, classify  # noqa: E402
 
 API = "https://api.gemini.com"
+ET = ZoneInfo("America/New_York")
 UPTIME_PROXY = "50% uptime is no longer reachable in the estimated window"
 ECONOMICS = "non-positive conservative net-profit estimate"
 
@@ -119,6 +123,10 @@ class Shadow:
         # Like the bot's sticky owners: a held market survives 10 minutes of
         # continuous trouble before release (LOST/timing release at once).
         self.fail_since: dict[str, datetime] = {}
+        self.fill_cooldown: dict[str, datetime] = {}  # event -> until
+        self.swept: dict[str, datetime] = {}  # symbol -> last sweep-like depletion
+        self.prev_tops: dict[str, dict] = {}
+        self.exit_log: list[tuple[datetime, D]] = []
         self.totals = {"fills": 0, "trading_pnl": D(0), "repositions": 0, "anchors_placed": 0,
                        "pairs_placed": 0, "minutes": 0, "errors": 0}
         self.load_state()
@@ -128,16 +136,24 @@ class Shadow:
         if not path.exists():
             return
         raw = json.loads(path.read_text(encoding="utf-8"))
-        self.uptime = {tuple(k.split("|", 1)): {"counted": v["counted"], "pool": D(v["pool"])}
+        self.uptime = {tuple(k.split("|", 1)): {"counted": v["counted"], "pool": D(v["pool"]),
+                                                "score": float(v.get("score", 0))}
                        for k, v in raw.get("uptime", {}).items()}
         for key in ("fills", "repositions", "anchors_placed", "pairs_placed", "minutes", "errors"):
             self.totals[key] = raw.get("totals", {}).get(key, 0)
         self.totals["trading_pnl"] = D(raw.get("totals", {}).get("trading_pnl", "0"))
+        self.fill_cooldown = {k: datetime.fromisoformat(v) for k, v in raw.get("fill_cooldown", {}).items()}
+        self.swept = {k: datetime.fromisoformat(v) for k, v in raw.get("swept", {}).items()}
+        self.exit_log = [(datetime.fromisoformat(a), D(b)) for a, b in raw.get("exit_log", [])]
 
     def save_state(self) -> None:
-        state = {"uptime": {f"{k[0]}|{k[1]}": {"counted": v["counted"], "pool": str(v["pool"])}
+        state = {"uptime": {f"{k[0]}|{k[1]}": {"counted": v["counted"], "pool": str(v["pool"]),
+                                               "score": round(v.get("score", 0.0), 3)}
                             for k, v in self.uptime.items()},
-                 "totals": {k: str(v) if isinstance(v, D) else v for k, v in self.totals.items()}}
+                 "totals": {k: str(v) if isinstance(v, D) else v for k, v in self.totals.items()},
+                 "fill_cooldown": {k: v.isoformat() for k, v in self.fill_cooldown.items()},
+                 "swept": {k: v.isoformat() for k, v in self.swept.items()},
+                 "exit_log": [(a.isoformat(), str(b)) for a, b in self.exit_log[-200:]]}
         (self.dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
     def action(self, now: datetime, symbol: str, kind: str, **fields) -> None:
@@ -239,6 +255,7 @@ class Shadow:
                 self.exits.append({**row, "exit_at": now + timedelta(minutes=5)})
                 market.orders.clear()
                 self.blocked[symbol] = now + timedelta(minutes=6)
+                self.fill_cooldown[market.event] = now + timedelta(hours=24)
 
     def settle_exits(self, now: datetime, books: dict) -> None:
         remaining = []
@@ -255,26 +272,69 @@ class Shadow:
                 exit_price = min(book.asks)  # BUY YES closes NO: credit 1 - ask
                 pnl = ((1 - exit_price) - p) * q - taker_fee(q, exit_price)
             self.totals["trading_pnl"] += pnl
+            self.exit_log.append((now, pnl))
             self.write("exits.jsonl", {"at": now, "symbol": fill["symbol"], "entry": p,
                                        "exit_yes_price": exit_price, "pnl": pnl})
         self.exits = remaining
 
     def count_uptime(self, now: datetime, books: dict) -> None:
+        """Per-event qualifying minutes and a Gemini-style score proxy.
+
+        Score per snapshot = quadratic distance weight x size (max 250) x 1.5
+        when both sides qualify (Gemini's published shape; exact curve and
+        size aggregation are not published).
+        """
         window_start, _ = eastern_day_window(now, self.ledger.scoring_day_boundary_hour)
         seen = set()
         for c in self.universe:
             key = (c.event_ticker, window_start.isoformat())
-            entry = self.uptime.setdefault(key, {"counted": 0, "pool": c.pool.daily_budget_usd})
-            if key in seen:
-                continue
+            entry = self.uptime.setdefault(key, {"counted": 0, "pool": c.pool.daily_budget_usd, "score": 0.0})
             market = self.markets.get(c.rules.symbol)
             book = books.get(c.rules.symbol)
             if market is None or book is None or book.top() is None:
                 continue
             mids = {Outcome.YES: book.top().midpoint, Outcome.NO: 1 - book.top().midpoint}
-            if any(o.quantity >= 10 and 0 <= mids[o.outcome] - o.price <= D(".10") for o in market.orders.values()):
+            qualifying = [o for o in market.orders.values()
+                          if o.quantity >= 10 and 0 <= mids[o.outcome] - o.price <= D(".10")]
+            if not qualifying:
+                continue
+            score = sum(float(distance_weight(mids[o.outcome] - o.price, D(".01")) * min(o.quantity, D(250)))
+                        for o in qualifying)
+            if {o.outcome for o in qualifying} == {Outcome.YES, Outcome.NO}:
+                score *= 1.5
+            entry["score"] = entry.get("score", 0.0) + score
+            if key not in seen:
                 entry["counted"] += 1
                 seen.add(key)
+
+    def detect_sweeps(self, now: datetime, books: dict) -> None:
+        """Book-based sweep proxy: >=150 contracts gone at/above the old best
+        while the best price fell (cannot separate trades from cancels)."""
+        for symbol, book in books.items():
+            if book.top() is None:
+                continue
+            previous = self.prev_tops.get(symbol, {})
+            current = {}
+            for outcome in Outcome:
+                levels = outcome_levels(book, outcome)
+                if not levels:
+                    continue
+                best = levels[0][0]
+                current[outcome] = (best, volume_at_or_better(book, outcome, best))
+                if outcome in previous:
+                    old_best, old_volume = previous[outcome]
+                    if best < old_best and old_volume - volume_at_or_better(book, outcome, old_best) >= 150:
+                        self.swept[symbol] = now
+                        self.write("sweeps.jsonl", {"at": now, "symbol": symbol, "outcome": outcome.value,
+                                                    "from": old_best, "to": best, "removed": old_volume})
+            self.prev_tops[symbol] = current
+
+    def window_loss(self, now: datetime) -> D:
+        """Realized virtual loss in the current six-hour ET risk window."""
+        local = now.astimezone(ET)
+        start = local.replace(hour=(local.hour // 6) * 6, minute=0, second=0, microsecond=0)
+        realized = sum((pnl for at, pnl in self.exit_log if at.astimezone(ET) >= start), D(0))
+        return max(D(0), -realized)
 
     def reserved(self) -> D:
         return sum((o.price * o.quantity for m in self.markets.values() for o in m.orders.values()), D(0))
@@ -425,7 +485,12 @@ class Shadow:
         windows = {}
         for (event, start), entry in self.uptime.items():
             windows.setdefault(start, {})[event] = entry["counted"]
+        current = [v for (e, st), v in self.uptime.items() if st == window_start.isoformat()]
         return {"updated_at": now, "ends_at": self.end, "window_start": window_start,
+                "mode": type(self).__name__,
+                "score_units_current_window": round(sum(v.get("score", 0.0) for v in current), 1),
+                "events_with_coverage_current_window": sum(1 for v in current if v["counted"] > 0),
+                "window_realized_loss": self.window_loss(now),
                 "virtual_capital_usd": self.risk.max_gross_reservation_usd,
                 "behaviour_only_ignores_50_percent_gate": self.ignore_admission,
                 "watched": len(self.universe), **info, "held_markets": len(self.markets),
@@ -443,7 +508,7 @@ class Shadow:
             total = 1440
             ratio = entry["counted"] / total
             rows.append({"event": event, "counted": entry["counted"], "ratio": round(ratio, 3),
-                         "qualified": ratio >= 0.5})
+                         "qualified": ratio >= 0.5, "score_units": round(entry.get("score", 0.0), 1)})
         reward = D(0)
         for market in self.markets.values():
             share, pool = self.shares.get(market.symbol, (D(0), D(0)))
@@ -451,6 +516,8 @@ class Shadow:
                 reward += share * pool
         self.write("windows.jsonl", {"window_start": start, "events": rows,
                                      "qualified_events": sum(r["qualified"] for r in rows),
+                                     "qualified_score_units": round(sum(r["score_units"] for r in rows
+                                                                        if r["qualified"]), 1),
                                      "rough_reward_estimate_usd": reward.quantize(D("0.01"))})
 
     async def run(self) -> None:
@@ -468,6 +535,7 @@ class Shadow:
                     await self.refresh_universe(now)
                 books = self.books(now)
                 self.detect_fills(now, books)
+                self.detect_sweeps(now, books)
                 self.settle_exits(now, books)
                 info = self.manage(now, books)
                 self.count_uptime(now, books)
@@ -484,6 +552,194 @@ class Shadow:
             await asyncio.sleep(max(1, 60 - (time.monotonic() - started)))
 
 
+# Game symbols: GEMI-NCAAF-2609270230-AF-NEV-M-AF (M winner, S spread, T total).
+GAME_SYMBOL = re.compile(r"^GEMI-(?:NCAAF|NFL)-\d+-[A-Z0-9]+-[A-Z0-9]+-([A-Z])-")
+
+
+class LayeredShadow(Shadow):
+    """Two layers tuned to Gemini's rewards.
+
+    Layer 1 (eligibility): every admissible event keeps a 10-contract anchor
+    per side where >= 1,000 external contracts rest ahead within 8 cents, so
+    its 50% clock runs at almost no fill risk. Layer 2 (score): 25/leg pairs
+    near the midpoint only where safe: game-winner (or non-game) markets, no
+    fill in the event for 24 h, no sweep-like depletion in 60 min, both legs
+    at most 80 cents. Filters and loss step-downs only move a market between
+    layers; they never abandon it, so its 50% count keeps running.
+    """
+
+    def score_allowed(self, contract, cand, book, now: datetime) -> tuple[bool, str]:
+        match = GAME_SYMBOL.match(contract.rules.symbol)
+        if match and match.group(1) != "M":
+            return False, "not_winner_market"
+        if now < self.fill_cooldown.get(contract.event_ticker, now):
+            return False, "fill_cooldown"
+        swept = self.swept.get(contract.rules.symbol)
+        if swept is not None and now - swept < timedelta(minutes=60):
+            return False, "recent_sweep"
+        if max(cand.quote.yes.price, cand.quote.no.price) > D("0.80"):
+            return False, "price_above_80c"
+        quality = evaluate_entry_quality(book, cand.quote, self.strategy.entry_quality)
+        if not quality.allowed:
+            return False, "entry_quality"
+        return True, ""
+
+    def anchor_targets(self, contract, book) -> dict:
+        anchor = self.strategy.anchor
+        mids = {Outcome.YES: book.top().midpoint, Outcome.NO: 1 - book.top().midpoint}
+        targets = {}
+        for outcome in Outcome:
+            price = shielded_price(outcome_levels(book, outcome), midpoint=mids[outcome],
+                                   tick=contract.rules.tick_size, required=anchor.entry_contracts,
+                                   max_distance=anchor.max_midpoint_distance)
+            if price is not None:
+                targets[outcome] = price
+        return targets
+
+    def manage(self, now: datetime, books: dict) -> dict:
+        progress = self.progress(now)
+        shield, anchor = self.strategy.shield, self.strategy.anchor
+        loss = self.window_loss(now)
+        if loss >= self.risk.risk_window_loss_usd:
+            for symbol in list(self.markets):  # HARD: like the bot, no orders at all.
+                self.markets.pop(symbol)
+                self.action(now, symbol, "hard_stop")
+            return {"eligible_pairs": 0, "anchor_capable": 0, "pairs_now": 0, "anchor_markets": 0}
+        requirements = {c.rules.symbol: {o: entry_required(shield) for o in Outcome} for c in self.universe}
+        ranked = rank_live_universe(self.universe, books, now=now, quantity=self.strategy.quote_quantity,
+                                    offset_ticks=0, uptime=progress, account=AccountReducer(),
+                                    shield_requirements=requirements, shield_distance=shield.max_midpoint_distance,
+                                    allow_uptime_override=True)
+        cand_by = {c.symbol: c for c in ranked}
+        events: dict[str, list] = {}
+        for c in self.universe:
+            events.setdefault(c.event_ticker, []).append(c)
+        held_by_event = {m.event: s for s, m in self.markets.items()}
+        plans, why = [], {}
+        for event, contracts in events.items():
+            state = classify(progress.get(uptime_progress_key(event, contracts[0].pool.pool_id)), self.ledger)
+            held = held_by_event.get(event)
+            if state.status is UptimeStatus.LOST and not self.ignore_admission:
+                if held:
+                    why[held] = "lost"
+                continue
+            if held is None and not self.ignore_admission and not admission_allowed(state, self.ledger):
+                continue
+            best = None
+            for c in contracts:
+                symbol = c.rules.symbol
+                if held is not None and symbol != held:
+                    continue
+                book = books.get(symbol)
+                if book is None or book.top() is None:
+                    continue
+                if not self.entry_time_valid(c, now):
+                    why[symbol] = "entry_time"
+                    continue
+                if now < self.blocked.get(symbol, now):
+                    why[symbol] = "fill_block"
+                    continue
+                cand = cand_by.get(symbol)
+                pair_ok, reason = False, "no_pair_quote"
+                tolerated = {UPTIME_PROXY} | ({ECONOMICS} if held else set())
+                if cand is not None and cand.quote is not None and set(cand.reasons) <= tolerated:
+                    pair_ok, reason = self.score_allowed(c, cand, book, now)
+                targets = self.anchor_targets(c, book)
+                if not pair_ok and not targets:
+                    why[symbol] = reason + "+no_anchor_depth"
+                    continue
+                option = (pair_ok, float(cand.priority_score) if cand else 0.0, symbol, cand, targets, c, reason)
+                if best is None or option[:2] > best[:2]:
+                    best = option
+            if best is not None:
+                plans.append((held is not None,) + best)
+        planned = {p[3] for p in plans}
+        grace = set()
+        for symbol in list(self.markets):
+            if symbol in planned:
+                self.fail_since.pop(symbol, None)
+                continue
+            reason = why.get(symbol, "not_in_universe_or_book")
+            first = self.fail_since.setdefault(symbol, now)
+            if reason in {"lost", "entry_time", "fill_block"} or now - first >= timedelta(minutes=10):
+                self.markets.pop(symbol)
+                self.fail_since.pop(symbol, None)
+                self.write("drops.jsonl", {"at": now, "symbol": symbol, "reason": reason})
+            else:
+                if first == now:
+                    self.action(now, symbol, "grace_start", reason=reason)
+                grace.add(symbol)
+        capital = sum((o.price * o.quantity for s in grace for o in self.markets[s].orders.values()), D(0))
+        plans.sort(key=lambda p: (not p[0], not p[1], -p[2]))
+        selected = []
+        for plan in plans:
+            if len(selected) + len(grace) >= self.risk.max_two_sided_quotes:
+                break
+            anchor_cost = sum(price * anchor.quantity for price in plan[5].values())
+            if not plan[5] and plan[1]:
+                anchor_cost = plan[4].quote.total_reservation_proxy_usd  # pair-only market
+            if capital + anchor_cost > self.risk.max_gross_reservation_usd:
+                continue
+            selected.append((plan, anchor_cost))
+            capital += anchor_cost
+        steps = [(D(8), D(1)), (D(16), D("0.75")), (D(24), D("0.5")), (D(30), D("0.25"))]
+        fraction = next((f for limit, f in steps if loss < limit), D(0))
+        pair_budget = int(len(selected) * fraction)
+        pairs = anchors_only = 0
+        for plan, anchor_cost in selected:
+            incumbent, pair_ok, _, symbol, cand, targets, contract, reason = plan
+            book = books[symbol]
+            market = self.markets.get(symbol) or self.markets.setdefault(
+                symbol, Market(symbol, contract.event_ticker, contract.pool.pool_id))
+            upgrade_cost = cand.quote.total_reservation_proxy_usd - anchor_cost if pair_ok else D(0)
+            if (pair_ok and pairs < pair_budget and capital + upgrade_cost <= self.risk.max_gross_reservation_usd
+                    and cand.quote.total_reservation_proxy_usd <= self.risk.max_market_exposure_usd):
+                capital += upgrade_cost
+                pairs += 1
+                self.shares[symbol] = (cand.estimated_score_share, cand.daily_pool_usd)
+                if any(o.anchor for o in market.orders.values()):
+                    market.orders.clear()
+                    self.action(now, symbol, "promote_to_pair")
+                self.maintain(market, book, cand, None, now, contract)
+            else:
+                anchors_only += 1
+                if not targets:
+                    continue
+                if pair_ok:
+                    reason = "loss_step_down_or_capital"
+                if any(not o.anchor for o in market.orders.values()):
+                    market.orders.clear()
+                    self.action(now, symbol, "demote_to_anchor", reason=reason)
+                self.maintain_anchor(market, book, targets, now)
+        return {"eligible_pairs": sum(1 for p in plans if p[1]), "anchor_capable": sum(1 for p in plans if p[5]),
+                "pairs_now": pairs, "anchor_markets": anchors_only, "in_grace": len(grace),
+                "pair_budget_fraction": fraction}
+
+    def maintain_anchor(self, market, book, targets: dict, now: datetime) -> None:
+        anchor = self.strategy.anchor
+        mids = {Outcome.YES: book.top().midpoint, Outcome.NO: 1 - book.top().midpoint}
+        for outcome in Outcome:
+            existing = market.orders.get(outcome)
+            if (existing is not None and existing.anchor and existing.ahead >= anchor.keep_contracts
+                    and 0 <= mids[outcome] - existing.price <= D(".10")):
+                continue
+            target = targets.get(outcome)
+            if target is None:
+                if existing is not None:
+                    market.orders.pop(outcome)
+                    self.action(now, market.symbol, "anchor_side_removed", outcome=outcome.value)
+                continue
+            market.orders[outcome] = VOrder(outcome, target, anchor.quantity,
+                                            volume_at_or_better(book, outcome, target), now, anchor=True)
+            if existing is None:
+                self.totals["anchors_placed"] += 1
+                self.action(now, market.symbol, "anchor", outcome=outcome.value, price=target)
+            else:
+                self.totals["repositions"] += 1
+                self.action(now, market.symbol, "anchor_reposition", outcome=outcome.value,
+                            old_price=existing.price, price=target, protection=existing.ahead)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=float, default=7)
@@ -491,10 +747,12 @@ def main() -> None:
     parser.add_argument("--gross-usd", type=D, default=None, help="virtual capital (paper only)")
     parser.add_argument("--until", type=datetime.fromisoformat, default=None, help="end time (ISO, overrides --days)")
     parser.add_argument("--ignore-admission", action="store_true", help="behaviour-only: skip 50%% gates")
+    parser.add_argument("--layered", action="store_true", help="two-layer anchor + score strategy")
     args = parser.parse_args()
     directory = args.directory if args.directory.is_absolute() else ROOT / args.directory
     end = args.until or datetime.now(timezone.utc) + timedelta(days=args.days)
-    asyncio.run(Shadow(directory, end, args.gross_usd, args.ignore_admission).run())
+    runner = LayeredShadow if args.layered else Shadow
+    asyncio.run(runner(directory, end, args.gross_usd, args.ignore_admission).run())
 
 
 if __name__ == "__main__":
