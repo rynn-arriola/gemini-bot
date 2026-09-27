@@ -145,6 +145,12 @@ class Shadow:
         self.fill_cooldown = {k: datetime.fromisoformat(v) for k, v in raw.get("fill_cooldown", {}).items()}
         self.swept = {k: datetime.fromisoformat(v) for k, v in raw.get("swept", {}).items()}
         self.exit_log = [(datetime.fromisoformat(a), D(b)) for a, b in raw.get("exit_log", [])]
+        self.blocked = {k: datetime.fromisoformat(v) for k, v in raw.get("blocked", {}).items()}
+        for symbol, m in raw.get("markets", {}).items():  # Held markets survive restarts.
+            self.markets[symbol] = Market(symbol, m["event"], m["pool"], {
+                Outcome(o["outcome"]): VOrder(Outcome(o["outcome"]), D(o["price"]), D(o["quantity"]), D(o["ahead"]),
+                                              datetime.fromisoformat(o["placed_at"]), o["anchor"])
+                for o in m["orders"]})
 
     def save_state(self) -> None:
         state = {"uptime": {f"{k[0]}|{k[1]}": {"counted": v["counted"], "pool": str(v["pool"]),
@@ -153,7 +159,12 @@ class Shadow:
                  "totals": {k: str(v) if isinstance(v, D) else v for k, v in self.totals.items()},
                  "fill_cooldown": {k: v.isoformat() for k, v in self.fill_cooldown.items()},
                  "swept": {k: v.isoformat() for k, v in self.swept.items()},
-                 "exit_log": [(a.isoformat(), str(b)) for a, b in self.exit_log[-200:]]}
+                 "exit_log": [(a.isoformat(), str(b)) for a, b in self.exit_log[-200:]],
+                 "blocked": {k: v.isoformat() for k, v in self.blocked.items()},
+                 "markets": {s: {"event": m.event, "pool": m.pool, "orders": [
+                     {"outcome": o.outcome.value, "price": str(o.price), "quantity": str(o.quantity),
+                      "ahead": str(o.ahead), "placed_at": o.placed_at.isoformat(), "anchor": o.anchor}
+                     for o in m.orders.values()]} for s, m in self.markets.items()}}
         (self.dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
     def action(self, now: datetime, symbol: str, kind: str, **fields) -> None:
